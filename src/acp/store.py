@@ -17,6 +17,30 @@ from acp.models import Task, TaskStatus
 _TASK_ID_RE = re.compile(r"^task_(\d{8})_(\d{4})$")
 
 
+def _highest_branch_seq(repo_path: Path, prefix: str) -> int:
+    """Highest sequence number among ``agent/<prefix*>`` branches in a repo.
+
+    Used to keep task ids unique across runs-roots that share a repo, so the
+    derived branch name ``agent/<task_id>`` can't collide. Returns 0 if none.
+    """
+    try:
+        from git import Repo
+
+        repo = Repo(str(repo_path))
+    except Exception:  # noqa: BLE001
+        return 0  # not a git repo or unreadable — caller will fail more usefully
+    # Branch names look like "agent/task_20260622_0001".
+    seq = 0
+    for head in repo.heads:
+        name = head.name
+        if name.startswith("agent/"):
+            tail = name[len("agent/"):]
+            m = _TASK_ID_RE.match(tail)
+            if m and tail.startswith(prefix) and int(m.group(2)) > seq:
+                seq = int(m.group(2))
+    return seq
+
+
 class TaskStore:
     """Creates and reads task run directories and task.json files.
 
@@ -33,8 +57,18 @@ class TaskStore:
     # IDs
     # ------------------------------------------------------------------ #
 
-    def next_task_id(self, *, now: datetime | None = None) -> str:
-        """Return the next task id for today, scanning existing run dirs."""
+    def next_task_id(
+        self,
+        *,
+        now: datetime | None = None,
+        repo_path: Path | None = None,
+    ) -> str:
+        """Return the next task id for today.
+
+        Scans existing run dirs for today's sequence number. If ``repo_path``
+        is given, also scans that repo's ``agent/task_*`` branches so two
+        runs-roots pointed at the same repo can't collide on a branch name.
+        """
         today = (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
         prefix = f"task_{today}_"
         seq = 0
@@ -43,6 +77,8 @@ class TaskStore:
                 m = _TASK_ID_RE.match(child.name)
                 if m and int(m.group(2)) > seq:
                     seq = int(m.group(2))
+        if repo_path is not None:
+            seq = max(seq, _highest_branch_seq(repo_path, prefix))
         return f"{prefix}{seq + 1:04d}"
 
     # ------------------------------------------------------------------ #

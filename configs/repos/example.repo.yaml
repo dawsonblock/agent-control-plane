@@ -9,11 +9,23 @@ repo:
   default_branch: main
 
 agent:
-  # M1 ships only `shell` (manual, human-in-the-loop).
-  # M2 adds `custom` (any CLI coding agent via command_template).
+  # Choose the agent that runs your task. Known kinds:
+  #   shell  — manual, human-in-the-loop (prints the prompt, opens a sub-shell)
+  #   custom — any CLI coding agent via command_template below
+  #
+  # Swap agents by changing `default` (and, for custom, command_template).
+  # The workflow code never changes — this is the M2 acceptance gate.
   default: shell
   timeout_seconds: 1800
   max_repair_attempts: 1
+  # Used only when default: custom. Placeholders (all optional):
+  #   {prompt_path}  {worktree_path}  {context_bundle_path}
+  #   {artifact_dir}  {timeout}
+  # Examples (uncomment and edit one):
+  #   command_template: "cat {prompt_path}"                          # trivial passthrough
+  #   command_template: "claude-code --prompt-file {prompt_path}"     # Claude Code CLI
+  #   command_template: "codex --prompt-file {prompt_path}"           # Codex CLI
+  #   command_template: "opencode run --prompt {prompt_path}"         # OpenCode
   command_template: ""
 
 commands:

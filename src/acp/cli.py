@@ -17,9 +17,9 @@ import typer
 from rich.console import Console
 
 from acp.agents.base import AgentProtocol, write_prompt
-from acp.agents.shell_agent import ShellAgent
+from acp.agents.registry import build_agent
 from acp.config import RepoConfig, load_repo_config
-from acp.errors import ACPError, AgentConfigError, RepoDirtyError, WorktreeError
+from acp.errors import ACPError, RepoDirtyError, WorktreeError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
@@ -40,20 +40,14 @@ console = Console()
 
 
 # --------------------------------------------------------------------------- #
-# Agent factory (M1 minimal; M2's registry.build_agent replaces this)
+# Agent factory — delegates to the registry (the single dispatch point).
+# M2 replaced M1's inline _build_agent; the EvidenceLoop now uses this by
+# default, and tests can inject a custom factory if needed.
 # --------------------------------------------------------------------------- #
 
 def _build_agent(config: RepoConfig) -> AgentProtocol:
-    """Pick an agent by config. M1 only knows `shell`; M2 adds `custom`."""
-    kind = config.agent.default.strip().lower()
-    if kind == "shell":
-        return ShellAgent()
-    # M2 will handle 'custom' (and others) via agents.registry.build_agent.
-    # Until then, anything but `shell` is a configuration error.
-    raise AgentConfigError(
-        f"agent.default='{kind}' is not supported in M1. "
-        f"Use 'shell' (M1) or wait for M2's 'custom' adapter."
-    )
+    """Build the agent the repo config selected, via the registry."""
+    return build_agent(config)
 
 
 # --------------------------------------------------------------------------- #
@@ -102,7 +96,9 @@ class EvidenceLoop:
         repo_path = cfg.repo.path
 
         # 1. Task id + run dir + initial event ------------------------------ #
-        task_id = self.store.next_task_id()
+        # Pass repo_path so the id (and thus the branch name) can't collide
+        # with an existing agent/task_* branch in this repo.
+        task_id = self.store.next_task_id(repo_path=repo_path)
         task = self.store.create(
             task_id=task_id,
             repo_name=cfg.repo.name,
