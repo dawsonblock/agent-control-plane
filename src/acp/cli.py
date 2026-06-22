@@ -355,16 +355,38 @@ def run(
         "--vault",
         help="Obsidian vault root (default: ./vault).",
     ),
+    legacy: bool = typer.Option(
+        False,
+        "--legacy",
+        help="Use the M1 linear EvidenceLoop instead of the M3 LangGraph workflow.",
+    ),
 ) -> None:
     """Run one coding task in an isolated worktree and write an evidence report."""
     cfg = load_repo_config(config)
     console.print(
         f"[bold]ACP run[/] · repo={cfg.repo.name} · "
-        f"agent={cfg.agent.default} · task={task!r}"
+        f"agent={cfg.agent.default} · engine={'legacy' if legacy else 'graph'} · "
+        f"task={task!r}"
     )
-    loop = EvidenceLoop(config=cfg, user_request=task, vault_root=vault)
     try:
-        loop.run()
+        if legacy:
+            loop = EvidenceLoop(config=cfg, user_request=task, vault_root=vault)
+            loop.run()
+        else:
+            from acp.graph.workflow import run_workflow
+            result = run_workflow(
+                config=cfg,
+                user_request=task,
+                runs_root="data/runs",
+                vault_root=vault,
+            )
+            console.print(f"[green]✓[/] report: {result.get('report_path', '—')}")
+            console.print(f"[green]✓[/] vault: {result.get('vault_note_path', '—')}")
+            console.print(
+                f"\n[dim]Task {result.get('task_id')} → "
+                f"{result.get('status', '?')}. Review the vault note and set "
+                f"approved: true to promote memory.[/]"
+            )
     except ACPError as exc:
         console.print(f"[red]✗[/] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc

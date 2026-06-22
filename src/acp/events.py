@@ -31,6 +31,21 @@ class EventWriter:
             # Resume counting after a restart / repair attempt.
             self._count = sum(1 for _ in self.path.open())
 
+    def relocate(self, task_id: str, run_dir: Path) -> None:
+        """Repoint this writer at a task's real run dir.
+
+        Used by the LangGraph entry node: the writer is constructed before
+        the task id is known (the id is minted inside ``create_task``), so
+        ``create_task`` calls ``relocate`` once it has the real id. Any
+        events written before relocation are re-pointed in memory; in
+        practice nothing is written before ``create_task`` runs.
+        """
+        self.task_id = task_id
+        self.run_dir = Path(run_dir)
+        self.path = self.run_dir / "events.jsonl"
+        if self.path.exists():
+            self._count = sum(1 for _ in self.path.open())
+
     def write(
         self, type: EventType, payload: dict[str, Any] | None = None
     ) -> Event:
