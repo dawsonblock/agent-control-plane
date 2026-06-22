@@ -41,6 +41,7 @@ class TaskStatus(str, Enum):
     REPORT_WRITTEN = "report_written"
     PASSED = "passed"
     FAILED = "failed"
+    NEEDS_REVIEW = "needs_review"
     APPROVED = "approved"
     ARCHIVED = "archived"
 
