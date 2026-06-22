@@ -16,10 +16,13 @@ keywords = ["agents", "control-plane", "langgraph", "evidence", "obsidian"]
 #   v0.2 langgraph, v0.3 haystack-ai, v0.4 graphiti-core[falkordb],
 #   v0.5 fastapi + uvicorn.
 dependencies = [
-    "typer>=0.12,<0.14",
+    # typer >=0.15 is required for click 8.4 compatibility
+    # (older typer calls Parameter.make_metavar() without the ctx arg that
+    # click 8.4 made mandatory, which breaks --help on every command).
+    "typer>=0.15,<1",
     "pydantic>=2.7,<3",
     "pyyaml>=6.0,<7",
-    "rich>=13.7,<14",
+    "rich>=13.7,<16",
     "gitpython>=3.1,<4",
 ]
 
