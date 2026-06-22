@@ -9,6 +9,7 @@ of this file with lifecycle frontmatter prepended.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from acp.gitops.diff import DiffCapture
 from acp.models import AgentResult, CommandResult, ReviewResult, Task
@@ -23,6 +24,7 @@ def write_report(
     diff: DiffCapture,
     artifact_dir: Path,
     agent_result: AgentResult | None = None,
+    repair_history: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Render final_report.md into ``artifact_dir`` and return its path."""
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -32,6 +34,7 @@ def write_report(
         review=review,
         diff=diff,
         agent_result=agent_result,
+        repair_history=repair_history,
     )
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)

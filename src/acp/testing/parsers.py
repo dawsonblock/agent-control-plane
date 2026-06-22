@@ -1,12 +1,9 @@
-"""Test-output parsers (stub — M4 repair loop will fill this in).
+"""Test-output parsing for the repair loop (M4).
 
-In M1 the report only needs a coarse pass/fail summary, which the runner
-derives directly from exit codes. M4's repair loop will need structured
-failure detail (which test, which assertion, which file) to construct a
-repair prompt — that parsing lives here when it's built.
-
-Keeping the module present now means M4 doesn't have to invent a new file;
-it just implements the bodies.
+M1's ``summarize`` gives a coarse pass/fail. M4's ``extract_failures`` lifts
+the structured detail a repair prompt needs: each failed command, its exit
+code, and the captured stdout/stderr (truncated so the prompt fits). The
+repair agent uses this to fix the failing tests rather than guess blindly.
 """
 
 from __future__ import annotations
@@ -15,9 +12,13 @@ from pathlib import Path
 
 from acp.models import CommandResult
 
+# Cap each captured output stream fed to a repair prompt — agents don't need
+# a full test log, just the failing signal. 8 KiB is plenty for most suites.
+_MAX_STREAM_BYTES = 8 * 1024
+
 
 def summarize(results: list[CommandResult]) -> dict[str, object]:
-    """Coarse pass/fail summary for the report. M1-only.
+    """Coarse pass/fail summary for the report.
 
     Returns ``{passed: bool, total: int, failed: list[name], skipped: list[name]}``.
     """
@@ -32,8 +33,39 @@ def summarize(results: list[CommandResult]) -> dict[str, object]:
     }
 
 
-# Reserved for M4: extract structured failures (test name, file, assertion)
-# from a captured stdout file to feed a repair prompt.
-def extract_failures(_stdout_path: Path) -> list[dict[str, object]]:  # pragma: no cover
-    """Not implemented until M4 (repair loop)."""
-    raise NotImplementedError("extract_failures is reserved for M4")
+def extract_failures(
+    results: list[CommandResult], *, max_stream_bytes: int = _MAX_STREAM_BYTES
+) -> list[dict[str, object]]:
+    """Return one record per failed (non-skipped) command.
+
+    Each record: ``{command, exit_code, stdout, stderr}`` where the streams
+    are truncated to ``max_stream_bytes`` and read from the captured files
+    (missing files yield an empty string rather than raising — the repair
+    loop must be robust to partial captures).
+    """
+    failures: list[dict[str, object]] = []
+    for r in results:
+        if r.skipped or r.passed:
+            continue
+        failures.append(
+            {
+                "command": r.command,
+                "exit_code": r.exit_code,
+                "stdout": _read_truncated(r.stdout_path, max_stream_bytes),
+                "stderr": _read_truncated(r.stderr_path, max_stream_bytes),
+            }
+        )
+    return failures
+
+
+def _read_truncated(path: Path, limit: int) -> str:
+    """Read up to ``limit`` bytes from a path; '' if unreadable."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+    if len(text.encode(errors="replace")) <= limit:
+        return text
+    # Truncate by encoded length, then re-decode to avoid splitting bytes.
+    truncated = text.encode(errors="replace")[:limit].decode(errors="replace")
+    return truncated + "\n...[truncated]"

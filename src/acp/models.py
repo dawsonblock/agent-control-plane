@@ -65,6 +65,9 @@ class EventType(str, Enum):
     VAULT_NOTE_WRITTEN = "vault.note_written"
     HUMAN_APPROVED = "human.approved"
     MEMORY_PROMOTED = "memory.promoted"
+    # M4 repair loop.
+    REPAIR_ATTEMPTED = "repair.attempted"
+    REPAIR_EXHAUSTED = "repair.exhausted"
     TASK_FAILED = "task.failed"
     TASK_COMPLETED = "task.completed"
 

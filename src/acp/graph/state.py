@@ -60,6 +60,13 @@ class ACPState(TypedDict, total=False):
     error: str             # human-readable reason if status == FAILED
     failure_event: EventType  # which final event to write (task.failed / task.completed)
 
+    # --- M4 repair loop ------------------------------------------------- #
+    # How many repair attempts have run so far (0 = none). Bounded by
+    # config.agent.max_repair_attempts so the graph can't loop forever.
+    repair_attempts: int
+    # Per-attempt record: {attempt, prompt_path, failures_fixed, still_failing}
+    repair_history: list[dict[str, Any]]
+
 
 def initial_state(
     *,

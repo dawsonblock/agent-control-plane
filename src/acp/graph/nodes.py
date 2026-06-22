@@ -20,12 +20,13 @@ services).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from acp.agents.base import write_prompt
-from acp.agents.registry import build_agent
+from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
+from acp.agents.registry import build_agent as _default_build_agent
+from acp.config import RepoConfig
 from acp.errors import RepoDirtyError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
@@ -34,16 +35,23 @@ from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.store import TaskStore
+from acp.testing.parsers import extract_failures
 from acp.testing.runner import all_passed, run_commands
 from acp.vault.obsidian_writer import write_vault_note
 
 
 @dataclass
 class NodeContext:
-    """Shared services threaded through the graph, outside of ACPState."""
+    """Shared services threaded through the graph, outside of ACPState.
+
+    ``agent_factory`` is injectable so tests can substitute a controllable
+    agent (e.g. one that fixes the failure on a repair attempt). Defaults to
+    the registry's ``build_agent``.
+    """
 
     store: TaskStore
     events: EventWriter
+    agent_factory: Callable[[RepoConfig], AgentProtocol] = _default_build_agent
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +149,7 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
 def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
-    agent = build_agent(cfg)
+    agent = ctx.agent_factory(cfg)
     task.status = TaskStatus.EXECUTING
     ctx.store.save(task)
     ctx.events.write(
@@ -243,6 +251,7 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         diff=state["diff"],
         artifact_dir=state["artifacts_dir"],
         agent_result=state.get("agent_result"),
+        repair_history=state.get("repair_history", []),
     )
     ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
     return {"report_path": report_path, "status": task.status}
@@ -298,6 +307,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 diff=state["diff"],
                 artifact_dir=state["artifacts_dir"],
                 agent_result=state.get("agent_result"),
+                repair_history=state.get("repair_history", []),
             )
             ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
             vault_note_path = write_vault_note(
@@ -321,3 +331,105 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         {"status": task.status.value, "error": state.get("error", "unknown")},
     )
     return {"status": TaskStatus.FAILED}
+
+
+# --------------------------------------------------------------------------- #
+# M4 repair loop nodes.
+#
+# Routed to from run_tests when tests fail and attempts remain. The loop is:
+#   repair_plan  → build a prompt from the failing commands' output
+#   run_repair   → run the agent against that prompt
+#   run_tests    → re-run the commands (the same node as the initial run)
+# The router in workflow.py caps attempts at config.agent.max_repair_attempts,
+# so the graph cannot loop forever.
+# --------------------------------------------------------------------------- #
+
+
+def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    """Build a repair prompt from the most recent command failures.
+
+    Increments ``repair_attempts`` and records a history entry. Writes a
+    ``repair.attempted`` event (or ``repair.exhausted`` on the final allowed
+    attempt — though routing still sends us here for that last try; the
+    exhausted event is informational).
+    """
+    cfg = state["config"]
+    task = state["task"]
+    attempts = int(state.get("repair_attempts", 0)) + 1
+    max_attempts = cfg.agent.max_repair_attempts
+
+    task.status = TaskStatus.REPAIRING
+    ctx.store.save(task)
+
+    failures = extract_failures(state.get("command_results", []))
+    prompt_path = write_repair_prompt(
+        original_request=state["user_request"],
+        worktree_path=state["worktree_path"],
+        artifact_dir=state["artifacts_dir"],
+        repo_config=cfg,
+        failures=failures,
+        attempt=attempts,
+        max_attempts=max_attempts,
+    )
+
+    event_type = (
+        EventType.REPAIR_EXHAUSTED if attempts >= max_attempts
+        else EventType.REPAIR_ATTEMPTED
+    )
+    ctx.events.write(
+        event_type,
+        {
+            "attempt": attempts,
+            "max_attempts": max_attempts,
+            "failures": len(failures),
+            "prompt_path": str(prompt_path),
+        },
+    )
+
+    history = list(state.get("repair_history", []))
+    history.append({"attempt": attempts, "prompt_path": str(prompt_path)})
+
+    return {
+        "repair_attempts": attempts,
+        "repair_history": history,
+        "prompt_path": prompt_path,
+    }
+
+
+def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    """Run the configured agent against the repair prompt.
+
+    Reuses the same agent registry + run contract as the initial ``run_agent``
+    node — only the prompt differs. Output lands in the standard
+    ``agent_stdout.txt`` / ``agent_stderr.txt`` (overwritten per attempt; the
+    distinct ``repair_prompt_<n>.txt`` artifacts preserve the per-attempt
+    evidence trail).
+    """
+    cfg = state["config"]
+    agent = ctx.agent_factory(cfg)
+    ctx.events.write(
+        EventType.AGENT_STARTED,
+        {
+            "agent": agent.name,
+            "phase": "repair",
+            "attempt": state.get("repair_attempts", 1),
+            "timeout_seconds": cfg.agent.timeout_seconds,
+        },
+    )
+    agent_result = agent.run(
+        prompt_path=state["prompt_path"],
+        worktree_path=state["worktree_path"],
+        artifact_dir=state["artifacts_dir"],
+        timeout_seconds=cfg.agent.timeout_seconds,
+    )
+    ctx.events.write(
+        EventType.AGENT_FINISHED,
+        {
+            "agent": agent_result.agent_name,
+            "phase": "repair",
+            "attempt": state.get("repair_attempts", 1),
+            "exit_code": agent_result.exit_code,
+            "summary": agent_result.summary,
+        },
+    )
+    return {"agent_result": agent_result}

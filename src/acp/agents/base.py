@@ -106,3 +106,68 @@ class AgentProtocol(Protocol):
         artifact_dir: Path,
         timeout_seconds: int,
     ) -> AgentResult: ...
+
+
+def write_repair_prompt(
+    *,
+    original_request: str,
+    worktree_path: Path,
+    artifact_dir: Path,
+    repo_config: RepoConfig,
+    failures: list[dict[str, object]],
+    attempt: int,
+    max_attempts: int,
+) -> Path:
+    """Write a repair prompt to ``artifacts/repair_prompt_<attempt>.txt``.
+
+    Per the M4 spec: "repair prompt must include failed command output." This
+    gives the agent the original task, the exact failing commands with their
+    captured stdout/stderr, and an explicit instruction to fix the failing
+    tests (not delete or skip them). Each attempt is a separate artifact so
+    the evidence trail shows exactly what each repair round was told.
+    """
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = artifact_dir / f"repair_prompt_{attempt}.txt"
+    repo = repo_config.repo
+    cmds = repo_config.commands
+
+    failure_blocks: list[str] = []
+    for i, f in enumerate(failures, start=1):
+        failure_blocks.append(
+            f"--- failure {i} ---\n"
+            f"command: {f['command']}\n"
+            f"exit_code: {f['exit_code']}\n"
+            f"stdout:\n{f['stdout'] or '(empty)'}\n"
+            f"stderr:\n{f['stderr'] or '(empty)'}\n"
+        )
+    failures_section = "\n".join(failure_blocks) if failure_blocks else "(none captured)"
+
+    body = f"""You are operating inside an isolated git worktree. A previous run
+of your task produced failing tests. Repair attempt {attempt} of {max_attempts}.
+
+Worktree:
+  {worktree_path}
+
+Repo:
+  {repo.name} (default branch: {repo.default_branch})
+
+Original task:
+  {original_request}
+
+Failing command output (the signal to fix):
+{failures_section}
+
+Instructions:
+  - Fix the root cause so the failing commands above pass.
+  - Do NOT delete, skip, or weaken tests to make them pass.
+  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
+  - Keep the change minimal and scoped to the failure.
+  - If the failure cannot be fixed without a larger change, stop and report.
+
+Runtime commands (re-run after your edits by the control plane):
+  test       : {cmds.test or '(none)'}
+  lint       : {cmds.lint or '(none)'}
+  typecheck  : {cmds.typecheck or '(none)'}
+"""
+    prompt_path.write_text(body)
+    return prompt_path

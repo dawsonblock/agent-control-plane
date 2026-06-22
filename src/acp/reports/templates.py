@@ -29,10 +29,12 @@ def render_report(
     review: ReviewResult,
     diff: DiffCapture,
     agent_result: AgentResult | None,
+    repair_history: list[dict[str, object]] | None = None,
 ) -> str:
     """Render the full final_report.md body (no frontmatter)."""
     summary = summarize(command_results)
     status_word = _status_word(task.status)
+    repair_history = repair_history or []
 
     lines: list[str] = []
     lines.append(f"# Task report: {task.task_id}")
@@ -43,6 +45,8 @@ def render_report(
     lines.append(f"- **Risk:** {review.risk.value}  —  **Recommendation:** {review.recommendation.value}")
     lines.append(f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}")
     lines.append(f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped")  # type: ignore[arg-type]
+    if repair_history:
+        lines.append(f"- **Repair attempts:** {len(repair_history)}")
     lines.append(f"- **Created:** {task.created_at}")
     lines.append("")
 
@@ -81,6 +85,17 @@ def render_report(
             f"| `{r.command or '—'}` | {r.exit_code} | {outcome} | {r.duration_seconds} |"
         )
     lines.append("")
+
+    if repair_history:
+        lines.append("## Repair attempts")
+        lines.append("")
+        lines.append("Tests failed and the control plane re-ran the agent with a repair prompt:")
+        lines.append("")
+        for h in repair_history:
+            attempt = h.get("attempt", "?")
+            prompt = str(h.get("prompt_path", "")).split("/")[-1]
+            lines.append(f"- attempt {attempt} — prompt: `artifacts/{prompt}`")
+        lines.append("")
 
     lines.append("## Agent")
     lines.append("")

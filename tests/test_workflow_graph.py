@@ -18,7 +18,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from acp.config import CommandsSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter
 from acp.graph.state import initial_state
 from acp.graph.workflow import build_workflow
@@ -26,22 +26,36 @@ from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 
 
-def _config(repo_path: Path, *, test_cmd: str = 'echo "tests passed"') -> RepoConfig:
+def _config(
+    repo_path: Path,
+    *,
+    test_cmd: str = 'echo "tests passed"',
+    max_repair_attempts: int = 1,
+) -> RepoConfig:
     return RepoConfig(
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=max_repair_attempts),
         commands=CommandsSection(lint='echo "lint ok"', test=test_cmd),
         review=ReviewSection(),
     )
 
 
-def _run_graph(repo_path: Path, runs_root: Path, vault_root: Path, *, test_cmd: str = 'echo ok'):
+def _run_graph(
+    repo_path: Path,
+    runs_root: Path,
+    vault_root: Path,
+    *,
+    test_cmd: str = 'echo ok',
+    max_repair_attempts: int = 1,
+    agent_factory=None,
+):
     """Build + invoke the graph, returning (final_state, store, events_writer)."""
     store = TaskStore(runs_root=runs_root)
     # Placeholder writer; create_task node relocates it.
     events = EventWriter("__pending__", store.root / "__pending__")
-    wf = build_workflow(store=store, events=events)
+    wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
 
-    cfg = _config(repo_path, test_cmd=test_cmd)
+    cfg = _config(repo_path, test_cmd=test_cmd, max_repair_attempts=max_repair_attempts)
     state = initial_state(
         config=cfg,
         user_request="graph-driven task",
@@ -113,12 +127,17 @@ def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
 
 
 def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, isolated_workspace):
-    """The M3 gate: a failed task still writes a report."""
+    """The M3 gate: a failed task still writes a report (with repair disabled).
+
+    Pinned to max_repair_attempts=0 so this exercises the no-repair path —
+    M4's repair behavior has its own dedicated tests.
+    """
     result, store = _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
         test_cmd="exit 1",  # failing test
+        max_repair_attempts=0,
     )
 
     assert result["status"] == TaskStatus.FAILED

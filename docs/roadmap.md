@@ -2,7 +2,7 @@
 
 The non-negotiable rule across every milestone: **no new layer until the previous layer produces evidence.** A milestone is "done" only when its gate passes on a real run, not when its code is written.
 
-## Current build (this repo, now): M0–M3
+## Current build (this repo, now): M0–M4
 
 | Milestone | Delivers | Gate |
 |-----------|----------|------|
@@ -10,12 +10,12 @@ The non-negotiable rule across every milestone: **no new layer until the previou
 | **M1 — Manual evidence loop** | `acp run` runs one task in a worktree, captures everything, writes report + Obsidian note | E2E test passes; main untouched; report + vault note exist |
 | **M2 — Generic CLI agent adapter** | Swap the coder agent via config (`shell` ↔ `custom` + `command_template`) | Agent swap is config-only; workflow code untouched |
 | **M3 — LangGraph state machine** | Linear CLI refactored into a graph; failed nodes visible; failed tasks still write reports | Graph reaches `done` on success and `failed`-with-report on failure |
+| **M4 — Repair loop** | Failing tests trigger ≤ `max_repair_attempts` repair rounds before falling through to a FAILED report | No infinite loops; max enforced; failed repair still writes report |
 
 ## Downstream (deferred — do not start before the gate above passes)
 
 | Milestone | Delivers | Gate |
 |-----------|----------|------|
-| **M4 — Repair loop** | Failed test triggers ≤ `max_repair_attempts` repair runs | No infinite loops; max enforced; final report still written |
 | **M5 — Review hardening** | `secret_scanner.py` + `risk.py`; full risk taxonomy | Risky diffs flagged before approval |
 | **M6 — Haystack retrieval** | `context_bundle.md` generated before agent run | Context includes relevant files + prior reports |
 | **M7 — Graphiti memory** | Approved notes → temporal graph of verified facts | System retrieves prior verified facts before new tasks |
