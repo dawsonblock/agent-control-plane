@@ -1,0 +1,52 @@
+# Example repo configuration for agent-control-plane.
+# Copy to <name>.repo.yaml and edit path/commands for your repo.
+#
+# Every run of `acp run --config <this file>` reads exactly one of these.
+
+repo:
+  name: my-app
+  path: /Users/dawsonblock/projects/my-app
+  default_branch: main
+
+agent:
+  # M1 ships only `shell` (manual, human-in-the-loop).
+  # M2 adds `custom` (any CLI coding agent via command_template).
+  default: shell
+  timeout_seconds: 1800
+  max_repair_attempts: 1
+  command_template: ""
+
+commands:
+  # Leave a command empty ("") to skip it. Only non-empty commands run.
+  install: ""
+  lint: "npm run lint"
+  typecheck: "npm run typecheck"
+  test: "npm test"
+  build: "npm run build"
+
+review:
+  max_changed_files: 20
+  max_added_lines: 1000
+  block_secret_leaks: true
+  warn_on_auth_changes: true
+  warn_on_database_changes: true
+  require_human_approval: true
+
+context:
+  include:
+    - README.md
+    - docs/**
+    - src/**
+    - tests/**
+  exclude:
+    - node_modules/**
+    - .git/**
+    - dist/**
+    - build/**
+    - .env
+    - "*.key"
+    - "*.pem"
+
+memory:
+  graphiti_group_id: my-app
+  promote_reports_by_default: false

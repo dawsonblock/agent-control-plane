@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# uv
+uv.lock is committed; local cache is not
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ACP run artifacts — these are outputs, not source.
+# Keep the dir structure (via .gitkeep) but never commit run data.
+data/runs/*
+!data/runs/.gitkeep
+data/tasks/*
+!data/tasks/.gitkeep
+data/indexes/*
+!data/indexes/.gitkeep
+data/memory/*
+!data/memory/.gitkeep
+
+# Vault task reports are outputs; keep the vault structure but not
+# generated task notes. Hand-authored notes under vault/rules,
+# vault/decisions, etc. ARE committed.
+vault/tasks/*
+!vault/tasks/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

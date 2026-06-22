@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-control-plane"
+version = "0.1.0"
+description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Dawson Block" }]
+keywords = ["agents", "control-plane", "langgraph", "evidence", "obsidian"]
+
+# v0.1 dependency set only. Later milestones add:
+#   v0.2 langgraph, v0.3 haystack-ai, v0.4 graphiti-core[falkordb],
+#   v0.5 fastapi + uvicorn.
+dependencies = [
+    "typer>=0.12,<0.14",
+    "pydantic>=2.7,<3",
+    "pyyaml>=6.0,<7",
+    "rich>=13.7,<14",
+    "gitpython>=3.1,<4",
+]
+
+[project.optional-dependencies]
+# M3 adds LangGraph. Kept optional so M0/M1 install is minimal; the
+# graph modules import lazily and fail with a clear message if absent.
+graph = [
+    "langgraph>=1.2,<2",
+]
+dev = [
+    "pytest>=8.2,<9",
+]
+
+[project.scripts]
+acp = "acp.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/acp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra -q"
