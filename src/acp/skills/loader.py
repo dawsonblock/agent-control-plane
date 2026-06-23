@@ -1,7 +1,10 @@
-"""Skill loader for fusion-skills governance.
+"""Skill loader — deferred until M8.
 
-Loads and validates YAML skill definitions from the skills directory.
-Each skill defines governance rules for a specific aspect of the workflow.
+M8 will implement fusion-skills-style YAML playbooks that govern review,
+repair, and memory-promotion behaviour. Until then, ``load_skills`` returns
+an empty dict and all other functions raise ``NotImplementedError``.
+
+See docs/roadmap.md.
 """
 
 from __future__ import annotations
@@ -9,42 +12,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from acp.errors import SkillLoadError
 
 
 def load_skills(skills_dir: Path) -> dict[str, dict[str, Any]]:
     """Load all skill definitions from a directory.
 
-    Args:
-        skills_dir: Path to the skills directory containing YAML files.
-
-    Returns:
-        Dictionary mapping skill names to their definitions.
-
-    Raises:
-        SkillLoadError: If a skill file cannot be loaded or parsed.
+    Returns an empty dict until M8. The SkillLoadError type is defined for
+    forward compatibility.
     """
-    skills = {}
-    for skill_file in skills_dir.glob("*.yaml"):
-        try:
-            with open(skill_file, "r") as f:
-                skill_def = yaml.safe_load(f)
-
-            # Validate required fields
-            if "name" not in skill_def:
-                raise SkillLoadError(f"Skill file {skill_file} missing 'name' field")
-
-            skill_name = skill_def["name"]
-            skills[skill_name] = skill_def
-
-        except yaml.YAMLError as e:
-            raise SkillLoadError(f"Invalid YAML in skill file {skill_file}: {e}")
-        except Exception as e:
-            raise SkillLoadError(f"Failed to load skill file {skill_file}: {e}")
-
-    return skills
+    return {}
 
 
 def validate_skill(skill: dict[str, Any]) -> bool:

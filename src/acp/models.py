@@ -33,12 +33,10 @@ class TaskStatus(str, Enum):
     CREATED = "created"
     WORKTREE_CREATED = "worktree_created"
     CONTEXT_BUILT = "context_built"
-    PLANNED = "planned"
     EXECUTING = "executing"
     TESTING = "testing"
     REVIEWING = "reviewing"
     REPAIRING = "repairing"
-    REPORT_WRITTEN = "report_written"
     PASSED = "passed"
     FAILED = "failed"
     NEEDS_REVIEW = "needs_review"
@@ -69,8 +67,10 @@ class EventType(str, Enum):
     # M4 repair loop.
     REPAIR_ATTEMPTED = "repair.attempted"
     REPAIR_EXHAUSTED = "repair.exhausted"
+    TASK_NEEDS_REVIEW = "task.needs_review"
     TASK_FAILED = "task.failed"
     TASK_COMPLETED = "task.completed"
+    NODE_FAILED = "node.failed"
 
 
 class RiskLevel(str, Enum):
@@ -107,6 +107,7 @@ class Task(BaseModel):
     repo_name: str
     repo_path: Path
     base_branch: str
+    base_commit_sha: str = ""
     task_branch: str
     worktree_path: Path
     user_request: str
@@ -139,6 +140,7 @@ class CommandResult(BaseModel):
     stderr_path: Path
     duration_seconds: float
     skipped: bool = False  # True when the command was empty/disabled in config
+    timed_out: bool = False  # True when the command was killed by timeout
 
     @property
     def passed(self) -> bool:
@@ -178,3 +180,59 @@ class ReviewResult(BaseModel):
 def next_event_id(existing_count: int) -> str:
     """Monotonic, zero-padded event id, e.g. evt_000001."""
     return f"evt_{existing_count + 1:06d}"
+
+
+# --------------------------------------------------------------------------- #
+# Gate-correct final-status computation (v0.5)
+# --------------------------------------------------------------------------- #
+
+
+def compute_final_status(
+    *,
+    agent_passed: bool,
+    command_results: list[CommandResult],
+    diff_changed_files: list[str],
+    review: ReviewResult | None,
+) -> TaskStatus:
+    """Determine the final task status using gate-correct logic.
+
+    A task can only be ``PASSED`` if ALL of the following hold:
+
+    * agent exit code was 0
+    * at least one non-skipped validation command actually ran
+    * all non-skipped commands passed (exit code 0)
+    * diff is non-empty (at least one changed file)
+    * review has no hard block
+    * review recommendation is ``merge``
+
+    Otherwise the result is ``FAILED`` (hard failure) or ``NEEDS_REVIEW``
+    (incomplete/risky — a human must decide).
+    """
+    # --- Hard failures (agent itself failed) ------------------------------- #
+    if not agent_passed:
+        return TaskStatus.FAILED
+
+    ran = [r for r in command_results if not r.skipped]
+
+    # --- No validation commands ran → needs review ------------------------ #
+    if not ran:
+        return TaskStatus.NEEDS_REVIEW
+
+    # --- At least one command failed → FAILED ------------------------------ #
+    if any(not r.passed for r in ran):
+        return TaskStatus.FAILED
+
+    # --- Empty diff → needs review (agent produced nothing) --------------- #
+    if not diff_changed_files:
+        return TaskStatus.NEEDS_REVIEW
+
+    # --- Review checks ---------------------------------------------------- #
+    if review is not None:
+        if review.hard_block:
+            return TaskStatus.FAILED
+        if review.recommendation == Recommendation.REJECT:
+            return TaskStatus.FAILED
+        if review.recommendation != Recommendation.MERGE:
+            return TaskStatus.NEEDS_REVIEW
+
+    return TaskStatus.PASSED

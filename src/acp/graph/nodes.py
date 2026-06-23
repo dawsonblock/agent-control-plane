@@ -20,18 +20,17 @@ services).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
-from acp.errors import RepoDirtyError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, TaskStatus, compute_final_status
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.store import TaskStore
@@ -106,12 +105,14 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     cfg = state["config"]
     task = state["task"]
     try:
-        worktree_path = create_worktree(
+        worktree_path, base_sha = create_worktree(
             repo_path=state["repo_path"],
             base_branch=cfg.repo.default_branch,
             branch_name=task.task_branch,
             target_path=ctx.store.worktree_path(state["task_id"]),
         )
+        task.base_commit_sha = base_sha
+        ctx.store.save(task)
     except Exception as exc:  # noqa: BLE001
         ctx.events.write(
             EventType.TASK_FAILED,
@@ -124,7 +125,7 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     ctx.store.save(task)
     ctx.events.write(
         EventType.WORKTREE_CREATED,
-        {"branch": task.task_branch, "worktree_path": str(worktree_path)},
+        {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
     )
     return {"worktree_path": worktree_path}
 
@@ -181,26 +182,21 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         repo_config=cfg,
         worktree_path=state["worktree_path"],
         artifact_dir=state["artifacts_dir"],
+        timeout_seconds=cfg.agent.timeout_seconds,
+        event_writer=ctx.events,
     )
-    for r in command_results:
-        ctx.events.write(
-            EventType.COMMAND_FINISHED,
-            {
-                "command": r.command,
-                "exit_code": r.exit_code,
-                "skipped": r.skipped,
-                "duration_seconds": r.duration_seconds,
-            },
-        )
     return {"command_results": command_results}
 
 
 def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
+    task = state["task"]
+    base_sha = task.base_commit_sha or cfg.repo.default_branch
     diff: DiffCapture = capture_diff(
         worktree_path=state["worktree_path"],
         base_branch=cfg.repo.default_branch,
         artifacts_dir=state["artifacts_dir"],
+        base_commit_sha=base_sha or None,
     )
     ctx.events.write(
         EventType.DIFF_CAPTURED,
@@ -236,12 +232,16 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
 def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
-    # Compute final status *before* writing so the report reflects the truth.
-    tests_pass = all_passed(state.get("command_results", []))
     review = state.get("review_result")
-    hard_block = bool(review and review.hard_block)
-    passed = tests_pass and not hard_block
-    task.status = TaskStatus.PASSED if passed else TaskStatus.FAILED
+    # Compute final status using gate-correct logic.
+    agent_result = state.get("agent_result")
+    status = compute_final_status(
+        agent_passed=agent_result.passed if agent_result else True,
+        command_results=state.get("command_results", []),
+        diff_changed_files=state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0)).changed_files,
+        review=review,
+    )
+    task.status = status
     ctx.store.save(task)
 
     report_path = write_report(
@@ -274,7 +274,7 @@ def write_vault_note_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
 
 
 def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    """Terminal success node. Writes the task.completed event."""
+    """Terminal success node. Writes task.completed or task.failed based on status."""
     task = state["task"]
     final = EventType.TASK_COMPLETED if task.status == TaskStatus.PASSED else EventType.TASK_FAILED
     ctx.events.write(
@@ -282,7 +282,7 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         {
             "status": task.status.value,
             "tests_pass": all_passed(state.get("command_results", [])),
-            "recommendation": state["review_result"].recommendation.value,
+            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
     return {"status": task.status}
@@ -298,6 +298,8 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
 
     # Best-effort evidence write if we got far enough to have a diff.
+    report_path = None
+    vault_note_path = None
     if state.get("diff") is not None and state.get("review_result") is not None:
         try:
             report_path = write_report(
@@ -330,7 +332,52 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         EventType.TASK_FAILED,
         {"status": task.status.value, "error": state.get("error", "unknown")},
     )
-    return {"status": TaskStatus.FAILED}
+    return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path}
+
+
+def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    """Terminal node for tasks that completed but need human review.
+
+    Writes REPORT_WRITTEN + VAULT_NOTE_WRITTEN + TASK_NEEDS_REVIEW events.
+    NEEDS_REVIEW is not a hard failure — the work produced may be valid —
+    but it requires a human to decide.
+    """
+    task = state["task"]
+    try:
+        report_path = write_report(
+            task=task,
+            command_results=state.get("command_results", []),
+            review=state.get("review_result"),
+            diff=state.get("diff"),
+            artifact_dir=state["artifacts_dir"],
+            agent_result=state.get("agent_result"),
+            repair_history=state.get("repair_history", []),
+        )
+        ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
+    except Exception:  # noqa: BLE001
+        report_path = None
+
+    if report_path is not None and state.get("review_result") is not None and state.get("diff") is not None:
+        try:
+            vault_note_path = write_vault_note(
+                report_body=report_path.read_text(),
+                task=task,
+                review=state["review_result"],
+                diff=state["diff"],
+                vault_root=state["vault_root"],
+            )
+            ctx.events.write(EventType.VAULT_NOTE_WRITTEN, {"vault_note_path": str(vault_note_path)})
+        except Exception:  # noqa: BLE001
+            pass
+
+    ctx.events.write(
+        EventType.TASK_NEEDS_REVIEW,
+        {
+            "status": TaskStatus.NEEDS_REVIEW.value,
+            "error": state.get("error", "Task completed but needs human review"),
+        },
+    )
+    return {"status": TaskStatus.NEEDS_REVIEW}
 
 
 # --------------------------------------------------------------------------- #

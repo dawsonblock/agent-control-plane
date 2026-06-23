@@ -23,7 +23,7 @@ from acp.errors import ACPError, RepoDirtyError, WorktreeError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, TaskStatus, compute_final_status
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.store import TaskStore
@@ -130,12 +130,14 @@ class EvidenceLoop:
 
         # 3. Worktree ------------------------------------------------------- #
         try:
-            worktree_path = create_worktree(
+            worktree_path, base_sha = create_worktree(
                 repo_path=repo_path,
                 base_branch=cfg.repo.default_branch,
                 branch_name=task.task_branch,
                 target_path=self.store.worktree_path(task_id),
             )
+            task.base_commit_sha = base_sha
+            self.store.save(task)
         except Exception as exc:  # noqa: BLE001
             events.write(
                 EventType.TASK_FAILED,
@@ -220,17 +222,9 @@ class EvidenceLoop:
             repo_config=cfg,
             worktree_path=worktree_path,
             artifact_dir=artifacts,
+            timeout_seconds=cfg.agent.timeout_seconds,
+            event_writer=events,
         )
-        for r in command_results:
-            events.write(
-                EventType.COMMAND_FINISHED,
-                {
-                    "command": r.command,
-                    "exit_code": r.exit_code,
-                    "skipped": r.skipped,
-                    "duration_seconds": r.duration_seconds,
-                },
-            )
         tests_pass = all_passed(command_results)
         console.print(
             f"[{'green' if tests_pass else 'red'}]{'✓' if tests_pass else '✗'}[/] "
@@ -242,6 +236,7 @@ class EvidenceLoop:
             worktree_path=worktree_path,
             base_branch=cfg.repo.default_branch,
             artifacts_dir=artifacts,
+            base_commit_sha=task.base_commit_sha or None,
         )
         events.write(
             EventType.DIFF_CAPTURED,
@@ -274,10 +269,15 @@ class EvidenceLoop:
             f"rec={review.recommendation.value}"
         )
 
-        # 9. Compute final status (before writing the report, so the report
-        #    reflects the true outcome rather than an intermediate state).
+        # 9. Compute final status (gate-correct: see compute_final_status). #
         passed = tests_pass and not review.hard_block
-        task.status = TaskStatus.PASSED if passed else TaskStatus.FAILED
+        status = compute_final_status(
+            agent_passed=agent_result.passed if agent_result else True,
+            command_results=command_results,
+            diff_changed_files=diff.changed_files,
+            review=review,
+        )
+        task.status = status if status == TaskStatus.PASSED else status
         self.store.save(task)
 
         # 10. Write report ------------------------------------------------- #
@@ -308,10 +308,11 @@ class EvidenceLoop:
         )
 
         # 12. Final event -------------------------------------------------- #
+        status = task.status
         events.write(
-            EventType.TASK_COMPLETED if passed else EventType.TASK_FAILED,
+            EventType.TASK_COMPLETED if status == TaskStatus.PASSED else EventType.TASK_FAILED,
             {
-                "status": task.status.value,
+                "status": status.value,
                 "tests_pass": tests_pass,
                 "recommendation": review.recommendation.value,
             },
@@ -320,7 +321,7 @@ class EvidenceLoop:
         console.print(f"[green]✓ report:[/] {report_path}")
         console.print(f"[green]✓ vault note:[/] {vault_note_path}")
         console.print(
-            f"\n[dim]Task {task.task_id} → {task.status.value}. "
+            f"\n[dim]Task {task.task_id} → {status.value}. "
             f"Review the vault note and set approved: true to promote memory.[/]"
         )
         return LoopResult(

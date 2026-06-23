@@ -39,6 +39,7 @@ from acp.graph.nodes import (
     create_worktree_node,
     done_node,
     failed_node,
+    needs_review_node,
     repair_plan_node,
     review_diff_node,
     run_agent_node,
@@ -48,14 +49,58 @@ from acp.graph.nodes import (
     write_vault_note_node,
 )
 from acp.graph.state import ACPState
-from acp.models import TaskStatus
+from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 from acp.testing.runner import all_passed
+
+
+def node_error_handler(node_fn: Callable) -> Callable:
+    """Wrap a graph node so unhandled exceptions produce a FAILED state.
+
+    If the wrapped node raises, instead of crashing the graph we return a
+    state patch with ``status=FAILED`` and an ``error`` message. The graph's
+    conditional edges route this to the ``failed`` terminal node, which
+    writes whatever evidence it can.
+    """
+
+    def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+        try:
+            return node_fn(state, ctx)
+        except Exception as exc:
+            # Write a node failure event directly (best effort).
+            try:
+                ctx.events.write(
+                    EventType.NODE_FAILED,
+                    {"node": node_fn.__name__, "exception_type": type(exc).__name__, "message": str(exc)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "status": TaskStatus.FAILED,
+                "error": f"{node_fn.__name__}: {exc}",
+            }
+
+    return wrapper
 
 
 def _is_failed(state: dict[str, Any]) -> bool:
     """Conditional-edge router: did the preceding node mark the run failed?"""
     return state.get("status") == TaskStatus.FAILED
+
+
+def _needs_review(state: dict[str, Any]) -> bool:
+    """Check if the run ended with ``NEEDS_REVIEW``."""
+    return state.get("status") == TaskStatus.NEEDS_REVIEW
+
+
+def _route_after_write_report(state: dict[str, Any]) -> str:
+    """Route after write_report: NEEDS_REVIEW goes to a distinct terminal."""
+    st = state.get("status")
+    if st == TaskStatus.PASSED:
+        return "write_vault_note"
+    if st == TaskStatus.NEEDS_REVIEW:
+        return "needs_review"
+    return "failed"
 
 
 def _route_after_check(state: dict[str, Any]) -> str:
@@ -111,22 +156,28 @@ def build_workflow(
 
     g = StateGraph(ACPState)
 
+    # Wrap every node with the error handler so unhandled exceptions produce
+    # a FAILED state instead of crashing the graph.
+    def _wrap(n: Callable) -> Callable:
+        return partial(node_error_handler(n), ctx=ctx)
+
     # Bind ctx into each node so LangGraph sees a single-arg callable.
-    g.add_node("create_task", partial(create_task, ctx=ctx))
-    g.add_node("check_repo", partial(check_repo, ctx=ctx))
-    g.add_node("create_worktree", partial(create_worktree_node, ctx=ctx))
-    g.add_node("build_context", partial(build_context_node, ctx=ctx))
-    g.add_node("run_agent", partial(run_agent_node, ctx=ctx))
-    g.add_node("run_tests", partial(run_tests_node, ctx=ctx))
-    g.add_node("capture_diff", partial(capture_diff_node, ctx=ctx))
-    g.add_node("review_diff", partial(review_diff_node, ctx=ctx))
-    g.add_node("write_report", partial(write_report_node, ctx=ctx))
-    g.add_node("write_vault_note", partial(write_vault_note_node, ctx=ctx))
-    g.add_node("done", partial(done_node, ctx=ctx))
-    g.add_node("failed", partial(failed_node, ctx=ctx))
+    g.add_node("create_task", _wrap(create_task))
+    g.add_node("check_repo", _wrap(check_repo))
+    g.add_node("create_worktree", _wrap(create_worktree_node))
+    g.add_node("build_context", _wrap(build_context_node))
+    g.add_node("run_agent", _wrap(run_agent_node))
+    g.add_node("run_tests", _wrap(run_tests_node))
+    g.add_node("capture_diff", _wrap(capture_diff_node))
+    g.add_node("review_diff", _wrap(review_diff_node))
+    g.add_node("write_report", _wrap(write_report_node))
+    g.add_node("write_vault_note", _wrap(write_vault_note_node))
+    g.add_node("done", _wrap(done_node))
+    g.add_node("failed", _wrap(failed_node))
+    g.add_node("needs_review", _wrap(needs_review_node))
     # M4 repair loop.
-    g.add_node("repair_plan", partial(repair_plan_node, ctx=ctx))
-    g.add_node("run_repair", partial(run_repair_agent_node, ctx=ctx))
+    g.add_node("repair_plan", _wrap(repair_plan_node))
+    g.add_node("run_repair", _wrap(run_repair_agent_node))
 
     # --- entry + linear happy path -------------------------------------- #
     g.add_edge(START, "create_task")
@@ -149,12 +200,16 @@ def build_workflow(
 
     g.add_edge("capture_diff", "review_diff")
     g.add_edge("review_diff", "write_report")
-    g.add_edge("write_report", "write_vault_note")
+
+    # write_report → write_vault_note (PASSED) OR needs_review OR failed
+    g.add_conditional_edges("write_report", _route_after_write_report)
+
     g.add_edge("write_vault_note", "done")
 
     # Terminal nodes.
     g.add_edge("done", END)
     g.add_edge("failed", END)
+    g.add_edge("needs_review", END)
 
     return g.compile(checkpointer=MemorySaver())
 

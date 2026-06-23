@@ -1,8 +1,8 @@
-"""Haystack indexer for the control plane.
+"""Haystack indexer — deferred until M6.
 
-This module provides functionality to index repository content for Haystack
-retrieval. It scans the repository for relevant files and creates an index
-that can be used to retrieve context for coding tasks.
+M6 will implement real Haystack retrieval for building context bundles
+before agent runs. Until then, this module raises ``NotImplementedError``
+to prevent accidental use. See docs/roadmap.md.
 """
 
 from __future__ import annotations
@@ -16,57 +16,27 @@ from acp.config import ContextSection
 class HaystackIndexer:
     """Index repository content for Haystack retrieval.
 
-    This class scans a repository and creates an index of its content
-    that can be used to retrieve relevant context for coding tasks.
+    Raises:
+        NotImplementedError: Always — M6 deferred. See docs/roadmap.md.
     """
 
     def __init__(self, repo_path: Path, context_config: ContextSection) -> None:
-        self.repo_path = repo_path
-        self.context_config = context_config
-        self.index: dict[str, Any] = {}
+        raise NotImplementedError(
+            "Haystack indexing is not implemented until M6. "
+            "See docs/roadmap.md."
+        )
 
     def build_index(self) -> None:
-        """Build the index of repository content.
+        raise NotImplementedError(
+            "Haystack indexing is not implemented until M6. "
+            "See docs/roadmap.md."
+        )
 
-        This method scans the repository and creates an index of its content
-        based on the context configuration.
-        """
-        self.index = {
-            "repo_path": str(self.repo_path),
-            "context_config": self.context_config.model_dump(),
-            "files": [],
-            "metadata": {},
-        }
-
-        # Scan for files to include
-        from acp.context.scanner import scan_context
-
-        for file_path in scan_context(self.repo_path, self.context_config):
-            self.index["files"].append({
-                "path": str(file_path.relative_to(self.repo_path)),
-                "size": file_path.stat().st_size,
-                "modified": file_path.stat().st_mtime,
-            })
-
-        # Add metadata
-        self.index["metadata"] = {
-            "total_files": len(self.index["files"]),
-            "total_size": sum(f["size"] for f in self.index["files"]),
-            "last_modified": max(
-                f["modified"] for f in self.index["files"]
-            )
-            if self.index["files"]
-            else 0,
-        }
-
-    def get_file_content(self, file_path: str) -> str:
-        """Get the content of a file from the index.
-
-        Args:
-            file_path: Path to the file relative to the repository root.
-
-        Returns:
-            The content of the file as a string.
+    def retrieve_context(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        raise NotImplementedError(
+            "Haystack retrieval is not implemented until M6. "
+            "See docs/roadmap.md."
+        )
 
         Raises:
             FileNotFoundError: If the file is not in the index.

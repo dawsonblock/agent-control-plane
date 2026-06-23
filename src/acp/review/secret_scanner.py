@@ -133,8 +133,15 @@ def _shannon_entropy(s: str) -> float:
 
 
 def _looks_assigned(line: str, token: str) -> bool:
-    """Heuristic: is the token inside a string literal or an assignment value?"""
-    if "=" in line or ":" in line:
+    """Heuristic: is the token in an assignment context, not a comment/doc?
+
+    Returns True only if the line has ``KEY=`` or ``KEY: "..."`` shape
+    (with the key before any comment marker like ``#`` or ``//``). This
+    prevents flagging commit SHAs in comments or log messages.
+    """
+    # Strip inline comments first.
+    stripped = line.split("#")[0].split("//")[0].strip()
+    if "=" in stripped or stripped.endswith(":"):
         return True
     return ("'" in line or '"' in line) and token in line
 

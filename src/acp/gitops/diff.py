@@ -27,19 +27,30 @@ def capture_diff(
     worktree_path: Path,
     base_branch: str,
     artifacts_dir: Path,
+    base_commit_sha: str | None = None,
 ) -> DiffCapture:
     """Diff the worktree's working tree against ``base_branch``.
 
-    Writes ``diff.patch`` and ``diff_stat.txt`` into ``artifacts_dir`` and
-    returns a parsed summary (changed files, insertions, deletions).
+    If ``base_commit_sha`` is provided, diff against that exact commit rather
+    than resolving the branch name (avoids races if the branch moves). Writes
+    ``diff.patch`` and ``diff_stat.txt`` into ``artifacts_dir`` and returns a
+    parsed summary (changed files, insertions, deletions).
     """
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     repo = Repo(str(worktree_path))
 
-    try:
-        base_commit = repo.commit(base_branch)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"base branch not resolvable: {base_branch}") from exc
+    if base_commit_sha:
+        try:
+            base_commit = repo.commit(base_commit_sha)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"base commit sha not resolvable: {base_commit_sha}"
+            ) from exc
+    else:
+        try:
+            base_commit = repo.commit(base_branch)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"base branch not resolvable: {base_branch}") from exc
 
     # Stage all worktree changes (modified + untracked) so the captured patch
     # exactly represents the agent's total delta against the base branch tip —

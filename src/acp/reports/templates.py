@@ -11,6 +11,7 @@ from acp.gitops.diff import DiffCapture
 from acp.models import (
     AgentResult,
     CommandResult,
+    Recommendation,
     ReviewResult,
     Task,
     TaskStatus,
@@ -41,6 +42,8 @@ def render_report(
     lines.append("")
     lines.append(f"- **Status:** {status_word}")
     lines.append(f"- **Repo:** `{task.repo_name}` (`{task.base_branch}` → `{task.task_branch}`)")
+    lines.append(f"- **Base commit:** `{task.base_commit_sha or '(not recorded)'}`")
+    lines.append(f"- **Worktree:** `{task.worktree_path}`")
     lines.append(f"- **Request:** {task.user_request}")
     lines.append(f"- **Risk:** {review.risk.value}  —  **Recommendation:** {review.recommendation.value}")
     lines.append(f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}")
@@ -49,7 +52,58 @@ def render_report(
         lines.append(f"- **Repair attempts:** {len(repair_history)}")
     lines.append(f"- **Created:** {task.created_at}")
     lines.append("")
+    lines.append("## Gate Summary")
+    lines.append("")
+    lines.append("| Gate | Result | Evidence |")
+    lines.append("| --- | --- | --- |")
 
+    # Agent exit code gate
+    if agent_result is None:
+        lines.append("| Agent exit code | ❌ failed | no agent result |")
+    elif agent_result.exit_code != 0:
+        lines.append(f"| Agent exit code | ❌ failed | exit_code={agent_result.exit_code} |")
+    else:
+        lines.append(f"| Agent exit code | ✅ passed | exit_code={agent_result.exit_code} |")
+
+    # Validation commands ran gate
+    non_skipped = [r for r in command_results if not r.skipped]
+    if len(non_skipped) == 0:
+        lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
+    else:
+        lines.append(f"| Validation commands ran | ✅ passed | {len(non_skipped)} commands ran |")
+
+    # Validation commands passed gate
+    failed_cmds = [r for r in non_skipped if not r.passed]
+    if failed_cmds:
+        lines.append(f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |")
+    elif non_skipped:
+        lines.append(f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |")
+    else:
+        lines.append("| Validation commands passed | 🔶 needs review | n/a |")
+
+    # Diff non-empty gate
+    if len(diff.changed_files) == 0:
+        lines.append("| Diff non-empty | 🔶 needs review | 0 changed files |")
+    else:
+        lines.append(f"| Diff non-empty | ✅ passed | {len(diff.changed_files)} changed files |")
+
+    # Review hard block gate
+    if review.hard_block:
+        lines.append("| Review hard block | ❌ failed | true |")
+    else:
+        lines.append("| Review hard block | ✅ passed | false |")
+
+    # Review recommendation gate
+    if review.recommendation == Recommendation.REJECT:
+        lines.append("| Review recommendation | ❌ failed | reject |")
+    elif review.recommendation == Recommendation.REVISE:
+        lines.append("| Review recommendation | 🔶 needs review | revise |")
+    else:
+        lines.append("| Review recommendation | ✅ passed | merge |")
+
+    lines.append("")
+    lines.append(f"**Final gate outcome:** {_status_word(task.status)}")
+    lines.append("")
     lines.append("## Reviewer summary")
     lines.append("")
     lines.append(review.summary or "_(no summary)_")
@@ -97,13 +151,38 @@ def render_report(
             lines.append(f"- attempt {attempt} — prompt: `artifacts/{prompt}`")
         lines.append("")
 
+    # --- Memory candidates section (gate-dependent) ---------------------- #
+    lines.append("## Memory candidates")
+    lines.append("")
+    can_promote = (
+        task.status == TaskStatus.PASSED
+        and review.recommendation == Recommendation.MERGE
+        and not review.hard_block
+    )
+    if can_promote:
+        lines.append("This task **may** become a memory candidate once approved.")
+        lines.append("")
+        lines.append("- All gates passed. Review the vault note and set `approved: true` to enable memory promotion.")
+        lines.append("- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria.")
+    else:
+        lines.append("This task is **not** a memory candidate until the conditions below are resolved:")
+        lines.append("")
+        if task.status != TaskStatus.PASSED:
+            lines.append(f"- **Status:** {_status_word(task.status)} — only `PASSED` tasks qualify")
+        if review.recommendation != Recommendation.MERGE:
+            lines.append(f"- **Recommendation:** `{review.recommendation.value}` — only `merge` qualifies")
+        if review.hard_block:
+            lines.append("- **Hard block:** active — must be resolved before promotion")
+        lines.append(f"- **Risk:** {review.risk.value} — see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)")
+    lines.append("")
+
     lines.append("## Agent")
     lines.append("")
     if agent_result is not None:
         lines.append(f"- **Agent:** `{agent_result.agent_name}` (exit {agent_result.exit_code})")
         lines.append(f"- **Summary:** {agent_result.summary}")
-        lines.append(f"- **stdout:** `artifacts/agent_stdout.txt`")
-        lines.append(f"- **stderr:** `artifacts/agent_stderr.txt`")
+        lines.append("- **stdout:** `artifacts/agent_stdout.txt`")
+        lines.append("- **stderr:** `artifacts/agent_stderr.txt`")
     else:
         lines.append("_(no agent result — run failed before agent execution)_")
     lines.append("")
@@ -130,4 +209,6 @@ def _status_word(status: TaskStatus) -> str:
         return "✅ passed"
     if status == TaskStatus.FAILED:
         return "❌ failed"
+    if status == TaskStatus.NEEDS_REVIEW:
+        return "🔶 needs review"
     return status.value

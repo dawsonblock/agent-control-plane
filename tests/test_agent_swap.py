@@ -61,7 +61,9 @@ def test_agent_swap_shell_vs_custom(disposable_repo, isolated_workspace):
     # workflow treats it identically to the shell agent.
     passthrough = (
         "sh -c \"cat {prompt_path} > {artifact_dir}/agent_stdout.txt && "
-        "echo 'agent ran' > {worktree_path}/AGENT_NOTES.md\""
+        "echo 'agent ran' > {worktree_path}/AGENT_NOTES.md && "
+        "mkdir -p {worktree_path}/tests && "
+        "echo 'def test_agent(): assert True' > {worktree_path}/tests/test_agent.py\""
     )
     loop2 = EvidenceLoop(
         config=_config(repo.path, agent="custom", command_template=passthrough),

@@ -25,13 +25,13 @@ def create_worktree(
     base_branch: str,
     branch_name: str,
     target_path: Path,
-) -> Path:
+) -> tuple[Path, str]:
     """Create branch ``branch_name`` from ``base_branch`` + a linked worktree.
 
     Fails fast if the repo is dirty — we never want to base agent work on
     uncommitted human changes (see docs/safety.md, worktree-safety rule).
 
-    Returns the absolute path to the new worktree.
+    Returns ``(worktree_path, base_commit_sha)``.
     """
     if not is_clean(repo_path):
         raise RuntimeError(
@@ -41,10 +41,10 @@ def create_worktree(
     if target_path.exists():
         raise FileExistsError(f"worktree target already exists: {target_path}")
 
-    create_branch(repo_path, base_branch, branch_name)
+    base_sha = create_branch(repo_path, base_branch, branch_name)
     repo = Repo(str(repo_path))
     repo.git.worktree("add", str(target_path), branch_name)
-    return target_path
+    return target_path, base_sha
 
 
 def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -> None:

@@ -9,13 +9,16 @@ report can cite exact stdout/stderr. Empty commands in config are skipped
 from __future__ import annotations
 
 import json
-import shlex
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from acp.config import RepoConfig
-from acp.models import CommandResult
+from acp.models import CommandResult, EventType
+
+if TYPE_CHECKING:
+    from acp.events import EventWriter
 
 
 def run_commands(
@@ -23,8 +26,17 @@ def run_commands(
     repo_config: RepoConfig,
     worktree_path: Path,
     artifact_dir: Path,
+    timeout_seconds: int = 300,
+    event_writer: EventWriter | None = None,
 ) -> list[CommandResult]:
-    """Run every non-empty command in config order; return one result each."""
+    """Run every non-empty command in config order; return one result each.
+
+    Each command is run with a per-command timeout of ``timeout_seconds``.
+    If a command exceeds the timeout it is killed (exit code 124).
+
+    When ``event_writer`` is provided, writes ``command.started`` events
+    before each command and ``command.finished`` events after each.
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     results: list[CommandResult] = []
 
@@ -32,9 +44,23 @@ def run_commands(
         if not command.strip():
             results.append(_skipped(name, command, worktree_path, artifact_dir))
             continue
-        results.append(
-            _run_one(name, command, worktree_path, artifact_dir)
-        )
+        if event_writer is not None:
+            event_writer.write(EventType.COMMAND_STARTED, {"command": command, "name": name, "cwd": str(worktree_path)})
+        result = _run_one(name, command, worktree_path, artifact_dir, timeout_seconds)
+        if event_writer is not None:
+            event_writer.write(
+                EventType.COMMAND_FINISHED,
+                {
+                    "command": result.command,
+                    "exit_code": result.exit_code,
+                    "skipped": result.skipped,
+                    "timed_out": result.timed_out,
+                    "duration_seconds": result.duration_seconds,
+                    "stdout_path": str(result.stdout_path),
+                    "stderr_path": str(result.stderr_path),
+                },
+            )
+        results.append(result)
 
     # Persist the full table for the report.
     (artifact_dir / "commands.json").write_text(
@@ -48,8 +74,13 @@ def _run_one(
     command: str,
     cwd: Path,
     artifact_dir: Path,
+    timeout_seconds: int = 300,
 ) -> CommandResult:
-    """Run one command via the shell, capturing stdout/stderr to files."""
+    """Run one command via the shell, capturing stdout/stderr to files.
+
+    Timeout enforced via ``subprocess.run(timeout=...)``. Returns exit code
+    124 (standard timeout exit code) if the command is killed.
+    """
     stdout_path = artifact_dir / f"{name}_stdout.txt"
     stderr_path = artifact_dir / f"{name}_stderr.txt"
 
@@ -61,11 +92,19 @@ def _run_one(
             shell=True,
             capture_output=True,
             text=True,
+            timeout=timeout_seconds,
         )
         exit_code = proc.returncode
         out, err = proc.stdout, proc.stderr
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        exit_code = 124
+        timed_out = True
+        out = ""
+        err = f"acp: command timed out after {timeout_seconds}s"
     except Exception as exc:  # noqa: BLE001
         exit_code = 127
+        timed_out = False
         out, err = "", f"acp: failed to spawn command: {exc}"
 
     duration = time.monotonic() - start
@@ -79,6 +118,7 @@ def _run_one(
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         duration_seconds=round(duration, 3),
+        timed_out=timed_out,
     )
 
 

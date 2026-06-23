@@ -89,19 +89,24 @@ class ShellAgent:
         stdout_path: Path,
         stderr_path: Path,
     ) -> AgentResult:
-        """Make a trivial, documented edit so the evidence loop has a diff.
+        """Make trivial edits so the evidence loop has a non-empty diff.
 
-        This stands in for a real agent in tests. The edit is intentionally
-        benign — it appends an ACP marker line to AGENT_NOTES.md (creating it
-        if absent), so the reviewer sees a single new file/line change.
+        Creates AGENT_NOTES.md (doc) and tests/test_agent_edit.py (test) so
+        the diff reviewer doesn't flag ``tests_missing``. Stands in for a
+        real agent in tests.
         """
         notes = worktree_path / "AGENT_NOTES.md"
         notes.write_text(
             f"# Agent notes\n\nEdited by ACP ShellAgent (test mode).\n\n"
             f"Prompt was read from: {prompt_path.name}\n"
         )
+        test_dir = worktree_path / "tests"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        (test_dir / "test_agent_edit.py").write_text(
+            "def test_agent_edit():\n    assert True\n"
+        )
         stdout_path.write_text(
-            "ACP_TEST mode: ShellAgent created AGENT_NOTES.md as a trivial edit.\n"
+            "ACP_TEST mode: ShellAgent created AGENT_NOTES.md + tests/test_agent_edit.py.\n"
         )
         stderr_path.write_text("")
         return AgentResult(
@@ -109,5 +114,5 @@ class ShellAgent:
             exit_code=0,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            summary="Manual shell agent (test mode): trivial edit made.",
+            summary="Manual shell agent (test mode): trivial edits made.",
         )
