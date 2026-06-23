@@ -14,11 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from acp.models import Task
-from acp.vault.frontmatter import Frontmatter
 
 
 def should_promote_to_graphiti(
-    task: Task, frontmatter: Frontmatter, vault_note_path: Path
+    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
 ) -> bool:
     """Determine if a task should be promoted to Graphiti.
 
@@ -29,7 +28,7 @@ def should_promote_to_graphiti(
 
 
 def get_promotion_priority(
-    task: Task, frontmatter: Frontmatter, vault_note_path: Path
+    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
 ) -> int:
     """Get the promotion priority for a task.
 
@@ -43,7 +42,7 @@ def get_promotion_priority(
 
 
 def get_promotion_exclusions(
-    task: Task, frontmatter: Frontmatter, vault_note_path: Path
+    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
 ) -> list[str]:
     """Get reasons why a task should NOT be promoted to Graphiti.
 
@@ -64,7 +63,7 @@ def get_promotion_exclusions(
 
 
 def get_promotion_metadata(
-    task: Task, frontmatter: Frontmatter, vault_note_path: Path
+    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
 ) -> dict[str, Any]:
     """Get metadata for promoting a task to Graphiti.
 

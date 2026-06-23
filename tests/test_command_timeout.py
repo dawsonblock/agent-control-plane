@@ -75,9 +75,10 @@ def test_timeout_duration_recorded(disposable_repo, isolated_workspace):
 
 
 def test_skipped_commands_not_in_results(disposable_repo, isolated_workspace):
-    """Empty commands are filtered by CommandsSection.items() — only non-empty commands appear in results.
+    """Previously empty commands were excluded; now all command slots appear in results.
 
-    In this config only 'test' is non-empty, so only one result is returned.
+    With the updated CommandsSection.items(), all 5 slots are returned:
+    4 empty (skipped) + 1 timed-out (sleep 10).
     """
     results = run_commands(
         repo_config=_cfg(disposable_repo.path),
@@ -86,12 +87,19 @@ def test_skipped_commands_not_in_results(disposable_repo, isolated_workspace):
         timeout_seconds=1,
     )
 
-    # Only one command should be in results (test="sleep 10").
-    assert len(results) == 1, f"expected 1 result (only test is non-empty), got {len(results)}: {[r.command for r in results]}"
-    test_result = results[0]
+    # All 5 slots should be present (including the 4 empty/skipped ones).
+    assert len(results) == 5, f"expected 5 results (all command slots), got {len(results)}"
+
+    # The last result should be the test (sleep 10) which timed out.
+    test_result = results[3]  # install, lint, typecheck, test, build
     assert "sleep" in test_result.command
     assert test_result.exit_code == 124
     assert test_result.timed_out is True
+
+    # The empty slots should be marked as skipped.
+    for i in [0, 1, 2, 4]:
+        assert results[i].skipped is True, f"slot {i} should be skipped"
+        assert results[i].timed_out is False, f"slot {i} should not be timed out"
 
 
 def test_timed_out_command_mixed_with_passing(disposable_repo, isolated_workspace):

@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from acp.models import Task
-from acp.vault.frontmatter import Frontmatter
 
 
 def ingest_task_to_graphiti(
     task: Task,
-    frontmatter: Frontmatter,
+    frontmatter: dict[str, Any],
     vault_note_path: Path,
     graphiti_group_id: str = "",
 ) -> dict[str, Any]:
@@ -32,11 +31,6 @@ def ingest_task_to_graphiti(
     )
 
 
-def search_graphiti_facts(
-    query: str, entity_type: str | None = None, group_id: str = ""
-) -> list[dict[str, Any]]:
-
-    Args:
 def search_graphiti_facts(
     query: str, entity_type: str | None = None, group_id: str = ""
 ) -> list[dict[str, Any]]:

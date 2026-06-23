@@ -152,7 +152,7 @@ class EvidenceLoop:
         self.store.save(task)
         events.write(
             EventType.WORKTREE_CREATED,
-            {"branch": task.task_branch, "worktree_path": str(worktree_path)},
+            {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
         )
         console.print(f"[green]✓[/] worktree: {worktree_path}")
 
@@ -270,14 +270,13 @@ class EvidenceLoop:
         )
 
         # 9. Compute final status (gate-correct: see compute_final_status). #
-        passed = tests_pass and not review.hard_block
         status = compute_final_status(
             agent_passed=agent_result.passed if agent_result else True,
             command_results=command_results,
             diff_changed_files=diff.changed_files,
             review=review,
         )
-        task.status = status if status == TaskStatus.PASSED else status
+        task.status = status
         self.store.save(task)
 
         # 10. Write report ------------------------------------------------- #
@@ -309,8 +308,14 @@ class EvidenceLoop:
 
         # 12. Final event -------------------------------------------------- #
         status = task.status
+        if status == TaskStatus.PASSED:
+            final_event = EventType.TASK_COMPLETED
+        elif status == TaskStatus.NEEDS_REVIEW:
+            final_event = EventType.TASK_NEEDS_REVIEW
+        else:
+            final_event = EventType.TASK_FAILED
         events.write(
-            EventType.TASK_COMPLETED if status == TaskStatus.PASSED else EventType.TASK_FAILED,
+            final_event,
             {
                 "status": status.value,
                 "tests_pass": tests_pass,

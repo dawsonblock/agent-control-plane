@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 import yaml
 
+from pydantic import BaseModel
+
 from acp.gitops.diff import DiffCapture
 from acp.models import MemoryStatus, ReviewResult, Task
 
@@ -57,3 +59,49 @@ def build_frontmatter(
         allow_unicode=True,
     ).strip()
     return f"---\n{body}\n---"
+
+
+class Frontmatter(BaseModel):
+    """Parsed frontmatter from an Obsidian task note."""
+
+    type: str
+    task_id: str | None = None
+    repo: str | None = None
+    branch: str | None = None
+    status: str | None = None
+    risk: str | None = None
+    recommendation: str | None = None
+    approved: bool = False
+    memory_status: str = "draft"
+    graphiti_ingested: bool = False
+    created: str | None = None
+    files_changed: int | None = None
+    insertions: int | None = None
+    deletions: int | None = None
+    sources: list[str] = []
+
+
+def parse_frontmatter(markdown: str) -> tuple[Frontmatter, str]:
+    """Parse YAML frontmatter from a Markdown note.
+
+    Returns ``(Frontmatter, body)`` where ``body`` is everything after the
+    closing ``---``.  Raises ``ValueError`` if frontmatter is missing or
+    unparseable.
+    """
+    stripped = markdown.lstrip()
+    if not stripped.startswith("---"):
+        raise ValueError("Missing frontmatter: expected leading '---'")
+
+    # Split on the second '---'
+    parts = stripped[3:].split("---", 1)
+    if len(parts) < 2:
+        raise ValueError("Missing closing '---' in frontmatter")
+
+    yaml_text = parts[0].strip()
+    body = parts[1].strip()
+
+    raw = yaml.safe_load(yaml_text)
+    if not isinstance(raw, dict):
+        raise ValueError("Frontmatter must be a YAML mapping")
+
+    return Frontmatter(**raw), body

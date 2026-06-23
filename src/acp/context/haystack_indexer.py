@@ -37,28 +37,3 @@ class HaystackIndexer:
             "Haystack retrieval is not implemented until M6. "
             "See docs/roadmap.md."
         )
-
-        Raises:
-            FileNotFoundError: If the file is not in the index.
-        """
-        for file_info in self.index["files"]:
-            if file_info["path"] == file_path:
-                return Path(self.repo_path / file_path).read_text()
-
-        raise FileNotFoundError(f"File not found in index: {file_path}")
-
-    def search(self, query: str) -> list[dict[str, Any]]:
-        """Search for files in the index that match a query.
-
-        Args:
-            query: The search query.
-
-        Returns:
-            A list of file information dictionaries that match the query.
-        """
-        results = []
-        for file_info in self.index["files"]:
-            if query.lower() in file_info["path"].lower():
-                results.append(file_info)
-
-        return results

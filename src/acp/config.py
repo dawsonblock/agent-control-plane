@@ -47,11 +47,10 @@ class CommandsSection(BaseModel):
     build: str = ""
 
     def items(self) -> list[tuple[str, str]]:
-        """Ordered (name, command) pairs, excluding empty commands."""
+        """Ordered (name, command) pairs, including empty (skipped) commands."""
         return [
-            (name, cmd)
+            (name, getattr(self, name))
             for name in ("install", "lint", "typecheck", "test", "build")
-            if (cmd := getattr(self, name))
         ]
 
 

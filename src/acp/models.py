@@ -196,43 +196,24 @@ def compute_final_status(
 ) -> TaskStatus:
     """Determine the final task status using gate-correct logic.
 
-    A task can only be ``PASSED`` if ALL of the following hold:
-
-    * agent exit code was 0
-    * at least one non-skipped validation command actually ran
-    * all non-skipped commands passed (exit code 0)
-    * diff is non-empty (at least one changed file)
-    * review has no hard block
-    * review recommendation is ``merge``
-
-    Otherwise the result is ``FAILED`` (hard failure) or ``NEEDS_REVIEW``
-    (incomplete/risky — a human must decide).
+    Delegates to ``acp.review.gates.evaluate_final_gates`` which is the
+    single source of truth for gate outcomes. This function remains for
+    backward compatibility; new code should call ``evaluate_final_gates``
+    directly for richer results.
     """
-    # --- Hard failures (agent itself failed) ------------------------------- #
-    if not agent_passed:
-        return TaskStatus.FAILED
+    from acp.review.gates import evaluate_final_gates, GateOutcome
 
-    ran = [r for r in command_results if not r.skipped]
+    agent_exit_code = 0 if agent_passed else 1
 
-    # --- No validation commands ran → needs review ------------------------ #
-    if not ran:
+    result = evaluate_final_gates(
+        agent_exit_code=agent_exit_code,
+        command_results=command_results,
+        review_result=review,
+        changed_files=diff_changed_files,
+    )
+
+    if result.outcome == GateOutcome.PASSED:
+        return TaskStatus.PASSED
+    if result.outcome == GateOutcome.NEEDS_REVIEW:
         return TaskStatus.NEEDS_REVIEW
-
-    # --- At least one command failed → FAILED ------------------------------ #
-    if any(not r.passed for r in ran):
-        return TaskStatus.FAILED
-
-    # --- Empty diff → needs review (agent produced nothing) --------------- #
-    if not diff_changed_files:
-        return TaskStatus.NEEDS_REVIEW
-
-    # --- Review checks ---------------------------------------------------- #
-    if review is not None:
-        if review.hard_block:
-            return TaskStatus.FAILED
-        if review.recommendation == Recommendation.REJECT:
-            return TaskStatus.FAILED
-        if review.recommendation != Recommendation.MERGE:
-            return TaskStatus.NEEDS_REVIEW
-
-    return TaskStatus.PASSED
+    return TaskStatus.FAILED

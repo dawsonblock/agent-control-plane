@@ -94,10 +94,10 @@ def _needs_review(state: dict[str, Any]) -> bool:
 
 
 def _route_after_write_report(state: dict[str, Any]) -> str:
-    """Route after write_report: NEEDS_REVIEW goes to a distinct terminal."""
+    """Route after write_report: vault note already written for all statuses."""
     st = state.get("status")
     if st == TaskStatus.PASSED:
-        return "write_vault_note"
+        return "done"
     if st == TaskStatus.NEEDS_REVIEW:
         return "needs_review"
     return "failed"

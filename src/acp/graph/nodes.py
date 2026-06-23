@@ -254,7 +254,26 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         repair_history=state.get("repair_history", []),
     )
     ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
-    return {"report_path": report_path, "status": task.status}
+
+    # Write vault note for ALL statuses (PASSED, FAILED, NEEDS_REVIEW).
+    vault_note_path = None
+    if review is not None:
+        try:
+            vault_note_path = write_vault_note(
+                report_body=report_path.read_text(),
+                task=task,
+                review=review,
+                diff=state["diff"],
+                vault_root=state["vault_root"],
+            )
+            ctx.events.write(
+                EventType.VAULT_NOTE_WRITTEN,
+                {"vault_note_path": str(vault_note_path)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {"report_path": report_path, "vault_note_path": vault_note_path, "status": task.status}
 
 
 def write_vault_note_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
@@ -274,11 +293,10 @@ def write_vault_note_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
 
 
 def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    """Terminal success node. Writes task.completed or task.failed based on status."""
+    """Terminal success node. Writes task.completed based on status."""
     task = state["task"]
-    final = EventType.TASK_COMPLETED if task.status == TaskStatus.PASSED else EventType.TASK_FAILED
     ctx.events.write(
-        final,
+        EventType.TASK_COMPLETED,
         {
             "status": task.status.value,
             "tests_pass": all_passed(state.get("command_results", [])),
@@ -291,16 +309,17 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal failure node.
 
-    If we have a diff, we still write a report + vault note — the spec rule:
-    "failed task still writes report." If we failed before the worktree (dirty
-    repo), there's nothing to report on, so we just finalize the task status.
+    If ``write_report_node`` already wrote the report (normal graph path),
+    this node only writes the terminal ``TASK_FAILED`` event. If we failed
+    before ``write_report_node`` ran (e.g. dirty repo, worktree error), we
+    write a best-effort report — but only if we got far enough to have a diff.
     """
     task = state["task"]
+    report_path = state.get("report_path")
+    vault_note_path = state.get("vault_note_path")
 
-    # Best-effort evidence write if we got far enough to have a diff.
-    report_path = None
-    vault_note_path = None
-    if state.get("diff") is not None and state.get("review_result") is not None:
+    # Only write report/vault note if NOT already written by write_report_node.
+    if report_path is None and state.get("diff") is not None and state.get("review_result") is not None:
         try:
             report_path = write_report(
                 task=task,
@@ -338,46 +357,25 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal node for tasks that completed but need human review.
 
-    Writes REPORT_WRITTEN + VAULT_NOTE_WRITTEN + TASK_NEEDS_REVIEW events.
-    NEEDS_REVIEW is not a hard failure — the work produced may be valid —
-    but it requires a human to decide.
+    ``write_report_node`` already wrote the report; this node only writes
+    the terminal ``TASK_NEEDS_REVIEW`` event.
     """
     task = state["task"]
-    try:
-        report_path = write_report(
-            task=task,
-            command_results=state.get("command_results", []),
-            review=state.get("review_result"),
-            diff=state.get("diff"),
-            artifact_dir=state["artifacts_dir"],
-            agent_result=state.get("agent_result"),
-            repair_history=state.get("repair_history", []),
-        )
-        ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
-    except Exception:  # noqa: BLE001
-        report_path = None
-
-    if report_path is not None and state.get("review_result") is not None and state.get("diff") is not None:
-        try:
-            vault_note_path = write_vault_note(
-                report_body=report_path.read_text(),
-                task=task,
-                review=state["review_result"],
-                diff=state["diff"],
-                vault_root=state["vault_root"],
-            )
-            ctx.events.write(EventType.VAULT_NOTE_WRITTEN, {"vault_note_path": str(vault_note_path)})
-        except Exception:  # noqa: BLE001
-            pass
-
+    task.status = TaskStatus.NEEDS_REVIEW
+    ctx.store.save(task)
     ctx.events.write(
         EventType.TASK_NEEDS_REVIEW,
         {
-            "status": TaskStatus.NEEDS_REVIEW.value,
-            "error": state.get("error", "Task completed but needs human review"),
+            "status": task.status.value,
+            "report_path": str(state.get("report_path", "")),
+            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
-    return {"status": TaskStatus.NEEDS_REVIEW}
+    return {
+        "status": TaskStatus.NEEDS_REVIEW,
+        "report_path": state.get("report_path"),
+        "vault_note_path": state.get("vault_note_path"),
+    }
 
 
 # --------------------------------------------------------------------------- #

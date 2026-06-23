@@ -1,8 +1,7 @@
 """Gate evaluator — the single place that decides final task outcome.
 
-This is the v0.5 gate-correct logic in standalone form. One function owns
-the decision: a task may only be marked ``PASSED`` if all of the following
-hold:
+This is the v0.5 gate-correct logic. One function owns the decision:
+a task may only be marked ``PASSED`` if all of the following hold:
 
 * agent exit code was 0
 * at least one non-skipped validation command actually ran
@@ -11,10 +10,8 @@ hold:
 * review has no hard block
 * review recommendation is ``merge``
 
-The existing ``compute_final_status()`` in ``models.py`` implements the
-same logic and is the active gate. This module provides a richer ``GateResult``
-with explicit reasons and evidence counts, intended for report rendering and
-future API use.
+The legacy ``compute_final_status()`` in ``models.py`` is now a thin wrapper
+around this module. All new code should call ``evaluate_final_gates`` directly.
 """
 
 from __future__ import annotations
@@ -51,13 +48,17 @@ def evaluate_final_gates(
     *,
     agent_exit_code: int | None,
     command_results: list[CommandResult],
-    review_result: ReviewResult,
+    review_result: ReviewResult | None = None,
     changed_files: list[str],
 ) -> GateResult:
     """Evaluate all final gates and return the structured result.
 
     This is the single source of truth for final outcome. Every caller that
     needs to decide PASSED / FAILED / NEEDS_REVIEW should use this function.
+
+    When ``review_result`` is ``None`` the gate evaluator treats it as missing
+    evidence — the outcome will be ``NEEDS_REVIEW`` unless there is already a
+    hard failure.
     """
     reasons: list[str] = []
 
@@ -76,8 +77,8 @@ def evaluate_final_gates(
             validation_commands_ran=len(non_skipped_commands),
             validation_commands_failed=len(failed_commands),
             diff_is_empty=diff_is_empty,
-            review_recommendation=review_result.recommendation.value if review_result else None,
-            review_hard_block=review_result.hard_block if review_result else False,
+            review_recommendation=None,
+            review_hard_block=False,
         )
 
     if agent_exit_code != 0:
@@ -88,7 +89,9 @@ def evaluate_final_gates(
         reasons.append(f"{len(failed_commands)} validation command(s) failed.")
     if diff_is_empty:
         reasons.append("No files changed.")
-    if review_result is not None:
+    if review_result is None:
+        reasons.append("Review result missing — cannot verify merge readiness.")
+    else:
         if review_result.hard_block:
             reasons.append("Review hard block triggered.")
         if review_result.recommendation == "reject":
@@ -109,6 +112,7 @@ def evaluate_final_gates(
     elif (
         len(non_skipped_commands) == 0
         or diff_is_empty
+        or review_result is None
         or (review_result is not None and review_result.recommendation == "revise")
     ):
         outcome = GateOutcome.NEEDS_REVIEW

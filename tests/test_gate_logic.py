@@ -168,12 +168,18 @@ def test_review_reject_failed() -> None:
     assert status == TaskStatus.FAILED
 
 
-def test_none_review_with_good_commands_passed() -> None:
-    """No review result at all — if everything else passes, it passes."""
+def test_none_review_with_good_commands_needs_review() -> None:
+    """No review result — missing review means NEEDS_REVIEW, not PASSED.
+
+    A missing review is incomplete evidence. The system must not mark a task
+    PASSED without a review confirming merge readiness.
+    """
     status = compute_final_status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
         review=None,
     )
-    assert status == TaskStatus.PASSED
+    assert status == TaskStatus.NEEDS_REVIEW, (
+        f"expected NEEDS_REVIEW for missing review, got {status}"
+    )
