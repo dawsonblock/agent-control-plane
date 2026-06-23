@@ -45,6 +45,7 @@ class CommandsSection(BaseModel):
     typecheck: str = ""
     test: str = ""
     build: str = ""
+    timeout_seconds: int = 1800
 
     def items(self) -> list[tuple[str, str]]:
         """Ordered (name, command) pairs, including empty (skipped) commands."""

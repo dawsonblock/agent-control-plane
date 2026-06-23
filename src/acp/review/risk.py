@@ -36,6 +36,7 @@ class RiskCategory(str, Enum):
     TESTS_MISSING = "tests_missing"
     TESTS_FAILING = "tests_failing"
     EMPTY_DIFF = "empty_diff"
+    NO_VALIDATION = "no_validation"
 
 
 @dataclass

@@ -46,7 +46,6 @@ from acp.graph.nodes import (
     run_repair_agent_node,
     run_tests_node,
     write_report_node,
-    write_vault_note_node,
 )
 from acp.graph.state import ACPState
 from acp.models import EventType, TaskStatus
@@ -171,7 +170,6 @@ def build_workflow(
     g.add_node("capture_diff", _wrap(capture_diff_node))
     g.add_node("review_diff", _wrap(review_diff_node))
     g.add_node("write_report", _wrap(write_report_node))
-    g.add_node("write_vault_note", _wrap(write_vault_note_node))
     g.add_node("done", _wrap(done_node))
     g.add_node("failed", _wrap(failed_node))
     g.add_node("needs_review", _wrap(needs_review_node))
@@ -201,10 +199,8 @@ def build_workflow(
     g.add_edge("capture_diff", "review_diff")
     g.add_edge("review_diff", "write_report")
 
-    # write_report → write_vault_note (PASSED) OR needs_review OR failed
+    # write_report → done (PASSED) OR needs_review OR failed
     g.add_conditional_edges("write_report", _route_after_write_report)
-
-    g.add_edge("write_vault_note", "done")
 
     # Terminal nodes.
     g.add_edge("done", END)

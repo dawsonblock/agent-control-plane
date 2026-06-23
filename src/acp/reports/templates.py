@@ -18,9 +18,10 @@ from acp.models import (
 )
 from acp.testing.parsers import summarize
 
-_PASS = "✅ pass"
-_FAIL = "❌ fail"
-_SKIP = "⏭ skip"
+
+_PASS = "\u2705 pass"
+_FAIL = "\u274c fail"
+_SKIP = "\u23ed skip"
 
 
 def render_report(
@@ -31,8 +32,14 @@ def render_report(
     diff: DiffCapture,
     agent_result: AgentResult | None,
     repair_history: list[dict[str, object]] | None = None,
+    gate_result: object | None = None,
 ) -> str:
-    """Render the full final_report.md body (no frontmatter)."""
+    """Render the full final_report.md body (no frontmatter).
+
+    When ``gate_result`` is provided, the Gate Summary section is rendered
+    from the gate result's reasons rather than recomputed from raw data.
+    This ensures the report always agrees with ``evaluate_final_gates``.
+    """
     summary = summarize(command_results)
     status_word = _status_word(task.status)
     repair_history = repair_history or []
@@ -41,13 +48,13 @@ def render_report(
     lines.append(f"# Task report: {task.task_id}")
     lines.append("")
     lines.append(f"- **Status:** {status_word}")
-    lines.append(f"- **Repo:** `{task.repo_name}` (`{task.base_branch}` → `{task.task_branch}`)")
+    lines.append(f"- **Repo:** `{task.repo_name}` (`{task.base_branch}` -> `{task.task_branch}`)")
     lines.append(f"- **Base commit:** `{task.base_commit_sha or '(not recorded)'}`")
     lines.append(f"- **Worktree:** `{task.worktree_path}`")
     lines.append(f"- **Request:** {task.user_request}")
-    lines.append(f"- **Risk:** {review.risk.value}  —  **Recommendation:** {review.recommendation.value}")
+    lines.append(f"- **Risk:** {review.risk.value}  --  **Recommendation:** {review.recommendation.value}")
     lines.append(f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}")
-    lines.append(f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped")  # type: ignore[arg-type]
+    lines.append(f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped")
     if repair_history:
         lines.append(f"- **Repair attempts:** {len(repair_history)}")
     lines.append(f"- **Created:** {task.created_at}")
@@ -57,52 +64,96 @@ def render_report(
     lines.append("| Gate | Result | Evidence |")
     lines.append("| --- | --- | --- |")
 
-    # Agent exit code gate
-    if agent_result is None:
-        lines.append("| Agent exit code | ❌ failed | no agent result |")
-    elif agent_result.exit_code != 0:
-        lines.append(f"| Agent exit code | ❌ failed | exit_code={agent_result.exit_code} |")
-    else:
-        lines.append(f"| Agent exit code | ✅ passed | exit_code={agent_result.exit_code} |")
+    if gate_result is not None:
+        # Render from the authoritative GateResult.
+        gr = gate_result
+        if gr.agent_exit_code is None:
+            lines.append("| Agent exit code | ❌ failed | missing |")
+        elif gr.agent_exit_code != 0:
+            lines.append(f"| Agent exit code | ❌ failed | exit_code={gr.agent_exit_code} |")
+        else:
+            lines.append(f"| Agent exit code | ✅ passed | exit_code={gr.agent_exit_code} |")
 
-    # Validation commands ran gate
-    non_skipped = [r for r in command_results if not r.skipped]
-    if len(non_skipped) == 0:
-        lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
-    else:
-        lines.append(f"| Validation commands ran | ✅ passed | {len(non_skipped)} commands ran |")
+        if gr.validation_commands_ran == 0:
+            lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
+        else:
+            lines.append(f"| Validation commands ran | ✅ passed | {gr.validation_commands_ran} commands ran |")
 
-    # Validation commands passed gate
-    failed_cmds = [r for r in non_skipped if not r.passed]
-    if failed_cmds:
-        lines.append(f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |")
-    elif non_skipped:
-        lines.append(f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |")
-    else:
-        lines.append("| Validation commands passed | 🔶 needs review | n/a |")
+        if gr.validation_commands_failed > 0:
+            passed = gr.validation_commands_ran - gr.validation_commands_failed
+            lines.append(f"| Validation commands passed | ❌ failed | {passed}/{gr.validation_commands_ran} passed |")
+        elif gr.validation_commands_ran > 0:
+            lines.append(f"| Validation commands passed | ✅ passed | {gr.validation_commands_ran}/{gr.validation_commands_ran} passed |")
+        else:
+            lines.append("| Validation commands passed | 🔶 needs review | n/a |")
 
-    # Diff non-empty gate
-    if len(diff.changed_files) == 0:
-        lines.append("| Diff non-empty | 🔶 needs review | 0 changed files |")
-    else:
-        lines.append(f"| Diff non-empty | ✅ passed | {len(diff.changed_files)} changed files |")
+        if gr.diff_is_empty:
+            lines.append("| Diff non-empty | 🔶 needs review | 0 changed files |")
+        else:
+            lines.append("| Diff non-empty | ✅ passed | changes detected |")
 
-    # Review hard block gate
-    if review.hard_block:
-        lines.append("| Review hard block | ❌ failed | true |")
-    else:
-        lines.append("| Review hard block | ✅ passed | false |")
+        if gr.review_hard_block:
+            lines.append("| Review hard block | ❌ failed | true |")
+        else:
+            lines.append("| Review hard block | ✅ passed | false |")
 
-    # Review recommendation gate
-    if review.recommendation == Recommendation.REJECT:
-        lines.append("| Review recommendation | ❌ failed | reject |")
-    elif review.recommendation == Recommendation.REVISE:
-        lines.append("| Review recommendation | 🔶 needs review | revise |")
-    else:
-        lines.append("| Review recommendation | ✅ passed | merge |")
+        if gr.review_recommendation == "reject":
+            lines.append("| Review recommendation | ❌ failed | reject |")
+        elif gr.review_recommendation == "revise":
+            lines.append("| Review recommendation | 🔶 needs review | revise |")
+        else:
+            lines.append("| Review recommendation | ✅ passed | merge |")
 
-    lines.append("")
-    lines.append(f"**Final gate outcome:** {_status_word(task.status)}")
+        lines.append("")
+        lines.append(f"**Final gate outcome:** {_status_word(task.status)}")
+        if gr.reasons:
+            lines.append("")
+            lines.append("**Gate reasons:**")
+            for r in gr.reasons:
+                lines.append(f"- {r}")
+    else:
+        # Fallback: render from raw data.
+        if agent_result is None:
+            lines.append("| Agent exit code | ❌ failed | no agent result |")
+        elif agent_result.exit_code != 0:
+            lines.append(f"| Agent exit code | ❌ failed | exit_code={agent_result.exit_code} |")
+        else:
+            lines.append(f"| Agent exit code | ✅ passed | exit_code={agent_result.exit_code} |")
+
+        non_skipped = [r for r in command_results if not r.skipped]
+        if len(non_skipped) == 0:
+            lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
+        else:
+            lines.append(f"| Validation commands ran | ✅ passed | {len(non_skipped)} commands ran |")
+
+        failed_cmds = [r for r in non_skipped if not r.passed]
+        if failed_cmds:
+            lines.append(f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |")
+        elif non_skipped:
+            lines.append(f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |")
+        else:
+            lines.append("| Validation commands passed | 🔶 needs review | n/a |")
+
+        if len(diff.changed_files) == 0:
+            lines.append("| Diff non-empty | 🔶 needs review | 0 changed files |")
+        else:
+            lines.append(f"| Diff non-empty | ✅ passed | {len(diff.changed_files)} changed files |")
+
+        if review.hard_block:
+            lines.append("| Review hard block | ❌ failed | true |")
+        else:
+            lines.append("| Review hard block | ✅ passed | false |")
+
+        if review.recommendation == Recommendation.REJECT:
+            lines.append("| Review recommendation | ❌ failed | reject |")
+        elif review.recommendation == Recommendation.REVISE:
+            lines.append("| Review recommendation | 🔶 needs review | revise |")
+        else:
+            lines.append("| Review recommendation | ✅ passed | merge |")
+
+        lines.append("")
+        lines.append(f"**Final gate outcome:** {_status_word(task.status)}")
+
     lines.append("")
     lines.append("## Reviewer summary")
     lines.append("")
@@ -136,7 +187,7 @@ def render_report(
         else:
             outcome = _FAIL
         lines.append(
-            f"| `{r.command or '—'}` | {r.exit_code} | {outcome} | {r.duration_seconds} |"
+            f"| `{r.command or '\u2014'}` | {r.exit_code} | {outcome} | {r.duration_seconds} |"
         )
     lines.append("")
 
@@ -148,12 +199,70 @@ def render_report(
         for h in repair_history:
             attempt = h.get("attempt", "?")
             prompt = str(h.get("prompt_path", "")).split("/")[-1]
-            lines.append(f"- attempt {attempt} — prompt: `artifacts/{prompt}`")
+            lines.append(f"- attempt {attempt} -- prompt: `artifacts/{prompt}`")
         lines.append("")
 
-    # --- Memory candidates section (gate-dependent) ---------------------- #
+    # Memory candidates section
     lines.append("## Memory candidates")
     lines.append("")
+    can_promote = (
+        task.status == TaskStatus.PASSED
+        and review.recommendation == Recommendation.MERGE
+        and not review.hard_block
+    )
+    if can_promote:
+        lines.append("This task **may** become a memory candidate once approved.")
+        lines.append("")
+        lines.append("- All gates passed. Review the vault note and set `approved: true` to enable memory promotion.")
+        lines.append("- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria.")
+    else:
+        lines.append("This task is **not** a memory candidate until the conditions below are resolved:")
+        lines.append("")
+        if task.status != TaskStatus.PASSED:
+            lines.append(f"- **Status:** {_status_word(task.status)} -- only `PASSED` tasks qualify")
+        if review.recommendation != Recommendation.MERGE:
+            lines.append(f"- **Recommendation:** `{review.recommendation.value}` -- only `merge` qualifies")
+        if review.hard_block:
+            lines.append("- **Hard block:** active -- must be resolved before promotion")
+        lines.append(f"- **Risk:** {review.risk.value} -- see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)")
+    lines.append("")
+
+    lines.append("## Agent")
+    lines.append("")
+    if agent_result is not None:
+        lines.append(f"- **Agent:** `{agent_result.agent_name}` (exit {agent_result.exit_code})")
+        lines.append(f"- **Summary:** {agent_result.summary}")
+        lines.append("- **stdout:** `artifacts/agent_stdout.txt`")
+        lines.append("- **stderr:** `artifacts/agent_stderr.txt`")
+    else:
+        lines.append("_(no agent result -- run failed before agent execution)_")
+    lines.append("")
+
+    lines.append("## Evidence")
+    lines.append("")
+    lines.append("All artifacts live under `data/runs/<task_id>/artifacts/`:")
+    lines.append("")
+    lines.append("- `agent_prompt.txt` -- what the agent was told")
+    lines.append("- `agent_stdout.txt` / `agent_stderr.txt` -- agent output")
+    lines.append("- `<cmd>_stdout.txt` / `<cmd>_stderr.txt` -- per-command output")
+    lines.append("- `commands.json` -- command results table")
+    lines.append("- `diff.patch` / `diff_stat.txt` -- the captured change")
+    lines.append("- `review.json` -- this review, machine-readable")
+    lines.append("")
+    lines.append("The event log (`events.jsonl`) is the source of truth; this report is its human-readable projection.")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _status_word(status: TaskStatus) -> str:
+    if status == TaskStatus.PASSED:
+        return "\u2705 passed"
+    if status == TaskStatus.FAILED:
+        return "\u274c failed"
+    if status == TaskStatus.NEEDS_REVIEW:
+        return "\U0001f536 needs review"
+    return status.value
     can_promote = (
         task.status == TaskStatus.PASSED
         and review.recommendation == Recommendation.MERGE

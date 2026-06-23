@@ -25,8 +25,13 @@ def write_report(
     artifact_dir: Path,
     agent_result: AgentResult | None = None,
     repair_history: list[dict[str, Any]] | None = None,
+    gate_result: object | None = None,
 ) -> Path:
-    """Render final_report.md into ``artifact_dir`` and return its path."""
+    """Render final_report.md into ``artifact_dir`` and return its path.
+
+    When ``gate_result`` is provided, passes it through to the template so
+    the Gate Summary section renders from the authoritative GateResult.
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     body = render_report(
         task=task,
@@ -35,6 +40,7 @@ def write_report(
         diff=diff,
         agent_result=agent_result,
         repair_history=repair_history,
+        gate_result=gate_result,
     )
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)

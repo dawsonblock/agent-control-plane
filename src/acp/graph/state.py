@@ -56,6 +56,10 @@ class ACPState(TypedDict, total=False):
     report_path: Path
     vault_note_path: Path
 
+    # --- gate result (v0.5.2: first-class final gate artifact) ---------- #
+    gate_result: Any         # GateResult — stored by write_report_node, consumed
+                             # by terminal nodes and report rendering.
+
     # --- failure tracking (for the M4 repair loop and reports) ---------- #
     error: str             # human-readable reason if status == FAILED
     failure_event: EventType  # which final event to write (task.failed / task.completed)

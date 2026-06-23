@@ -218,11 +218,12 @@ class EvidenceLoop:
         # 6. Run configured commands --------------------------------------- #
         task.status = TaskStatus.TESTING
         self.store.save(task)
+        cmd_timeout = cfg.commands.timeout_seconds or cfg.agent.timeout_seconds
         command_results = run_commands(
             repo_config=cfg,
             worktree_path=worktree_path,
             artifact_dir=artifacts,
-            timeout_seconds=cfg.agent.timeout_seconds,
+            timeout_seconds=cmd_timeout,
             event_writer=events,
         )
         tests_pass = all_passed(command_results)

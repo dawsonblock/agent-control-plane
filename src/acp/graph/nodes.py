@@ -30,9 +30,10 @@ from acp.config import RepoConfig
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
-from acp.models import EventType, TaskStatus, compute_final_status
+from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
+from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
 from acp.testing.parsers import extract_failures
 from acp.testing.runner import all_passed, run_commands
@@ -178,11 +179,12 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.TESTING
     ctx.store.save(state["task"])
+    cmd_timeout = cfg.commands.timeout_seconds or cfg.agent.timeout_seconds
     command_results = run_commands(
         repo_config=cfg,
         worktree_path=state["worktree_path"],
         artifact_dir=state["artifacts_dir"],
-        timeout_seconds=cfg.agent.timeout_seconds,
+        timeout_seconds=cmd_timeout,
         event_writer=ctx.events,
     )
     return {"command_results": command_results}
@@ -233,25 +235,33 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
     review = state.get("review_result")
-    # Compute final status using gate-correct logic.
     agent_result = state.get("agent_result")
-    status = compute_final_status(
-        agent_passed=agent_result.passed if agent_result else True,
-        command_results=state.get("command_results", []),
-        diff_changed_files=state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0)).changed_files,
-        review=review,
+    command_results = state.get("command_results", [])
+    diff = state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0))
+
+    # Evaluate gates directly — GateResult is now the single truth object.
+    gate_result = evaluate_final_gates(
+        agent_exit_code=agent_result.exit_code if agent_result else None,
+        command_results=command_results,
+        review_result=review,
+        changed_files=diff.changed_files,
     )
-    task.status = status
+    task.status = (
+        TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
+        else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
+        else TaskStatus.FAILED
+    )
     ctx.store.save(task)
 
     report_path = write_report(
         task=task,
-        command_results=state.get("command_results", []),
+        command_results=command_results,
         review=review,
-        diff=state["diff"],
+        diff=diff,
         artifact_dir=state["artifacts_dir"],
-        agent_result=state.get("agent_result"),
+        agent_result=agent_result,
         repair_history=state.get("repair_history", []),
+        gate_result=gate_result,
     )
     ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
 
@@ -263,43 +273,44 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
                 report_body=report_path.read_text(),
                 task=task,
                 review=review,
-                diff=state["diff"],
+                diff=diff,
                 vault_root=state["vault_root"],
             )
             ctx.events.write(
                 EventType.VAULT_NOTE_WRITTEN,
                 {"vault_note_path": str(vault_note_path)},
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Vault write failure must be visible — write a node.failed event.
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "write_report_node.vault", "message": str(exc)},
+            )
+            # If the task would have been PASSED, degrade to NEEDS_REVIEW
+            # because the review surface (vault note) was not written.
+            if task.status == TaskStatus.PASSED:
+                task.status = TaskStatus.NEEDS_REVIEW
+                ctx.store.save(task)
 
-    return {"report_path": report_path, "vault_note_path": vault_note_path, "status": task.status}
-
-
-def write_vault_note_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    task = state["task"]
-    vault_note_path = write_vault_note(
-        report_body=state["report_path"].read_text(),
-        task=task,
-        review=state["review_result"],
-        diff=state["diff"],
-        vault_root=state["vault_root"],
-    )
-    ctx.events.write(
-        EventType.VAULT_NOTE_WRITTEN,
-        {"vault_note_path": str(vault_note_path)},
-    )
-    return {"vault_note_path": vault_note_path}
+    return {
+        "report_path": report_path,
+        "vault_note_path": vault_note_path,
+        "status": task.status,
+        "gate_result": gate_result,
+    }
 
 
 def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    """Terminal success node. Writes task.completed based on status."""
+    """Terminal success node. Writes task.completed with gate-derived validation fields."""
     task = state["task"]
+    gate_result = state.get("gate_result")
     ctx.events.write(
         EventType.TASK_COMPLETED,
         {
             "status": task.status.value,
-            "tests_pass": all_passed(state.get("command_results", [])),
+            "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_status": gate_result.outcome.value if gate_result else "unknown",
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
@@ -329,6 +340,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 artifact_dir=state["artifacts_dir"],
                 agent_result=state.get("agent_result"),
                 repair_history=state.get("repair_history", []),
+                gate_result=state.get("gate_result"),
             )
             ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
             vault_note_path = write_vault_note(
@@ -347,9 +359,16 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
     task.status = TaskStatus.FAILED
     ctx.store.save(task)
+    gate_result = state.get("gate_result")
     ctx.events.write(
         EventType.TASK_FAILED,
-        {"status": task.status.value, "error": state.get("error", "unknown")},
+        {
+            "status": task.status.value,
+            "error": state.get("error", "unknown"),
+            "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_status": gate_result.outcome.value if gate_result else "unknown",
+        },
     )
     return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path}
 
@@ -363,11 +382,15 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     task = state["task"]
     task.status = TaskStatus.NEEDS_REVIEW
     ctx.store.save(task)
+    gate_result = state.get("gate_result")
     ctx.events.write(
         EventType.TASK_NEEDS_REVIEW,
         {
             "status": task.status.value,
             "report_path": str(state.get("report_path", "")),
+            "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_status": gate_result.outcome.value if gate_result else "unknown",
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )

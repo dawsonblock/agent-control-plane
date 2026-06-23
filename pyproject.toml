@@ -7,7 +7,7 @@ name = "agent-control-plane"
 version = "0.1.0"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Dawson Block" }]
 keywords = ["agents", "control-plane", "langgraph", "evidence", "obsidian"]
@@ -24,11 +24,15 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "rich>=13.7,<16",
     "gitpython>=3.1,<4",
+    # LangGraph is the default runtime engine — the graph is the primary
+    # execution path. Kept as a core dependency rather than optional since
+    # the CLI defaults to graph mode (v0.5+).
+    "langgraph>=1.2,<2",
 ]
 
 [project.optional-dependencies]
-# M3 adds LangGraph. Kept optional so M0/M1 install is minimal; the
-# graph modules import lazily and fail with a clear message if absent.
+# v0.5: LangGraph moved to core deps. This group is kept for backwards
+# compatibility but is now a no-op (all deps are in core).
 graph = [
     "langgraph>=1.2,<2",
 ]

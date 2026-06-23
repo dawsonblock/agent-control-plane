@@ -23,6 +23,7 @@ Check categories:
   - permissions     — permission/privilege files touched (chmod, sudoers...)
   - tests_missing   — behavior changed without test changes
   - tests_failing   — configured commands exited nonzero
+  - no_validation   — zero non-skipped validation commands ran
   - empty_diff      — agent produced no changes
 """
 
@@ -228,7 +229,14 @@ def _evaluate(
         )
 
     # --- command outcomes ------------------------------------------------- #
-    if not tests_pass:
+    non_skipped = [r for r in command_results if not r.skipped]
+    if len(non_skipped) == 0:
+        engine.add(
+            RiskCategory.NO_VALIDATION,
+            "No validation commands ran — risk cannot be assessed from test results",
+            level=RiskLevel.MEDIUM,
+        )
+    elif not tests_pass:
         failed = [r.command for r in command_results if not r.passed and not r.skipped]
         engine.add(
             RiskCategory.TESTS_FAILING,

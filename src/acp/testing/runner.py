@@ -142,8 +142,3 @@ def _skipped(name: str, command: str, cwd: Path, artifact_dir: Path) -> CommandR
 def all_passed(results: list[CommandResult]) -> bool:
     """True iff no non-skipped command failed. (Skipped commands don't count.)"""
     return all(r.passed for r in results if not r.skipped)
-
-
-def command_names_for_shell(command: str) -> list[str]:
-    """Debug helper: show how shlex would split a command string."""
-    return shlex.split(command)

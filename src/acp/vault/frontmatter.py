@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import yaml
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from acp.gitops.diff import DiffCapture
 from acp.models import MemoryStatus, ReviewResult, Task
@@ -78,7 +78,7 @@ class Frontmatter(BaseModel):
     files_changed: int | None = None
     insertions: int | None = None
     deletions: int | None = None
-    sources: list[str] = []
+    sources: list[str] = Field(default_factory=list)
 
 
 def parse_frontmatter(markdown: str) -> tuple[Frontmatter, str]:
