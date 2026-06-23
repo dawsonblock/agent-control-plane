@@ -6,7 +6,8 @@ reads it, decides, and flips the flags. Only then may Graphiti (M7) ingest.
 
 Critical safety property: this writer **never overwrites an already-approved
 note**. If a note exists and was approved, re-running a task must not silently
-clobber a human's decision.
+clobber a human's decision. Uses the authoritative ``parse_frontmatter()``
+parser — not a cheap line scan — so malformed frontmatter is also caught.
 """
 
 from __future__ import annotations
@@ -16,18 +17,7 @@ from pathlib import Path
 
 from acp.gitops.diff import DiffCapture
 from acp.models import ReviewResult, Task
-from acp.vault.frontmatter import build_frontmatter
-
-
-def _looks_approved(existing_text: str) -> bool:
-    """Cheap, dependency-free check for `approved: true` in frontmatter."""
-    for line in existing_text.splitlines():
-        s = line.strip()
-        if s == "---":
-            continue
-        if s.startswith("approved:"):
-            return "true" in s.lower()
-    return False
+from acp.vault.frontmatter import build_frontmatter, parse_frontmatter
 
 
 def write_vault_note(
@@ -41,19 +31,29 @@ def write_vault_note(
 ) -> Path:
     """Write ``vault/tasks/<task_id>.md`` (frontmatter + report body).
 
-    Raises if the destination already exists AND is approved — protecting the
-    human's prior decision. Non-approved existing notes are overwritten (e.g.
-    re-runs before approval).
+    Raises ``PermissionError`` if the destination already exists AND is
+    approved (using the authoritative ``parse_frontmatter()`` parser).
+    Malformed frontmatter also raises ``PermissionError`` — fail closed.
+    Non-approved existing notes are overwritten (e.g. re-runs before
+    approval).
     """
     vault_root = Path(vault_root)
     tasks_dir = vault_root / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
     note_path = tasks_dir / f"{task.task_id}.md"
 
-    if note_path.exists() and _looks_approved(note_path.read_text()):
-        raise PermissionError(
-            f"refusing to overwrite an approved note: {note_path}"
-        )
+    if note_path.exists():
+        existing = note_path.read_text()
+        try:
+            frontmatter, _ = parse_frontmatter(existing)
+        except ValueError:
+            raise PermissionError(
+                f"refusing to overwrite note with malformed frontmatter: {note_path}"
+            )
+        if frontmatter.approved:
+            raise PermissionError(
+                f"refusing to overwrite an approved note: {note_path}"
+            )
 
     frontmatter = build_frontmatter(task=task, review=review, diff=diff, today=today)
     note = f"{frontmatter}\n\n{report_body.lstrip()}\n"

@@ -116,3 +116,55 @@ def test_overwrite_approved_note_raises(tmp_path: Path) -> None:
     final = note_path.read_text()
     assert "First run" in final
     assert "Second run" not in final
+
+
+def test_overwrite_malformed_frontmatter_raises(tmp_path: Path) -> None:
+    """A note with malformed frontmatter RAISES — fail closed, never overwrite."""
+    t = _task(task_id="task_malformed_test")
+    note_path = tmp_path / "tasks" / "task_malformed_test.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    # Write a note with broken frontmatter (missing closing ---).
+    note_path.write_text("---\napproved: true\n\n# body\n")
+
+    with pytest.raises(PermissionError, match="malformed frontmatter"):
+        write_vault_note(
+            report_body="# Should not write",
+            task=t,
+            review=_review(),
+            diff=_diff(),
+            vault_root=tmp_path,
+        )
+
+
+def test_overwrite_approved_via_frontmatter_parser(tmp_path: Path) -> None:
+    """Approved detection uses parse_frontmatter(), not line scan.
+
+    The word 'approved:' in body text should NOT trigger the check.
+    Only the frontmatter value matters.
+    """
+    t = _task(task_id="task_parser_test")
+    note_path = write_vault_note(
+        report_body="# First run\nThis note says approved: false in body text.",
+        task=t,
+        review=_review(),
+        diff=_diff(),
+        vault_root=tmp_path,
+    )
+    # Flip approval properly via frontmatter.
+    content = note_path.read_text()
+    content = content.replace("approved: false", "approved: true")
+    note_path.write_text(content)
+
+    # Second write should raise because frontmatter says approved.
+    with pytest.raises(PermissionError, match="refusing to overwrite an approved note"):
+        write_vault_note(
+            report_body="# Second run",
+            task=t,
+            review=_review(),
+            diff=_diff(),
+            vault_root=tmp_path,
+        )
+
+    # Original content preserved.
+    final = note_path.read_text()
+    assert "First run" in final

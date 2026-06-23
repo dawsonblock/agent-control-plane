@@ -23,9 +23,10 @@ from acp.errors import ACPError, RepoDirtyError, WorktreeError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
-from acp.models import EventType, TaskStatus, compute_final_status
+from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
+from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
 from acp.testing.runner import all_passed, run_commands
 from acp.vault.obsidian_writer import write_vault_note
@@ -270,17 +271,22 @@ class EvidenceLoop:
             f"rec={review.recommendation.value}"
         )
 
-        # 9. Compute final status (gate-correct: see compute_final_status). #
-        status = compute_final_status(
-            agent_passed=agent_result.passed if agent_result else True,
+        # 9. Compute final status via GateResult (single source of truth). #
+        gate_result = evaluate_final_gates(
+            agent_exit_code=agent_result.exit_code if agent_result else None,
             command_results=command_results,
-            diff_changed_files=diff.changed_files,
-            review=review,
+            review_result=review,
+            changed_files=diff.changed_files,
+        )
+        status = (
+            TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
+            else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
+            else TaskStatus.FAILED
         )
         task.status = status
         self.store.save(task)
 
-        # 10. Write report ------------------------------------------------- #
+        # 10. Write report (with GateResult for accurate gate summary). --- #
         report_path = write_report(
             task=task,
             command_results=command_results,
@@ -288,6 +294,7 @@ class EvidenceLoop:
             diff=diff,
             artifact_dir=artifacts,
             agent_result=agent_result,
+            gate_result=gate_result,
         )
         events.write(
             EventType.REPORT_WRITTEN,
@@ -319,7 +326,9 @@ class EvidenceLoop:
             final_event,
             {
                 "status": status.value,
-                "tests_pass": tests_pass,
+                "validation_commands_ran": gate_result.validation_commands_ran,
+                "validation_commands_failed": gate_result.validation_commands_failed,
+                "validation_status": gate_result.outcome.value,
                 "recommendation": review.recommendation.value,
             },
         )

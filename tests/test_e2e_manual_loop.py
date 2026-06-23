@@ -202,3 +202,65 @@ def test_e2e_failing_test_still_writes_report(disposable_repo, isolated_workspac
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert main_now == repo.main_head
+
+
+def test_terminal_event_uses_validation_fields_not_tests_pass(disposable_repo, isolated_workspace):
+    """The terminal event must use validation_commands_ran/failed/status,
+    not the misleading ``tests_pass`` field."""
+    repo = disposable_repo
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=repo.path, default_branch="main"),
+        commands=CommandsSection(
+            lint="",
+            typecheck="",
+            test="",
+            build="",
+        ),
+        review=ReviewSection(),
+    )
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    loop = EvidenceLoop(
+        config=cfg,
+        user_request="task with all commands skipped",
+        store=store,
+        vault_root=isolated_workspace["vault_root"],
+    )
+    result = loop.run()
+
+    assert result.status == TaskStatus.NEEDS_REVIEW
+
+    events_path = result.run_dir / "events.jsonl"
+    events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+    terminal = events[-1]
+    p = terminal["payload"]
+    assert "validation_commands_ran" in p, f"payload missing validation_commands_ran: {p}"
+    assert "validation_commands_failed" in p, f"payload missing validation_commands_failed: {p}"
+    assert "validation_status" in p, f"payload missing validation_status: {p}"
+    assert "tests_pass" not in p, f"payload should not contain tests_pass: {p}"
+    assert p["validation_commands_ran"] == 0
+    assert p["validation_status"] == "needs_review"
+
+
+def test_terminal_event_on_pass_has_validation_fields(disposable_repo, isolated_workspace):
+    """A successful run's terminal event should show actual validation counts."""
+    repo = disposable_repo
+    cfg = _config_for(repo.path)
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    loop = EvidenceLoop(
+        config=cfg,
+        user_request="normal task with validation",
+        store=store,
+        vault_root=isolated_workspace["vault_root"],
+    )
+    result = loop.run()
+
+    assert result.status == TaskStatus.PASSED
+
+    events_path = result.run_dir / "events.jsonl"
+    events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+    terminal = events[-1]
+    p = terminal["payload"]
+    assert "validation_commands_ran" in p
+    assert p["validation_commands_ran"] >= 2
+    assert p["validation_commands_failed"] == 0
+    assert p["validation_status"] == "passed"

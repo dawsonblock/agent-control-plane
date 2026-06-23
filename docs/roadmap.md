@@ -2,15 +2,17 @@
 
 The non-negotiable rule across every milestone: **no new layer until the previous layer produces evidence.** A milestone is "done" only when its gate passes on a real run, not when its code is written.
 
-## Current build (this repo, now): M0–M4
+## Current build (this repo, now): v0.5.3 alpha
 
-| Milestone | Delivers | Gate |
-|-----------|----------|------|
+| Milestone | Delivers | Status |
+|-----------|----------|--------|
 | **M0 — Scaffold** | Folders, `pyproject`, configs, vault skeleton, docs | `import acp` succeeds |
-| **M1 — Manual evidence loop** | `acp run` runs one task in a worktree, captures everything, writes report + Obsidian note | E2E test passes; main untouched; report + vault note exist |
-| **M2 — Generic CLI agent adapter** | Swap the coder agent via config (`shell` ↔ `custom` + `command_template`) | Agent swap is config-only; workflow code untouched |
-| **M3 — LangGraph state machine** | Linear CLI refactored into a graph; failed nodes visible; failed tasks still write reports | Graph reaches `done` on success and `failed`-with-report on failure |
-| **M4 — Repair loop** | Failing tests trigger ≤ `max_repair_attempts` repair rounds before falling through to a FAILED report | No infinite loops; max enforced; failed repair still writes report |
+| **M1 — Manual evidence loop** | `acp run` runs one task in a worktree, captures everything, writes report + Obsidian note | E2E test passes; main untouched |
+| **M2 — Generic CLI agent adapter** | Swap the coder agent via config (`shell` ↔ `custom` + `command_template`) | Agent swap test passes |
+| **M3 — LangGraph state machine** | Linear CLI refactored into a graph; failed nodes visible; failed tasks still write reports | Graph test passes |
+| **M4 — Repair loop** | Failing tests trigger ≤ `max_repair_attempts` repair rounds | No infinite loops |
+| **M5 — Review hardening** | `secret_scanner.py` + `risk.py`; full risk taxonomy; `GateResult` artifact | Risky diffs flagged; gate-correct status |
+| **v0.5.x — Gate consolidation** | `--legacy` aligned, Obsidian parser safety, CI gate, docs | Current hardening focus |
 
 ## Downstream (deferred — do not start before the gate above passes)
 

@@ -354,8 +354,12 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 EventType.VAULT_NOTE_WRITTEN,
                 {"vault_note_path": str(vault_note_path)},
             )
-        except Exception:  # noqa: BLE001
-            pass  # evidence is best-effort; don't mask the real failure
+        except Exception as exc:  # noqa: BLE001
+            # Evidence write failure is visible — don't mask the real failure.
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "failed_node.evidence", "message": str(exc)},
+            )
 
     task.status = TaskStatus.FAILED
     ctx.store.save(task)

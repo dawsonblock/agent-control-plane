@@ -26,18 +26,21 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.1 (Milestones 0–3)
+## Current scope: v0.5.3 alpha — Gate-correct evidence loop
 
-This repository currently implements the **boring spine**:
+This repository currently implements:
 
-| Milestone | What | Gate |
-|-----------|------|------|
-| **M0** | Repo scaffold: folders, `pyproject`, configs, vault skeleton | `import acp` succeeds |
-| **M1** | Manual evidence loop — `acp run` produces `final_report.md` + `vault/tasks/<id>.md` with main untouched | E2E test passes |
-| **M2** | Generic CLI agent adapter — swap the coder agent via config only | Agent swap test passes |
-| **M3** | Refactor linear CLI into a LangGraph state machine; failed nodes visible, failed tasks still write reports | Graph test passes |
+| Layer | What | Status |
+|-------|------|--------|
+| **M0** | Repo scaffold | Stable |
+| **M1** | Manual evidence loop — `acp run` produces `final_report.md` + vault note | Stable |
+| **M2** | Generic CLI agent adapter | Stable |
+| **M3** | LangGraph state machine | Stable (default engine) |
+| **M4** | Repair loop — bounded retry on test failure | Stable |
+| **M5** | Review hardening — risk taxonomy, secret scanner, `GateResult` artifact | Stable |
+| **v0.5.x** | Gate evidence consolidation, `scripts/validate.sh` CI gate, `--legacy` aligned | Current |
 
-Everything downstream — repair loop (M4), review hardening/secret scan (M5), Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11), desktop (M12), OpenHands/Superserve (M13), mission dashboard (M14) — is deliberately deferred until each preceding layer produces evidence.
+Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 
 The non-negotiable rule: **no new layer until the previous layer produces evidence.**
 
@@ -46,8 +49,9 @@ The non-negotiable rule: **no new layer until the previous layer produces eviden
 ```bash
 cd agent-control-plane
 uv venv
-uv sync                    # v0.1 deps: typer, pydantic, pyyaml, rich, gitpython
-uv sync --extra graph      # add langgraph for M3
+uv sync                    # deps: typer, pydantic, pyyaml, rich, gitpython, langgraph
+uv sync --extra dev        # add pytest for local testing
+bash scripts/validate.sh   # compileall + pytest gate
 uv sync --extra dev        # add pytest
 
 # run one task against a configured repo

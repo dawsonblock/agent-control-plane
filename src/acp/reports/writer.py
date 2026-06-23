@@ -14,6 +14,7 @@ from typing import Any
 from acp.gitops.diff import DiffCapture
 from acp.models import AgentResult, CommandResult, ReviewResult, Task
 from acp.reports.templates import render_report
+from acp.review.gates import GateResult
 
 
 def write_report(
@@ -25,7 +26,7 @@ def write_report(
     artifact_dir: Path,
     agent_result: AgentResult | None = None,
     repair_history: list[dict[str, Any]] | None = None,
-    gate_result: object | None = None,
+    gate_result: GateResult | None = None,
 ) -> Path:
     """Render final_report.md into ``artifact_dir`` and return its path.
 

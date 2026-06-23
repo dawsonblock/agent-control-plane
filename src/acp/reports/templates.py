@@ -16,6 +16,7 @@ from acp.models import (
     Task,
     TaskStatus,
 )
+from acp.review.gates import GateResult
 from acp.testing.parsers import summarize
 
 
@@ -32,7 +33,7 @@ def render_report(
     diff: DiffCapture,
     agent_result: AgentResult | None,
     repair_history: list[dict[str, object]] | None = None,
-    gate_result: object | None = None,
+    gate_result: GateResult | None = None,
 ) -> str:
     """Render the full final_report.md body (no frontmatter).
 
@@ -262,62 +263,4 @@ def _status_word(status: TaskStatus) -> str:
         return "\u274c failed"
     if status == TaskStatus.NEEDS_REVIEW:
         return "\U0001f536 needs review"
-    return status.value
-    can_promote = (
-        task.status == TaskStatus.PASSED
-        and review.recommendation == Recommendation.MERGE
-        and not review.hard_block
-    )
-    if can_promote:
-        lines.append("This task **may** become a memory candidate once approved.")
-        lines.append("")
-        lines.append("- All gates passed. Review the vault note and set `approved: true` to enable memory promotion.")
-        lines.append("- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria.")
-    else:
-        lines.append("This task is **not** a memory candidate until the conditions below are resolved:")
-        lines.append("")
-        if task.status != TaskStatus.PASSED:
-            lines.append(f"- **Status:** {_status_word(task.status)} — only `PASSED` tasks qualify")
-        if review.recommendation != Recommendation.MERGE:
-            lines.append(f"- **Recommendation:** `{review.recommendation.value}` — only `merge` qualifies")
-        if review.hard_block:
-            lines.append("- **Hard block:** active — must be resolved before promotion")
-        lines.append(f"- **Risk:** {review.risk.value} — see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)")
-    lines.append("")
-
-    lines.append("## Agent")
-    lines.append("")
-    if agent_result is not None:
-        lines.append(f"- **Agent:** `{agent_result.agent_name}` (exit {agent_result.exit_code})")
-        lines.append(f"- **Summary:** {agent_result.summary}")
-        lines.append("- **stdout:** `artifacts/agent_stdout.txt`")
-        lines.append("- **stderr:** `artifacts/agent_stderr.txt`")
-    else:
-        lines.append("_(no agent result — run failed before agent execution)_")
-    lines.append("")
-
-    lines.append("## Evidence")
-    lines.append("")
-    lines.append("All artifacts live under `data/runs/<task_id>/artifacts/`:")
-    lines.append("")
-    lines.append("- `agent_prompt.txt` — what the agent was told")
-    lines.append("- `agent_stdout.txt` / `agent_stderr.txt` — agent output")
-    lines.append("- `<cmd>_stdout.txt` / `<cmd>_stderr.txt` — per-command output")
-    lines.append("- `commands.json` — command results table")
-    lines.append("- `diff.patch` / `diff_stat.txt` — the captured change")
-    lines.append("- `review.json` — this review, machine-readable")
-    lines.append("")
-    lines.append("The event log (`events.jsonl`) is the source of truth; this report is its human-readable projection.")
-    lines.append("")
-
-    return "\n".join(lines)
-
-
-def _status_word(status: TaskStatus) -> str:
-    if status == TaskStatus.PASSED:
-        return "✅ passed"
-    if status == TaskStatus.FAILED:
-        return "❌ failed"
-    if status == TaskStatus.NEEDS_REVIEW:
-        return "🔶 needs review"
     return status.value
