@@ -68,17 +68,22 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
     manifest's event chain head matches the last event. Returns the manifest
     hash (or ``None`` on failure). Best-effort: failures are logged as
     ``node.failed`` events, not raised.
+
+    The re-rendered report includes the event timeline (full projection of
+    the event log) and the manifest hash (evidence binding).
     """
     try:
         _, manifest_hash = write_evidence_manifest(
             run_dir=ctx.store.run_dir(state["task_id"]),
             events_writer=ctx.events,
         )
-        # Re-render the report with the manifest hash so the report ↔
-        # evidence binding is verifiable. Only if we have a review (full
-        # report path); the minimal failure report doesn't include it.
+        # Re-render the report with the manifest hash + event timeline so
+        # the report ↔ evidence binding is verifiable and the report is a
+        # true projection of the event log. Only if we have a review (full
+        # report path); the minimal failure report is handled separately.
         report_path = state.get("report_path")
         review = state.get("review_result")
+        events = ctx.events.read_all()
         if report_path and review is not None and state.get("diff") is not None:
             write_report(
                 task=state["task"],
@@ -90,6 +95,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 repair_history=state.get("repair_history", []),
                 gate_result=state.get("gate_result"),
                 manifest_hash=manifest_hash,
+                events=events,
             )
         return manifest_hash
     except Exception as exc:  # noqa: BLE001
@@ -438,6 +444,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                     agent_result=state.get("agent_result"),
                     repair_history=state.get("repair_history", []),
                     gate_result=state.get("gate_result"),
+                    events=ctx.events.read_all(),
                 )
             else:
                 # Early failure: no diff/review → minimal failure report.
@@ -445,6 +452,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                     task=task,
                     error=error,
                     artifact_dir=state["artifacts_dir"],
+                    events=ctx.events.read_all(),
                 )
             ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
 

@@ -2,7 +2,7 @@
 
 The non-negotiable rule across every milestone: **no new layer until the previous layer produces evidence.** A milestone is "done" only when its gate passes on a real run, not when its code is written.
 
-## Current build (this repo, now): v0.5.5 alpha
+## Current build (this repo, now): v0.5.6 alpha
 
 | Milestone | Delivers | Status |
 |-----------|----------|--------|
@@ -12,7 +12,8 @@ The non-negotiable rule across every milestone: **no new layer until the previou
 | **M3 — LangGraph state machine** | Linear CLI refactored into a graph; failed nodes visible; failed tasks still write reports | Graph test passes |
 | **M4 — Repair loop** | Failing tests trigger ≤ `max_repair_attempts` repair rounds | No infinite loops |
 | **M5 — Review hardening** | `secret_scanner.py` + `risk.py`; full risk taxonomy; `GateResult` artifact | Risky diffs flagged; gate-correct status |
-| **v0.5.x — Dogfood hardening** | `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence, CLI output honesty | Current hardening focus |
+| **v0.5.x — Dogfood hardening** | `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence, CLI output honesty | Stable |
+| **v0.5.6 — Trust layer** | fsync'd event writes, Ed25519 event signing, event timeline in report, SQLite durable event store | Current |
 
 ## Downstream (deferred — do not start before the gate above passes)
 

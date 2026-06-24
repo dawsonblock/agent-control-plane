@@ -128,6 +128,11 @@ class Event(BaseModel):
     (sha256 of ``prev_hash + event_id + task_id + type + timestamp + payload``).
     This makes the log tamper-evident — removing, reordering, or modifying any
     event breaks the chain.
+
+    An optional ``signature`` field (v0.5.6) holds an Ed25519 signature over
+    the event's hash, proving authenticity (who wrote the log) in addition to
+    integrity (the log hasn't been modified). Empty when no signing key is
+    configured.
     """
 
     event_id: str
@@ -137,6 +142,7 @@ class Event(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     prev_hash: str = ""   # hash of the preceding event; "GENESIS" for the first
     hash: str = ""        # sha256 of (prev_hash + event_id + task_id + type + timestamp + payload)
+    signature: str = ""   # Ed25519 signature over `hash` (hex); empty if unsigned
 
 
 class CommandResult(BaseModel):

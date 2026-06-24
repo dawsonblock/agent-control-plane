@@ -36,6 +36,10 @@ dependencies = [
 graph = [
     "langgraph>=1.2,<2",
 ]
+# v0.5.6: Ed25519 event-log signing (authenticity proofs).
+crypto = [
+    "cryptography>=43,<46",
+]
 dev = [
     "pytest>=8.2,<9",
 ]

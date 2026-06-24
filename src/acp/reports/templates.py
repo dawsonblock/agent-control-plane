@@ -11,6 +11,7 @@ from acp.gitops.diff import DiffCapture
 from acp.models import (
     AgentResult,
     CommandResult,
+    Event,
     Recommendation,
     ReviewResult,
     Task,
@@ -35,12 +36,17 @@ def render_report(
     repair_history: list[dict[str, object]] | None = None,
     gate_result: GateResult | None = None,
     manifest_hash: str | None = None,
+    events: list[Event] | None = None,
 ) -> str:
     """Render the full final_report.md body (no frontmatter).
 
     When ``gate_result`` is provided, the Gate Summary section is rendered
     from the gate result's reasons rather than recomputed from raw data.
     This ensures the report always agrees with ``evaluate_final_gates``.
+
+    When ``events`` is provided, an Event Timeline section is rendered
+    showing the full event sequence — making the report a true projection
+    of the event log, not just a reference to it.
     """
     summary = summarize(command_results)
     status_word = _status_word(task.status)
@@ -263,6 +269,26 @@ def render_report(
         )
     lines.append("")
 
+    # Event timeline — the report as a true projection of the event log.
+    if events:
+        lines.append("## Event timeline")
+        lines.append("")
+        lines.append(f"The complete event log ({len(events)} events, hash-chained):")
+        lines.append("")
+        lines.append("| # | event_id | type | timestamp | hash (first 12) |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for i, evt in enumerate(events):
+            short_hash = evt.hash[:12] if evt.hash else "—"
+            lines.append(
+                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | {evt.timestamp} | `{short_hash}` |"
+            )
+        lines.append("")
+        lines.append(
+            "Each event's hash links to the previous event's hash, forming a "
+            "tamper-evident chain. Verify with `verify_event_chain()`."
+        )
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -280,6 +306,7 @@ def render_failure_report(
     *,
     task: Task,
     error: str,
+    events: list[Event] | None = None,
 ) -> str:
     """Minimal report for early failures (before diff/review exist).
 
@@ -287,7 +314,8 @@ def render_failure_report(
     that happen before a diff is captured (dirty repo, worktree creation error,
     node crash before agent run), there's no diff or review to render — but
     there is still a task, an error, and an event log. This minimal report
-    records what we know so the evidence trail is never empty.
+    records what we know so the evidence trail is never empty. When ``events``
+    is provided, an event timeline is included.
     """
     lines: list[str] = []
     lines.append(f"# Task report: {task.task_id}")
@@ -309,4 +337,20 @@ def render_failure_report(
     lines.append("This task failed early — no diff, review, or command artifacts were produced.")
     lines.append("The event log (`events.jsonl`) is the source of truth for what happened.")
     lines.append("")
+
+    # Event timeline — show what happened before the failure.
+    if events:
+        lines.append("## Event timeline")
+        lines.append("")
+        lines.append(f"The complete event log ({len(events)} events, hash-chained):")
+        lines.append("")
+        lines.append("| # | event_id | type | timestamp | hash (first 12) |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for i, evt in enumerate(events):
+            short_hash = evt.hash[:12] if evt.hash else "—"
+            lines.append(
+                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | {evt.timestamp} | `{short_hash}` |"
+            )
+        lines.append("")
+
     return "\n".join(lines)

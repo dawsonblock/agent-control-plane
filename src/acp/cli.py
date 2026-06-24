@@ -295,6 +295,7 @@ class EvidenceLoop:
             artifact_dir=artifacts,
             agent_result=agent_result,
             gate_result=gate_result,
+            events=events.read_all(),
         )
         events.write(
             EventType.REPORT_WRITTEN,
@@ -354,6 +355,7 @@ class EvidenceLoop:
                 agent_result=agent_result,
                 gate_result=gate_result,
                 manifest_hash=manifest_hash,
+                events=events.read_all(),
             )
         except Exception as exc:  # noqa: BLE001
             events.write(
