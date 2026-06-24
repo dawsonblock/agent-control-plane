@@ -625,6 +625,250 @@ def events(
 
 
 @app.command()
+def approve(
+    task_id: str = typer.Option(
+        ...,
+        "--task",
+        "-t",
+        help="Task id to approve (e.g. task_20260624_0001).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    vault_root: Path = typer.Option(
+        Path("vault"),
+        "--vault-root",
+        help="Root directory of the Obsidian vault (default: vault).",
+    ),
+    approver: str = typer.Option(
+        "",
+        "--approver",
+        help="Name/email of the person approving (recorded in the event log).",
+    ),
+) -> None:
+    """Approve a task's vault note — the human decision that gates memory.
+
+    This is the single most important safety property in ACP: the system
+    cannot gaslight itself, because every fact it remembers was first read
+    and approved by a human. This command:
+
+      1. Reads the vault note and flips ``approved: true`` + ``memory_status: active``
+      2. Writes a ``human.approved`` event to the event log
+      3. Updates the task status to ``APPROVED``
+
+    Only ``PASSED`` and ``NEEDS_REVIEW`` tasks can be approved. Already-approved
+    notes cannot be approved again.
+    """
+    from acp.vault.approval import approve_vault_note, can_approve
+
+    store = TaskStore(runs_root=runs_root)
+    run_dir = store.run_dir(task_id)
+
+    if not run_dir.is_dir():
+        console.print(f"[red]✗[/] run directory not found: {run_dir}")
+        raise typer.Exit(code=1)
+
+    # Load the task to check eligibility.
+    try:
+        task = store.load(task_id)
+    except Exception as exc:
+        console.print(f"[red]✗[/] cannot load task.json: {exc}")
+        raise typer.Exit(code=1)
+
+    if not can_approve(task.status):
+        console.print(
+            f"[red]✗[/] task status is '{task.status.value}' — "
+            f"only 'passed' or 'needs_review' tasks can be approved."
+        )
+        raise typer.Exit(code=1)
+
+    # Find the vault note.
+    note_path = vault_root / "tasks" / f"{task_id}.md"
+    if not note_path.is_file():
+        console.print(f"[red]✗[/] vault note not found: {note_path}")
+        raise typer.Exit(code=1)
+
+    # Approve the note (flips frontmatter).
+    try:
+        fm = approve_vault_note(note_path, approver=approver)
+    except PermissionError as exc:
+        console.print(f"[red]✗[/] {exc}")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]✗[/] approval failed: {exc}")
+        raise typer.Exit(code=1)
+
+    # Write the human.approved event.
+    events = EventWriter(task_id, run_dir)
+    events.write(
+        EventType.HUMAN_APPROVED,
+        {
+            "approver": approver or "unknown",
+            "vault_note_path": str(note_path),
+            "memory_status": fm.memory_status,
+        },
+    )
+
+    # Update task status to APPROVED.
+    task.status = TaskStatus.APPROVED
+    store.save(task)
+
+    console.print(f"[green]✓[/] task {task_id} approved by {approver or 'unknown'}")
+    console.print(f"  vault note: {note_path}")
+    console.print(f"  memory_status: {fm.memory_status}")
+    console.print(f"  event: human.approved written to {store.events_path(task_id)}")
+
+
+@app.command()
+def reject(
+    task_id: str = typer.Option(
+        ...,
+        "--task",
+        "-t",
+        help="Task id to reject (e.g. task_20260624_0001).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    vault_root: Path = typer.Option(
+        Path("vault"),
+        "--vault-root",
+        help="Root directory of the Obsidian vault (default: vault).",
+    ),
+    rejecter: str = typer.Option(
+        "",
+        "--rejecter",
+        help="Name/email of the person rejecting (recorded in the event log).",
+    ),
+    reason: str = typer.Option(
+        "",
+        "--reason",
+        help="Optional reason for rejection (recorded in the event log).",
+    ),
+) -> None:
+    """Reject a task's vault note — archive it so it can never be promoted.
+
+    Sets ``memory_status: archived`` and writes a ``human.rejected`` event.
+    The task status is updated to ``ARCHIVED``. Cannot reject an already-
+    approved note (approval is a commitment).
+    """
+    from acp.vault.approval import reject_vault_note
+
+    store = TaskStore(runs_root=runs_root)
+    run_dir = store.run_dir(task_id)
+
+    if not run_dir.is_dir():
+        console.print(f"[red]✗[/] run directory not found: {run_dir}")
+        raise typer.Exit(code=1)
+
+    try:
+        task = store.load(task_id)
+    except Exception as exc:
+        console.print(f"[red]✗[/] cannot load task.json: {exc}")
+        raise typer.Exit(code=1)
+
+    note_path = vault_root / "tasks" / f"{task_id}.md"
+    if not note_path.is_file():
+        console.print(f"[red]✗[/] vault note not found: {note_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        fm = reject_vault_note(note_path, rejecter=rejecter)
+    except PermissionError as exc:
+        console.print(f"[red]✗[/] {exc}")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]✗[/] rejection failed: {exc}")
+        raise typer.Exit(code=1)
+
+    events = EventWriter(task_id, run_dir)
+    events.write(
+        EventType.HUMAN_REJECTED,
+        {
+            "rejecter": rejecter or "unknown",
+            "reason": reason,
+            "vault_note_path": str(note_path),
+            "memory_status": fm.memory_status,
+        },
+    )
+
+    task.status = TaskStatus.ARCHIVED
+    store.save(task)
+
+    console.print(f"[green]✓[/] task {task_id} rejected by {rejecter or 'unknown'}")
+    console.print(f"  vault note: {note_path}")
+    console.print(f"  memory_status: {fm.memory_status}")
+    console.print(f"  event: human.rejected written to {store.events_path(task_id)}")
+
+
+@app.command("list")
+def list_tasks(
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    status: str = typer.Option(
+        None,
+        "--status",
+        "-s",
+        help="Filter by task status (e.g. passed, failed, needs_review, approved, archived).",
+    ),
+) -> None:
+    """List tasks from the run directory.
+
+    Shows task id, status, repo, and created timestamp. Use --status to
+    filter by a specific status.
+    """
+    runs_root = Path(runs_root)
+    if not runs_root.is_dir():
+        console.print(f"[dim]No runs directory found at {runs_root}[/]")
+        return
+
+    tasks: list[tuple[str, str, str, str]] = []
+    for task_json in sorted(runs_root.rglob("task.json")):
+        try:
+            task = TaskStore.__new__(TaskStore)
+            t = __import__("acp.models", fromlist=["Task"]).Task.model_validate_json(
+                task_json.read_text()
+            )
+            if status and t.status.value != status:
+                continue
+            tasks.append((t.task_id, t.status.value, t.repo_name, t.created_at))
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not tasks:
+        console.print(f"[dim]No tasks found{f' with status={status}' if status else ''}.[/]")
+        return
+
+    console.print(f"[bold]Tasks[/] ({len(tasks)} total{f', status={status}' if status else ''}):\n")
+    console.print(f"  {'task_id':<24}  {'status':<14}  {'repo':<16}  {'created'}")
+    console.print(f"  {'---':<24}  {'---':<14}  {'---':<16}  {'---'}")
+    for task_id, task_status, repo, created in tasks:
+        # Color the status.
+        if task_status == "passed":
+            color = "green"
+        elif task_status == "failed":
+            color = "red"
+        elif task_status == "needs_review":
+            color = "yellow"
+        elif task_status == "approved":
+            color = "cyan"
+        elif task_status == "archived":
+            color = "dim"
+        else:
+            color = "white"
+        console.print(
+            f"  {task_id:<24}  [{color}]{task_status:<14}[/{color}]  {repo:<16}  {created}"
+        )
+
+
+@app.command()
 def cleanup(
     config: Path = typer.Option(
         ...,
