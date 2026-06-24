@@ -171,7 +171,11 @@ def run(
     ),
 ) -> None:
     """Run one coding task in an isolated worktree and write an evidence report."""
-    cfg = load_repo_config(config)
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
     console.print(
         f"[bold]ACP run[/] · repo={cfg.repo.name} · "
         f"agent={cfg.agent.default} · task={task!r}"
@@ -691,9 +695,9 @@ def cleanup(
         help="Root directory of run data (default: data/runs).",
     ),
     force: bool = typer.Option(
-        False,
-        "--force",
-        help="Force-remove the worktree even if it has uncommitted changes.",
+        True,
+        "--force/--no-force",
+        help="Force-remove the worktree even if it has uncommitted changes (default: on, since agent worktrees typically have untracked files).",
     ),
 ) -> None:
     """Remove the worktree and branch for a completed task.
@@ -705,7 +709,11 @@ def cleanup(
     — that's the evidence trail, not clutter.
     """
     _require_valid_task_id(task_id)
-    cfg = load_repo_config(config)
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
     repo_path = cfg.repo.path
     store = TaskStore(runs_root=runs_root)
     task_branch = f"agent/{task_id}"

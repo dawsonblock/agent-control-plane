@@ -117,7 +117,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 manifest_hash=manifest_hash,
                 events=events,
             )
-        elif report_path and review is None and state.get("diff") is None:
+        elif report_path and (review is None or state.get("diff") is None):
             # Early failure: re-render the minimal failure report with the
             # final event timeline + manifest hash. The first render (in
             # failed_node) happened before report.written/task.failed were

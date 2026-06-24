@@ -54,10 +54,29 @@ def create_worktree(
 
 
 def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -> None:
-    """Remove a linked worktree. Idempotent."""
+    """Remove a linked worktree. Idempotent.
+
+    Always prunes worktree metadata afterward — ``git worktree remove`` can
+    succeed at removing the working directory but leave stale administrative
+    metadata in ``.git/worktrees/``, which causes ``git branch -d`` to refuse
+    with "cannot delete branch used by worktree". Pruning cleans that up.
+
+    When ``force=True``, uses ``-f`` to remove worktrees with uncommitted or
+    untracked files (agent runs typically leave files behind). Note: GitPython
+    translates ``force=True`` to ``--force`` (a global git option), but
+    ``git worktree remove`` expects ``-f`` as a subcommand option — so we pass
+    it explicitly as a string argument.
+    """
     repo = Repo(str(repo_path))
     try:
-        repo.git.worktree("remove", str(worktree_path), force=force)
+        if force:
+            repo.git.worktree("remove", "-f", str(worktree_path))
+        else:
+            repo.git.worktree("remove", str(worktree_path))
     except Exception:
-        # Fall back to pruning if the dir was already removed out-of-band.
-        repo.git.worktree("prune")
+        # The worktree dir may have been removed out-of-band — that's fine.
+        pass
+    # Always prune to clean up stale worktree metadata, even after successful
+    # removal. Without this, git may still consider the branch "checked out"
+    # in a now-removed worktree, blocking branch deletion.
+    repo.git.worktree("prune")

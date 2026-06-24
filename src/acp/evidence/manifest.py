@@ -202,12 +202,22 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None]:
     Returns a dict with ``signing_key_path``, ``durable_store``, and
     ``public_key_path`` keys (each a ``Path`` or ``None``). Returns all-None
     if the sidecar is absent (e.g. runs from before this was written).
+
+    Raises ``ValueError`` if the sidecar exists but contains malformed JSON —
+    a corrupt evidence config must not be silently treated as "no config,"
+    because that could downgrade a signed run to unsigned. The caller
+    (``_record_lifecycle_event``) catches this and surfaces it as an error.
     """
     run_dir = Path(run_dir)
     path = run_dir / EVIDENCE_CONFIG_FILENAME
     if not path.is_file():
         return {"signing_key_path": None, "durable_store": None, "public_key_path": None}
-    data = json.loads(path.read_text())
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            f"evidence_config.json is malformed: {path} ({exc})"
+        ) from exc
     return {
         "signing_key_path": Path(data["signing_key_path"]) if data.get("signing_key_path") else None,
         "durable_store": Path(data["durable_store"]) if data.get("durable_store") else None,
