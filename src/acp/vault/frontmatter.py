@@ -79,6 +79,7 @@ class Frontmatter(BaseModel):
     insertions: int | None = None
     deletions: int | None = None
     sources: list[str] = Field(default_factory=list)
+    audit_trail: list[dict[str, str]] = Field(default_factory=list)
 
 
 def parse_frontmatter(markdown: str) -> tuple[Frontmatter, str]:

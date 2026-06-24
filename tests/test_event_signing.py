@@ -87,7 +87,7 @@ def test_unsigned_events_have_empty_signature(tmp_path: Path):
     assert events[0].signature == ""
 
 
-def test_signing_key_requires_cryptography_package():
+def test_signing_key_requires_cryptography_package(tmp_path: Path):
     """If cryptography is not installed, set_signing_key raises ImportError."""
     # We can't easily uninstall cryptography for this test, so we just verify
     # that the import error message is correct when the module is missing.
@@ -95,7 +95,7 @@ def test_signing_key_requires_cryptography_package():
     # in the dev environment). The real protection is the ImportError in
     # the source code.
     from acp.events import EventWriter
-    w = EventWriter("test", Path("/tmp/test_acp_signing"))
+    w = EventWriter("test", tmp_path / "run")
     # If cryptography is installed, this should work with a valid key.
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -114,8 +114,7 @@ def test_signing_key_requires_cryptography_package():
 def test_report_includes_event_timeline(tmp_path: Path):
     from acp.reports.templates import render_report
     from acp.gitops.diff import DiffCapture
-    from acp.models import AgentResult, CommandResult, ReviewResult, RiskLevel, Recommendation
-    from acp.review.gates import GateResult, GateOutcome
+    from acp.models import ReviewResult, RiskLevel, Recommendation
 
     w = EventWriter("task_001", tmp_path / "run")
     w.write(EventType.TASK_CREATED, {"request": "test"})

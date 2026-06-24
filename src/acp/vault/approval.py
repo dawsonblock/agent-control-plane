@@ -112,16 +112,15 @@ def _update_note(
     frontmatter.approved = approved
     frontmatter.memory_status = memory_status
 
-    # Re-serialize frontmatter to YAML.
-    data = frontmatter.model_dump()
-    # Add an audit trail entry.
-    if "audit_trail" not in data:
-        data["audit_trail"] = []
-    data["audit_trail"].append({
+    # Append to the audit trail (preserves existing entries from the model).
+    frontmatter.audit_trail.append({
         "action": action,
         "actor": actor or "unknown",
         "timestamp": timestamp,
     })
+
+    # Re-serialize frontmatter to YAML.
+    data = frontmatter.model_dump()
 
     yaml_body = yaml.safe_dump(
         data,

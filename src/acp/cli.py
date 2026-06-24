@@ -23,7 +23,7 @@ from acp.errors import ACPError, RepoDirtyError, WorktreeError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, Task, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
@@ -496,6 +496,7 @@ def verify(
         raise typer.Exit(code=1)
 
     all_ok = True
+    events: list[Event] = []
 
     # 1. Event hash chain.
     events_path = store.events_path(task_id)
@@ -832,10 +833,7 @@ def list_tasks(
     tasks: list[tuple[str, str, str, str]] = []
     for task_json in sorted(runs_root.rglob("task.json")):
         try:
-            task = TaskStore.__new__(TaskStore)
-            t = __import__("acp.models", fromlist=["Task"]).Task.model_validate_json(
-                task_json.read_text()
-            )
+            t = Task.model_validate_json(task_json.read_text())
             if status and t.status.value != status:
                 continue
             tasks.append((t.task_id, t.status.value, t.repo_name, t.created_at))

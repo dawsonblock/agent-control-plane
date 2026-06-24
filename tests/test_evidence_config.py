@@ -21,11 +21,9 @@ from typer.testing import CliRunner
 
 from acp.cli import app
 from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
-from acp.events import EventWriter, verify_event_chain, verify_event_signatures
+from acp.events import verify_event_signatures
 from acp.evidence.durable_store import DurableEventStore
-from acp.evidence.manifest import verify_evidence_manifest
-from acp.graph.state import initial_state
-from acp.graph.workflow import build_workflow, run_workflow
+from acp.graph.workflow import run_workflow
 from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 

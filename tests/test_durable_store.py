@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -158,7 +159,3 @@ def test_durable_store_rebuild_replaces_existing(tmp_path: Path):
     assert db.query(task_id="task_old") == []
     assert len(db.query(task_id="task_new")) == 1
     db.close()
-
-
-# Import sqlite3 at module level for the duplicate test.
-import sqlite3  # noqa: E402
