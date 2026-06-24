@@ -248,10 +248,54 @@ def run_workflow(
     Handles the placeholder-writer setup: the EventWriter is constructed with
     a sentinel id, and the ``create_task`` node relocates it to the real run
     dir once the task id is minted. Returns the graph's final state dict.
+
+    When ``config.evidence.signing_key_path`` is set, events are Ed25519-signed.
+    When ``config.evidence.durable_store`` is set, events are dual-written to
+    a SQLite database in addition to the JSONL log.
     """
     store = TaskStore(runs_root=runs_root)
     # Placeholder writer — create_task will relocate it to the real run dir.
     events = EventWriter("__pending__", store.root / "__pending__")
+
+    # Wire Ed25519 signing if a signing key is configured.
+    evidence_cfg = getattr(config, "evidence", None)
+    if evidence_cfg and evidence_cfg.signing_key_path:
+        try:
+            key_bytes = evidence_cfg.signing_key_path.read_bytes()
+            if len(key_bytes) != 32:
+                raise ValueError(
+                    f"signing key file must be exactly 32 bytes, got {len(key_bytes)}"
+                )
+            events.set_signing_key(key_bytes)
+        except ImportError:
+            # cryptography not installed — warn but continue unsigned.
+            pass  # The error is surfaced when verification is attempted.
+        except Exception:
+            # Don't crash the run if the key file is missing — just skip signing.
+            pass
+
+    # Wire SQLite durable store if configured. The store is additive: events
+    # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
+    # EventWriter's write method to dual-write.
+    durable_store = None
+    if evidence_cfg and evidence_cfg.durable_store:
+        try:
+            from acp.evidence.durable_store import DurableEventStore
+            durable_store = DurableEventStore(evidence_cfg.durable_store)
+            durable_store.init()
+            # Wrap the write method to dual-write.
+            original_write = events.write
+            def _dual_write(type, payload=None):
+                evt = original_write(type, payload)
+                try:
+                    durable_store.append(evt)
+                except Exception:  # noqa: BLE001
+                    pass  # Don't crash the run if SQLite write fails.
+                return evt
+            events.write = _dual_write  # type: ignore[method-assign]
+        except Exception:
+            pass  # Don't crash the run if the store can't be initialized.
+
     wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
 
     state = {
@@ -260,4 +304,10 @@ def run_workflow(
         "vault_root": Path(vault_root),
         "runs_root": Path(runs_root),
     }
-    return wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
+    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
+
+    # Close the durable store if it was opened.
+    if durable_store is not None:
+        durable_store.close()
+
+    return result

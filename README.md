@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.6 alpha — Dogfood hardening (trust layer)
+## Current scope: v0.5.7 alpha — Dogfood hardening (trust layer + CLI)
 
 This repository currently implements:
 
@@ -39,7 +39,8 @@ This repository currently implements:
 | **M4** | Repair loop — bounded retry on test failure | Stable |
 | **M5** | Review hardening — risk taxonomy, secret scanner, `GateResult` artifact | Stable |
 | **v0.5.x** | Gate consolidation, `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence, CLI honesty | Stable |
-| **v0.5.6** | fsync'd event writes, Ed25519 event signing, event timeline in report, SQLite durable event store | Current |
+| **v0.5.6** | fsync'd event writes, Ed25519 event signing, event timeline in report, SQLite durable event store | Stable |
+| **v0.5.7** | Config-driven signing + durable store, `acp verify` + `acp events` CLI commands, durable task store | Current |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 

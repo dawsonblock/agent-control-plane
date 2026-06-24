@@ -74,6 +74,38 @@ class MemorySection(BaseModel):
     promote_reports_by_default: bool = False
 
 
+class EvidenceSection(BaseModel):
+    """Evidence integrity settings (v0.5.6).
+
+    - ``signing_key_path``: path to a file containing a 32-byte raw Ed25519
+      private key. When set, every event is signed with an Ed25519 signature
+      over its hash, proving authenticity in addition to integrity. The key
+      file must contain exactly 32 raw bytes (not PEM). Generate with::
+
+          python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; Ed25519PrivateKey.generate().private_bytes_raw()" > key.bin
+
+    - ``durable_store``: path to a SQLite database file. When set, events
+      are dual-written to both the JSONL log (canonical source) and the
+      SQLite store (queryable index). The SQLite store uses WAL mode +
+      synchronous=FULL for transactional durability.
+
+    - ``public_key_path``: path to a file containing a 32-byte raw Ed25519
+      public key. Used by ``acp verify`` to check event signatures. Not
+      required for signing (only for verification).
+    """
+
+    signing_key_path: Path | None = None
+    public_key_path: Path | None = None
+    durable_store: Path | None = None
+
+    @field_validator("signing_key_path", "public_key_path", "durable_store")
+    @classmethod
+    def _absolute(cls, v: Path | None) -> Path | None:
+        if v is None:
+            return None
+        return v.expanduser().resolve()
+
+
 # --------------------------------------------------------------------------- #
 # Top-level
 # --------------------------------------------------------------------------- #
@@ -88,6 +120,7 @@ class RepoConfig(BaseModel):
     review: ReviewSection = Field(default_factory=ReviewSection)
     context: ContextSection = Field(default_factory=ContextSection)
     memory: MemorySection = Field(default_factory=MemorySection)
+    evidence: EvidenceSection = Field(default_factory=EvidenceSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

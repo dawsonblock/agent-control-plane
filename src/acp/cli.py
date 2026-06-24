@@ -457,6 +457,174 @@ def version() -> None:
 
 
 @app.command()
+def verify(
+    task_id: str = typer.Option(
+        ...,
+        "--task",
+        "-t",
+        help="Task id to verify (e.g. task_20260624_0001).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    public_key: Path = typer.Option(
+        None,
+        "--public-key",
+        help="Path to a 32-byte raw Ed25519 public key for signature verification.",
+    ),
+) -> None:
+    """Verify the evidence integrity of a completed run.
+
+    Checks:
+      1. Event hash chain is valid (tamper-evident)
+      2. Evidence manifest exists and all artifact hashes match
+      3. (Optional) Ed25519 event signatures are valid
+
+    Exits 0 if all checks pass, 1 if any fail.
+    """
+    from acp.events import verify_event_chain, verify_event_signatures
+    from acp.evidence.manifest import verify_evidence_manifest
+    from acp.models import Event
+
+    store = TaskStore(runs_root=runs_root)
+    run_dir = store.run_dir(task_id)
+
+    if not run_dir.is_dir():
+        console.print(f"[red]✗[/] run directory not found: {run_dir}")
+        raise typer.Exit(code=1)
+
+    all_ok = True
+
+    # 1. Event hash chain.
+    events_path = store.events_path(task_id)
+    if not events_path.is_file():
+        console.print(f"[red]✗[/] event log not found: {events_path}")
+        all_ok = False
+    else:
+        events = [
+            Event.model_validate_json(line)
+            for line in events_path.read_text().splitlines()
+            if line.strip()
+        ]
+        if not events:
+            console.print(f"[red]✗[/] event log is empty")
+            all_ok = False
+        elif verify_event_chain(events):
+            console.print(f"[green]✓[/] event chain valid ({len(events)} events, head={events[-1].hash[:16]}...)")
+        else:
+            console.print(f"[red]✗[/] event chain INVALID — log has been tampered with")
+            all_ok = False
+
+    # 2. Evidence manifest.
+    manifest_path = run_dir / "evidence_manifest.json"
+    if not manifest_path.is_file():
+        console.print(f"[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
+    elif verify_evidence_manifest(run_dir):
+        console.print(f"[green]✓[/] evidence manifest valid (artifacts + event chain match)")
+    else:
+        console.print(f"[red]✗[/] evidence manifest INVALID — artifacts or event log don't match")
+        all_ok = False
+
+    # 3. Ed25519 signatures (optional).
+    if public_key is not None:
+        if not events_path.is_file():
+            console.print(f"[red]✗[/] cannot verify signatures without event log")
+            all_ok = False
+        else:
+            try:
+                pk_bytes = public_key.read_bytes()
+                if len(pk_bytes) != 32:
+                    console.print(f"[red]✗[/] public key must be exactly 32 bytes, got {len(pk_bytes)}")
+                    all_ok = False
+                elif not events:
+                    console.print(f"[red]✗[/] cannot verify signatures on empty event log")
+                    all_ok = False
+                elif verify_event_signatures(events, pk_bytes):
+                    console.print(f"[green]✓[/] Ed25519 signatures valid ({len(events)} events signed)")
+                else:
+                    console.print(f"[red]✗[/] Ed25519 signature verification FAILED")
+                    all_ok = False
+            except ImportError:
+                console.print(f"[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto")
+            except Exception as exc:
+                console.print(f"[red]✗[/] signature verification error: {exc}")
+                all_ok = False
+
+    if all_ok:
+        console.print(f"\n[green]✓ All evidence checks passed for task {task_id}.[/]")
+    else:
+        console.print(f"\n[red]✗ Evidence verification FAILED for task {task_id}.[/]")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def events(
+    task_id: str = typer.Option(
+        ...,
+        "--task",
+        "-t",
+        help="Task id to list events for (e.g. task_20260624_0001).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    filter_type: str = typer.Option(
+        None,
+        "--type",
+        help="Filter by event type (e.g. task.failed, repair.attempted).",
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        help="Maximum number of events to show (0 = all).",
+    ),
+) -> None:
+    """List events from a completed run's event log.
+
+    Shows the event timeline with id, type, timestamp, and hash prefix.
+    Use --type to filter by event type, --limit to cap the output.
+    """
+    from acp.models import Event
+
+    store = TaskStore(runs_root=runs_root)
+    events_path = store.events_path(task_id)
+
+    if not events_path.is_file():
+        console.print(f"[red]✗[/] event log not found: {events_path}")
+        raise typer.Exit(code=1)
+
+    all_events = [
+        Event.model_validate_json(line)
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+    ]
+
+    if filter_type:
+        all_events = [e for e in all_events if e.type.value == filter_type]
+
+    if limit > 0:
+        all_events = all_events[:limit]
+
+    if not all_events:
+        console.print(f"[dim]No events found for task {task_id}.[/]")
+        return
+
+    console.print(f"[bold]Events for task {task_id}[/] ({len(all_events)} total):\n")
+    console.print(f"  {'#':>3}  {'event_id':<14}  {'type':<24}  {'timestamp':<22}  {'hash (first 12)'}")
+    console.print(f"  {'---':>3}  {'---':<14}  {'---':<24}  {'---':<22}  {'---'}")
+    for i, evt in enumerate(all_events):
+        short_hash = evt.hash[:12] if evt.hash else "—"
+        signed = " ✓" if evt.signature else ""
+        console.print(
+            f"  {i + 1:>3}  {evt.event_id:<14}  {evt.type.value:<24}  {evt.timestamp:<22}  {short_hash}{signed}"
+        )
+
+
+@app.command()
 def cleanup(
     config: Path = typer.Option(
         ...,
