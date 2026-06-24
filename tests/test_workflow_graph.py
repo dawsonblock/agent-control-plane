@@ -190,7 +190,7 @@ def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_worksp
 
 def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_workspace):
     """The graph refactor didn't change what the run produces — same artifact set."""
-    from acp.cli import EvidenceLoop
+    from acp.legacy_loop import EvidenceLoop
 
     repo = disposable_repo
     runs = isolated_workspace["runs_root"]

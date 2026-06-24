@@ -1,35 +1,25 @@
 """ACP command-line interface.
 
-``acp run`` is the M1 entry point: it runs one coding task in an isolated
-git worktree, captures everything, reviews the diff, and writes an evidence
-report + Obsidian note. The orchestration lives in ``EvidenceLoop`` so the
-M3 LangGraph refactor can call the same steps as nodes without rewriting
-them.
+``acp run`` is the entry point: it runs one coding task in an isolated git
+worktree, captures everything, reviews the diff, and writes an evidence
+report + Obsidian note. The orchestration lives in the LangGraph workflow
+(``acp.graph.workflow``) — the graph is the only production engine. The
+original linear ``EvidenceLoop`` is quarantined in ``acp.legacy_loop`` for
+test-only equivalence checks.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import typer
 from rich.console import Console
 
-from acp.agents.base import AgentProtocol, write_prompt
-from acp.agents.registry import build_agent
-from acp.config import RepoConfig, load_repo_config
-from acp.errors import ACPError, RepoDirtyError, WorktreeError
+from acp.config import load_repo_config
+from acp.errors import ACPError
 from acp.events import EventWriter
-from acp.gitops.diff import DiffCapture, capture_diff
-from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
 from acp.models import EventType, Task, TaskStatus
-from acp.reports.writer import write_report
-from acp.review.diff_reviewer import review_diff
-from acp.review.gates import evaluate_final_gates, GateOutcome
-from acp.store import TaskStore
-from acp.testing.runner import all_passed, run_commands, validation_status
-from acp.vault.obsidian_writer import write_vault_note
+from acp.store import TaskStore, is_valid_task_id
 
 app = typer.Typer(
     name="acp",
@@ -41,341 +31,119 @@ console = Console()
 
 
 # --------------------------------------------------------------------------- #
-# Agent factory — delegates to the registry (the single dispatch point).
-# M2 replaced M1's inline _build_agent; the EvidenceLoop now uses this by
-# default, and tests can inject a custom factory if needed.
+# task_id validation — every command that turns a user-supplied task id into a
+# filesystem path must reject anything that isn't ``task_<YYYYMMDD>_<NNNN>``.
+# A local control plane that manipulates files must not accept path-shaped ids.
 # --------------------------------------------------------------------------- #
 
-def _build_agent(config: RepoConfig) -> AgentProtocol:
-    """Build the agent the repo config selected, via the registry."""
-    return build_agent(config)
+def _require_valid_task_id(task_id: str) -> None:
+    """Exit nonzero if ``task_id`` is not a canonical task id."""
+    if not is_valid_task_id(task_id):
+        console.print(
+            f"[red]✗[/] invalid task id: {task_id!r} "
+            f"(expected task_<YYYYMMDD>_<NNNN>, e.g. task_20260624_0001)"
+        )
+        raise typer.Exit(code=1)
 
 
-# --------------------------------------------------------------------------- #
-# The evidence loop
-# --------------------------------------------------------------------------- #
+def _revert_vault_note(note_path: Path, original_content: str) -> None:
+    """Best-effort revert of a vault note to its pre-modification content.
 
-@dataclass
-class LoopResult:
-    """What ``EvidenceLoop.run`` produced, for the CLI / tests to inspect."""
-
-    task_id: str
-    status: TaskStatus
-    run_dir: Path
-    report_path: Path
-    vault_note_path: Path
-
-
-class EvidenceLoop:
-    """Orchestrates the linear M1 evidence loop.
-
-    Each step writes an event. Failures are caught at step boundaries; even on
-    failure we still try to write a report (the spec rule: a failed task still
-    produces an evidence report). The dirty-repo pre-check is the one case
-    where we fail *before* creating a worktree.
+    Used when a lifecycle event write fails after the vault note has already
+    been modified. The event log is the source of truth — a modified vault note
+    without a corresponding event is an inconsistent state that must not persist.
+    Revert failures are logged but not raised (we're already in an error path).
     """
+    try:
+        note_path.write_text(original_content)
+    except Exception:  # noqa: BLE001
+        console.print(f"[red]✗[/] could not revert vault note: {note_path}")
 
-    def __init__(
-        self,
-        *,
-        config: RepoConfig,
-        user_request: str,
-        store: TaskStore | None = None,
-        vault_root: Path | str | None = None,
-        agent_factory: Callable[[RepoConfig], AgentProtocol] = _build_agent,
-        keep_worktree: bool = True,
-    ) -> None:
-        self.config = config
-        self.user_request = user_request
-        self.store = store or TaskStore()
-        self.vault_root = Path(vault_root or "vault").resolve()
-        self.agent_factory = agent_factory
-        self.keep_worktree = keep_worktree
 
-    def run(self) -> LoopResult:
-        cfg = self.config
-        repo_path = cfg.repo.path
+# --------------------------------------------------------------------------- #
+# Post-run lifecycle evidence — used by ``acp approve`` / ``acp reject``.
+#
+# Approval/rejection are human decisions that happen *after* a run's terminal
+# event. They append a lifecycle event (human.approved / human.rejected) to the
+# same hash-chained event log. To keep ``acp verify`` passing, the lifecycle
+# event must be:
+#   1. signed with the run's own Ed25519 key (recovered from the
+#      evidence_config sidecar) — a signed run's lifecycle event must not be
+#      unsigned (fail closed);
+#   2. dual-written to the run's SQLite durable store, if it had one;
+#   3. followed by an evidence manifest recompute, so the manifest's event
+#      chain head matches the new last event.
+# --------------------------------------------------------------------------- #
 
-        # 1. Task id + run dir + initial event ------------------------------ #
-        # Pass repo_path so the id (and thus the branch name) can't collide
-        # with an existing agent/task_* branch in this repo.
-        task_id = self.store.next_task_id(repo_path=repo_path)
-        task = self.store.create(
-            task_id=task_id,
-            repo_name=cfg.repo.name,
-            repo_path=repo_path,
-            base_branch=cfg.repo.default_branch,
-            user_request=self.user_request,
-        )
-        events = EventWriter(task_id, self.store.run_dir(task_id))
-        events.write(EventType.TASK_CREATED, {"request": self.user_request})
+def _record_lifecycle_event(
+    *,
+    task_id: str,
+    run_dir: Path,
+    event_type: EventType,
+    payload: dict,
+) -> None:
+    """Append a post-run lifecycle event and keep the evidence manifest valid."""
+    from acp.errors import EvidenceConfigError
+    from acp.evidence.manifest import read_evidence_config, write_evidence_manifest
 
-        # 2. Repo cleanliness pre-check ------------------------------------- #
-        if not is_clean(repo_path):
-            events.write(
-                EventType.TASK_FAILED,
-                {"reason": "repo dirty", "repo_path": str(repo_path)},
+    events = EventWriter(task_id, run_dir)
+    ev_cfg = read_evidence_config(run_dir)
+
+    # Determine whether the run was signed. The evidence_config sidecar is the
+    # primary signal (written at finalize time for v0.5.9+ runs). For older runs
+    # that have no sidecar, inspect the existing event log — if any event has a
+    # non-empty signature, the run was signed and the lifecycle event must be
+    # signed too. Never silently downgrade a signed run to unsigned.
+    signing_key_path = ev_cfg["signing_key_path"]
+    if signing_key_path is None:
+        existing = events.read_all()
+        if any(e.signature for e in existing):
+            # Pre-v0.5.9 signed run with no sidecar. We know it was signed but
+            # don't know which key was used. Fail closed — refuse to write an
+            # unsigned lifecycle event that would break signature verification.
+            raise EvidenceConfigError(
+                "run has signed events but no evidence_config sidecar — cannot "
+                "determine signing key for lifecycle event. Re-run with v0.5.9+ "
+                "or manually create evidence_config.json with the signing_key_path."
             )
-            task.status = TaskStatus.FAILED
-            self.store.save(task)
-            console.print(
-                f"[red]✗[/] repo is dirty; refusing to start: {repo_path}\n"
-                f"  (no worktree created — see [[worktree-safety]])"
-            )
-            # Dirty-repo is a pre-worktree failure: nothing to report on.
-            raise RepoDirtyError(f"repo is dirty; refusing to start: {repo_path}")
-        events.write(
-            EventType.REPO_CHECKED,
-            {"repo_path": str(repo_path), "clean": True},
-        )
 
-        # 3. Worktree ------------------------------------------------------- #
+    if signing_key_path is not None:
         try:
-            worktree_path, base_sha = create_worktree(
-                repo_path=repo_path,
-                base_branch=cfg.repo.default_branch,
-                branch_name=task.task_branch,
-                target_path=self.store.worktree_path(task_id),
+            key_bytes = signing_key_path.read_bytes()
+        except OSError as exc:
+            raise EvidenceConfigError(
+                f"run was signed but signing key is not readable: "
+                f"{signing_key_path} ({exc})"
+            ) from exc
+        if len(key_bytes) != 32:
+            raise EvidenceConfigError(
+                f"signing key file must be exactly 32 bytes, got {len(key_bytes)}"
             )
-            task.base_commit_sha = base_sha
-            self.store.save(task)
-        except Exception as exc:  # noqa: BLE001
-            events.write(
-                EventType.TASK_FAILED,
-                {"reason": "worktree creation failed", "detail": str(exc)},
-            )
-            task.status = TaskStatus.FAILED
-            self.store.save(task)
-            console.print(f"[red]✗[/] worktree creation failed: {exc}")
-            raise WorktreeError(f"worktree creation failed: {exc}") from exc
-
-        task.status = TaskStatus.WORKTREE_CREATED
-        self.store.save(task)
-        events.write(
-            EventType.WORKTREE_CREATED,
-            {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
-        )
-        console.print(f"[green]✓[/] worktree: {worktree_path}")
-
-        artifacts = self.store.artifacts_dir(task_id)
-
-        # From here on, even if something fails we have a diff to report on. #
         try:
-            return self._run_after_worktree(task, events, worktree_path, artifacts)
-        finally:
-            if not self.keep_worktree:
-                try:
-                    remove_worktree(repo_path, worktree_path)
-                except Exception:  # noqa: BLE001
-                    pass  # cleanup is best-effort
+            events.set_signing_key(key_bytes)
+        except ImportError as exc:
+            raise EvidenceConfigError(
+                "run was signed but 'cryptography' is not installed — cannot sign "
+                "lifecycle event. Install with: uv sync --extra crypto"
+            ) from exc
 
-    def _run_after_worktree(
-        self,
-        task,
-        events: EventWriter,
-        worktree_path: Path,
-        artifacts: Path,
-    ) -> LoopResult:
-        cfg = self.config
+    evt = events.write(event_type, payload)
 
-        # 4. Build context (M1: just the prompt; M6 will add a bundle) ----- #
-        prompt_path = write_prompt(
-            user_request=task.user_request,
-            worktree_path=worktree_path,
-            artifact_dir=artifacts,
-            repo_config=cfg,
-        )
-        events.write(
-            EventType.CONTEXT_BUILT,
-            {"prompt_path": str(prompt_path), "haystack": False},
-        )
-
-        # 5. Run agent ----------------------------------------------------- #
-        agent = self.agent_factory(cfg)
-        task.status = TaskStatus.EXECUTING
-        self.store.save(task)
-        events.write(
-            EventType.AGENT_STARTED,
-            {"agent": agent.name, "timeout_seconds": cfg.agent.timeout_seconds},
-        )
-        agent_result = agent.run(
-            prompt_path=prompt_path,
-            worktree_path=worktree_path,
-            artifact_dir=artifacts,
-            timeout_seconds=cfg.agent.timeout_seconds,
-        )
-        events.write(
-            EventType.AGENT_FINISHED,
-            {
-                "agent": agent_result.agent_name,
-                "exit_code": agent_result.exit_code,
-                "summary": agent_result.summary,
-            },
-        )
-        console.print(
-            f"[green]✓[/] agent finished (exit {agent_result.exit_code})"
-        )
-
-        # 6. Run configured commands --------------------------------------- #
-        task.status = TaskStatus.TESTING
-        self.store.save(task)
-        cmd_timeout = cfg.commands.timeout_seconds or cfg.agent.timeout_seconds
-        command_results = run_commands(
-            repo_config=cfg,
-            worktree_path=worktree_path,
-            artifact_dir=artifacts,
-            timeout_seconds=cmd_timeout,
-            event_writer=events,
-        )
-        tests_pass = all_passed(command_results)
-        console.print(
-            f"[{'green' if tests_pass else 'red'}]{'✓' if tests_pass else '✗'}[/] "
-            f"commands: {sum(1 for r in command_results if not r.skipped)} ran"
-        )
-
-        # 7. Capture diff -------------------------------------------------- #
-        diff: DiffCapture = capture_diff(
-            worktree_path=worktree_path,
-            base_branch=cfg.repo.default_branch,
-            artifacts_dir=artifacts,
-            base_commit_sha=task.base_commit_sha or None,
-        )
-        events.write(
-            EventType.DIFF_CAPTURED,
-            {
-                "files": len(diff.changed_files),
-                "insertions": diff.insertions,
-                "deletions": diff.deletions,
-            },
-        )
-
-        # 8. Review -------------------------------------------------------- #
-        task.status = TaskStatus.REVIEWING
-        self.store.save(task)
-        review = review_diff(
-            diff=diff,
-            command_results=command_results,
-            repo_config=cfg,
-            artifacts_dir=artifacts,
-        )
-        events.write(
-            EventType.REVIEW_COMPLETED,
-            {
-                "risk": review.risk.value,
-                "recommendation": review.recommendation.value,
-                "concerns": len(review.concerns),
-            },
-        )
-        console.print(
-            f"[yellow]![/] review: risk={review.risk.value} "
-            f"rec={review.recommendation.value}"
-        )
-
-        # 9. Compute final status via GateResult (single source of truth). #
-        gate_result = evaluate_final_gates(
-            agent_exit_code=agent_result.exit_code if agent_result else None,
-            command_results=command_results,
-            review_result=review,
-            changed_files=diff.changed_files,
-        )
-        status = (
-            TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
-            else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
-            else TaskStatus.FAILED
-        )
-        task.status = status
-        self.store.save(task)
-
-        # 10. Write report (with GateResult for accurate gate summary). --- #
-        report_path = write_report(
-            task=task,
-            command_results=command_results,
-            review=review,
-            diff=diff,
-            artifact_dir=artifacts,
-            agent_result=agent_result,
-            gate_result=gate_result,
-            events=events.read_all(),
-        )
-        events.write(
-            EventType.REPORT_WRITTEN,
-            {"report_path": str(report_path)},
-        )
-
-        # 11. Write vault note -------------------------------------------- #
-        vault_note_path = write_vault_note(
-            report_body=report_path.read_text(),
-            task=task,
-            review=review,
-            diff=diff,
-            vault_root=self.vault_root,
-        )
-        events.write(
-            EventType.VAULT_NOTE_WRITTEN,
-            {"vault_note_path": str(vault_note_path)},
-        )
-
-        # 11b. (Evidence manifest is written after the terminal event below
-        #      so the event chain head in the manifest matches the last event.)
-
-        # 12. Final event -------------------------------------------------- #
-        status = task.status
-        if status == TaskStatus.PASSED:
-            final_event = EventType.TASK_COMPLETED
-        elif status == TaskStatus.NEEDS_REVIEW:
-            final_event = EventType.TASK_NEEDS_REVIEW
-        else:
-            final_event = EventType.TASK_FAILED
-        events.write(
-            final_event,
-            {
-                "status": status.value,
-                "validation_commands_ran": gate_result.validation_commands_ran,
-                "validation_commands_failed": gate_result.validation_commands_failed,
-                "validation_status": validation_status(command_results),
-                "recommendation": review.recommendation.value,
-            },
-        )
-
-        # 12b. Write evidence manifest + re-render report with manifest hash. #
-        #      After the terminal event so the chain head is current.
-        manifest_hash = None
+    # Dual-write to the run's durable store if it had one. Best-effort: the
+    # SQLite store is a derived index, rebuildable from the JSONL log.
+    durable_store_path = ev_cfg["durable_store"]
+    if durable_store_path is not None:
         try:
-            from acp.evidence.manifest import write_evidence_manifest
-            _, manifest_hash = write_evidence_manifest(
-                run_dir=self.store.run_dir(task.task_id),
-                events_writer=events,
-            )
-            report_path = write_report(
-                task=task,
-                command_results=command_results,
-                review=review,
-                diff=diff,
-                artifact_dir=artifacts,
-                agent_result=agent_result,
-                gate_result=gate_result,
-                manifest_hash=manifest_hash,
-                events=events.read_all(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            events.write(
-                EventType.NODE_FAILED,
-                {"node": "evidence_loop.manifest", "message": str(exc)},
-            )
+            from acp.evidence.durable_store import DurableEventStore
+            with DurableEventStore(durable_store_path) as db:
+                db.append(evt)
+        except Exception:  # noqa: BLE001
+            pass
 
-        console.print(f"[green]✓ report:[/] {report_path}")
-        console.print(f"[green]✓ vault note:[/] {vault_note_path}")
-        console.print(
-            f"\n[dim]Task {task.task_id} → {status.value}. "
-            f"Review the vault note and set approved: true to promote memory.[/]"
-        )
-        return LoopResult(
-            task_id=task.task_id,
-            status=task.status,
-            run_dir=self.store.run_dir(task.task_id),
-            report_path=report_path,
-            vault_note_path=vault_note_path,
-        )
+    # Recompute + rewrite the evidence manifest so its event chain head
+    # matches the new last event. ``acp verify`` checks events[-1].hash
+    # against manifest.event_chain_head, so this must be current.
+    write_evidence_manifest(run_dir=run_dir, events_writer=events)
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +256,7 @@ def verify(
     from acp.evidence.manifest import verify_evidence_manifest
     from acp.models import Event
 
+    _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
     run_dir = store.run_dir(task_id)
 
@@ -591,6 +360,7 @@ def events(
     """
     from acp.models import Event
 
+    _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
     events_path = store.events_path(task_id)
 
@@ -664,6 +434,7 @@ def approve(
     """
     from acp.vault.approval import approve_vault_note, can_approve
 
+    _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
     run_dir = store.run_dir(task_id)
 
@@ -691,7 +462,12 @@ def approve(
         console.print(f"[red]✗[/] vault note not found: {note_path}")
         raise typer.Exit(code=1)
 
-    # Approve the note (flips frontmatter).
+    # Approve the note (flips frontmatter) + write the lifecycle event as one
+    # atomic-ish unit. If the lifecycle event write fails, revert the vault note
+    # to its pre-approval state — the event log is the source of truth, and a
+    # modified vault note without a corresponding event is an inconsistent state
+    # that must not persist.
+    original_note_content = note_path.read_text()
     try:
         fm = approve_vault_note(note_path, approver=approver)
     except PermissionError as exc:
@@ -701,16 +477,28 @@ def approve(
         console.print(f"[red]✗[/] approval failed: {exc}")
         raise typer.Exit(code=1)
 
-    # Write the human.approved event.
-    events = EventWriter(task_id, run_dir)
-    events.write(
-        EventType.HUMAN_APPROVED,
-        {
-            "approver": approver or "unknown",
-            "vault_note_path": str(note_path),
-            "memory_status": fm.memory_status,
-        },
-    )
+    # Write the human.approved event — signed with the run's key + dual-written
+    # to its durable store, then recompute the evidence manifest so acp verify
+    # still passes. Lifecycle evidence must not break the run's verifier.
+    try:
+        _record_lifecycle_event(
+            task_id=task_id,
+            run_dir=run_dir,
+            event_type=EventType.HUMAN_APPROVED,
+            payload={
+                "approver": approver or "unknown",
+                "vault_note_path": str(note_path),
+                "memory_status": fm.memory_status,
+            },
+        )
+    except ACPError as exc:
+        _revert_vault_note(note_path, original_note_content)
+        console.print(f"[red]✗[/] {exc}")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except Exception as exc:
+        _revert_vault_note(note_path, original_note_content)
+        console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
+        raise typer.Exit(code=1) from exc
 
     # Update task status to APPROVED.
     task.status = TaskStatus.APPROVED
@@ -720,6 +508,7 @@ def approve(
     console.print(f"  vault note: {note_path}")
     console.print(f"  memory_status: {fm.memory_status}")
     console.print(f"  event: human.approved written to {store.events_path(task_id)}")
+    console.print(f"  evidence manifest refreshed — `acp verify` remains valid")
 
 
 @app.command()
@@ -759,6 +548,7 @@ def reject(
     """
     from acp.vault.approval import reject_vault_note
 
+    _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
     run_dir = store.run_dir(task_id)
 
@@ -777,6 +567,10 @@ def reject(
         console.print(f"[red]✗[/] vault note not found: {note_path}")
         raise typer.Exit(code=1)
 
+    # Reject the note (archives it) + write the lifecycle event as one
+    # atomic-ish unit. If the lifecycle event write fails, revert the vault note
+    # so we don't leave a modified note without a corresponding event.
+    original_note_content = note_path.read_text()
     try:
         fm = reject_vault_note(note_path, rejecter=rejecter)
     except PermissionError as exc:
@@ -786,16 +580,26 @@ def reject(
         console.print(f"[red]✗[/] rejection failed: {exc}")
         raise typer.Exit(code=1)
 
-    events = EventWriter(task_id, run_dir)
-    events.write(
-        EventType.HUMAN_REJECTED,
-        {
-            "rejecter": rejecter or "unknown",
-            "reason": reason,
-            "vault_note_path": str(note_path),
-            "memory_status": fm.memory_status,
-        },
-    )
+    try:
+        _record_lifecycle_event(
+            task_id=task_id,
+            run_dir=run_dir,
+            event_type=EventType.HUMAN_REJECTED,
+            payload={
+                "rejecter": rejecter or "unknown",
+                "reason": reason,
+                "vault_note_path": str(note_path),
+                "memory_status": fm.memory_status,
+            },
+        )
+    except ACPError as exc:
+        _revert_vault_note(note_path, original_note_content)
+        console.print(f"[red]✗[/] {exc}")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except Exception as exc:
+        _revert_vault_note(note_path, original_note_content)
+        console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
+        raise typer.Exit(code=1) from exc
 
     task.status = TaskStatus.ARCHIVED
     store.save(task)
@@ -804,6 +608,7 @@ def reject(
     console.print(f"  vault note: {note_path}")
     console.print(f"  memory_status: {fm.memory_status}")
     console.print(f"  event: human.rejected written to {store.events_path(task_id)}")
+    console.print(f"  evidence manifest refreshed — `acp verify` remains valid")
 
 
 @app.command("list")
@@ -899,6 +704,7 @@ def cleanup(
     under ``data/runs/<task_id>/`` (events, artifacts, report) is preserved
     — that's the evidence trail, not clutter.
     """
+    _require_valid_task_id(task_id)
     cfg = load_repo_config(config)
     repo_path = cfg.repo.path
     store = TaskStore(runs_root=runs_root)
@@ -910,6 +716,7 @@ def cleanup(
     # 1. Remove the worktree.
     if worktree_path.exists():
         try:
+            from acp.gitops.worktrees import remove_worktree
             remove_worktree(repo_path, worktree_path, force=force)
             cleaned.append(f"worktree: {worktree_path}")
         except Exception as exc:  # noqa: BLE001

@@ -289,12 +289,23 @@ def test_cli_approve_already_approved(tmp_path: Path):
 
 def test_cli_approve_nonexistent_task(tmp_path: Path):
     r = runner.invoke(app, [
-        "approve", "--task", "nonexistent",
+        "approve", "--task", "task_20260624_9999",
         "--runs-root", str(tmp_path / "runs"),
         "--vault-root", str(tmp_path / "vault"),
     ])
     assert r.exit_code == 1
     assert "not found" in r.output
+
+
+def test_cli_approve_invalid_task_id_rejected(tmp_path: Path):
+    """Invalid (path-shaped) task ids are rejected before any filesystem access."""
+    r = runner.invoke(app, [
+        "approve", "--task", "../etc/passwd",
+        "--runs-root", str(tmp_path / "runs"),
+        "--vault-root", str(tmp_path / "vault"),
+    ])
+    assert r.exit_code == 1
+    assert "invalid task id" in r.output
 
 
 # --------------------------------------------------------------------------- #

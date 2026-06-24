@@ -15,7 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from acp.cli import EvidenceLoop
+from acp.legacy_loop import EvidenceLoop
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.errors import AgentConfigError
 from acp.models import EventType

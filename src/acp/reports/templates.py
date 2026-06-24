@@ -248,7 +248,7 @@ def render_report(
 
     lines.append("## Evidence")
     lines.append("")
-    lines.append("All artifacts live under `data/runs/<task_id>/artifacts/`:")
+    lines.append("Run artifacts live under `data/runs/<task_id>/artifacts/`:")
     lines.append("")
     lines.append("- `agent_prompt.txt` -- what the agent was told")
     lines.append("- `agent_stdout.txt` / `agent_stderr.txt` -- agent output")
@@ -256,9 +256,14 @@ def render_report(
     lines.append("- `commands.json` -- command results table")
     lines.append("- `diff.patch` / `diff_stat.txt` -- the captured change")
     lines.append("- `review.json` -- this review, machine-readable")
-    lines.append("- `evidence_manifest.json` -- content-addressed artifact hashes + event chain head")
     lines.append("")
-    lines.append("The event log (`events.jsonl`) is the source of truth; this report is its human-readable projection.")
+    lines.append(
+        "The event log (`data/runs/<task_id>/events.jsonl`) and the evidence "
+        "manifest (`data/runs/<task_id>/evidence_manifest.json`) live in the "
+        "run directory itself — the manifest holds content-addressed artifact "
+        "hashes + the event chain head. The event log is the source of truth; "
+        "this report is its human-readable projection."
+    )
     if manifest_hash:
         lines.append("")
         lines.append(f"**Evidence manifest hash:** `{manifest_hash}`")
@@ -307,6 +312,7 @@ def render_failure_report(
     task: Task,
     error: str,
     events: list[Event] | None = None,
+    manifest_hash: str | None = None,
 ) -> str:
     """Minimal report for early failures (before diff/review exist).
 
@@ -315,7 +321,8 @@ def render_failure_report(
     node crash before agent run), there's no diff or review to render — but
     there is still a task, an error, and an event log. This minimal report
     records what we know so the evidence trail is never empty. When ``events``
-    is provided, an event timeline is included.
+    is provided, an event timeline is included. When ``manifest_hash`` is
+    provided, the evidence binding is recorded.
     """
     lines: list[str] = []
     lines.append(f"# Task report: {task.task_id}")
@@ -337,6 +344,14 @@ def render_failure_report(
     lines.append("This task failed early — no diff, review, or command artifacts were produced.")
     lines.append("The event log (`events.jsonl`) is the source of truth for what happened.")
     lines.append("")
+    if manifest_hash:
+        lines.append(f"**Evidence manifest hash:** `{manifest_hash}`")
+        lines.append("")
+        lines.append(
+            "This hash covers every artifact + the event chain head. "
+            "Verify with `evidence_manifest.json` in the run directory."
+        )
+        lines.append("")
 
     # Event timeline — show what happened before the failure.
     if events:

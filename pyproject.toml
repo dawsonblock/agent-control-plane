@@ -37,11 +37,16 @@ graph = [
     "langgraph>=1.2,<2",
 ]
 # v0.5.6: Ed25519 event-log signing (authenticity proofs).
+# Kept as a separate extra for operators who want signing in production
+# without pulling in pytest. The `dev` extra below also includes it so the
+# documented validation path (`uv sync --extra dev && bash scripts/validate.sh`)
+# works exactly as written — the signing tests are part of the gate.
 crypto = [
     "cryptography>=43,<46",
 ]
 dev = [
     "pytest>=8.2,<9",
+    "cryptography>=43,<46",
 ]
 
 [project.scripts]

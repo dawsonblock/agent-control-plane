@@ -274,10 +274,20 @@ def test_cli_events_with_type_filter(disposable_repo, isolated_workspace):
 
 
 def test_cli_events_nonexistent_task(isolated_workspace):
-    """`acp events` on a non-existent task fails."""
+    """`acp events` on a non-existent (but valid-shaped) task fails."""
     r = runner.invoke(app, [
-        "events", "--task", "nonexistent",
+        "events", "--task", "task_20260624_9999",
         "--runs-root", str(isolated_workspace["runs_root"]),
     ])
     assert r.exit_code == 1
     assert "not found" in r.output
+
+
+def test_cli_events_invalid_task_id_rejected(isolated_workspace):
+    """Invalid (path-shaped) task ids are rejected before any filesystem access."""
+    r = runner.invoke(app, [
+        "events", "--task", "../etc/passwd",
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r.exit_code == 1
+    assert "invalid task id" in r.output

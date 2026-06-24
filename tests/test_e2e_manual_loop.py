@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from acp.cli import EvidenceLoop
+from acp.legacy_loop import EvidenceLoop
 from acp.config import CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.errors import RepoDirtyError
 from acp.models import EventType, TaskStatus

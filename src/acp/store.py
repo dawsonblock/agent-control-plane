@@ -17,6 +17,17 @@ from acp.models import Task, TaskStatus
 _TASK_ID_RE = re.compile(r"^task_(\d{8})_(\d{4})$")
 
 
+def is_valid_task_id(task_id: str) -> bool:
+    """Whether ``task_id`` matches the canonical ``task_<YYYYMMDD>_<NNNN>`` shape.
+
+    Used to gate every CLI command that turns a user-supplied task id into a
+    filesystem path (``self.root / task_id``). A local control plane that
+    manipulates files must not accept path-shaped ids — ``..``, absolute paths,
+    or nested segments could escape the runs root.
+    """
+    return bool(_TASK_ID_RE.match(task_id))
+
+
 def _highest_branch_seq(repo_path: Path, prefix: str) -> int:
     """Highest sequence number among ``agent/<prefix*>`` branches in a repo.
 

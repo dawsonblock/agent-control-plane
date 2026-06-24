@@ -28,6 +28,8 @@ from typing import Any
 
 from acp.events import EventWriter, verify_event_chain
 
+EVIDENCE_CONFIG_FILENAME = "evidence_config.json"
+
 
 def _sha256_file(path: Path) -> str:
     """sha256 hex digest of a file's contents."""
@@ -153,3 +155,61 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
             return False
 
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Evidence config sidecar
+# --------------------------------------------------------------------------- #
+#
+# The evidence config (signing key path, durable store path, public key path)
+# is a property of a *run*, not of the human approving it later. We persist it
+# as a sidecar ``evidence_config.json`` at finalize time so that post-run
+# lifecycle commands (``acp approve`` / ``acp reject``) can recover the exact
+# signing key + durable store the run used — and therefore sign lifecycle
+# events with the same key and dual-write them to the same SQLite index.
+#
+# Only filesystem *paths* are recorded (never key material). The paths are
+# resolved at finalize time, so they are absolute and stable.
+
+
+def write_evidence_config(
+    run_dir: Path,
+    *,
+    signing_key_path: Path | None = None,
+    durable_store: Path | None = None,
+    public_key_path: Path | None = None,
+) -> Path:
+    """Persist the run's evidence config as ``evidence_config.json``.
+
+    Records the resolved filesystem paths for the signing key, durable store,
+    and public key so post-run lifecycle commands can recover them. Only paths
+    are stored — never key bytes. Idempotent: overwrites any prior sidecar.
+    """
+    run_dir = Path(run_dir)
+    config: dict[str, str | None] = {
+        "signing_key_path": str(signing_key_path) if signing_key_path else None,
+        "durable_store": str(durable_store) if durable_store else None,
+        "public_key_path": str(public_key_path) if public_key_path else None,
+    }
+    path = run_dir / EVIDENCE_CONFIG_FILENAME
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    return path
+
+
+def read_evidence_config(run_dir: Path) -> dict[str, Path | None]:
+    """Read the run's evidence config sidecar.
+
+    Returns a dict with ``signing_key_path``, ``durable_store``, and
+    ``public_key_path`` keys (each a ``Path`` or ``None``). Returns all-None
+    if the sidecar is absent (e.g. runs from before this was written).
+    """
+    run_dir = Path(run_dir)
+    path = run_dir / EVIDENCE_CONFIG_FILENAME
+    if not path.is_file():
+        return {"signing_key_path": None, "durable_store": None, "public_key_path": None}
+    data = json.loads(path.read_text())
+    return {
+        "signing_key_path": Path(data["signing_key_path"]) if data.get("signing_key_path") else None,
+        "durable_store": Path(data["durable_store"]) if data.get("durable_store") else None,
+        "public_key_path": Path(data["public_key_path"]) if data.get("public_key_path") else None,
+    }

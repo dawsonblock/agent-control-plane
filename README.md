@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.8 alpha — Dogfood hardening (trust layer + CLI + approval)
+## Current scope: v0.5.9 alpha — Trust-layer stabilization (approval-safe evidence)
 
 This repository currently implements:
 
@@ -41,7 +41,8 @@ This repository currently implements:
 | **v0.5.x** | Gate consolidation, `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence, CLI honesty | Stable |
 | **v0.5.6** | fsync'd event writes, Ed25519 event signing, event timeline in report, SQLite durable event store | Stable |
 | **v0.5.7** | Config-driven signing + durable store, `acp verify` + `acp events` CLI commands, durable task store | Stable |
-| **v0.5.8** | Human approval workflow — `acp approve`, `acp reject`, `acp list`, vault note audit trail | Current |
+| **v0.5.8** | Human approval workflow — `acp approve`, `acp reject`, `acp list`, vault note audit trail | Stable |
+| **v0.5.9** | Approval-safe evidence: lifecycle events signed + manifest-refreshed so `acp verify` survives approve/reject; fail-closed signing; task_id validation; early-failure report is a true final projection; `EvidenceLoop` quarantined out of the CLI | Current |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 

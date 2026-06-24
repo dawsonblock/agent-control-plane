@@ -20,6 +20,7 @@ crypto = [
     { name = "cryptography" },
 ]
 dev = [
+    { name = "cryptography" },
     { name = "pytest" },
 ]
 graph = [
@@ -29,6 +30,7 @@ graph = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", marker = "extra == 'crypto'", specifier = ">=43,<46" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=43,<46" },
     { name = "gitpython", specifier = ">=3.1,<4" },
     { name = "langgraph", specifier = ">=1.2,<2" },
     { name = "langgraph", marker = "extra == 'graph'", specifier = ">=1.2,<2" },

@@ -257,22 +257,33 @@ def run_workflow(
     # Placeholder writer — create_task will relocate it to the real run dir.
     events = EventWriter("__pending__", store.root / "__pending__")
 
-    # Wire Ed25519 signing if a signing key is configured.
+    # Wire Ed25519 signing if a signing key is configured. Signing is a trust
+    # mode: if it is configured, failure to sign must be FATAL. We never
+    # silently downgrade configured signed evidence to unsigned evidence —
+    # that is exactly the kind of integrity gap this control plane exists to
+    # prevent. A missing key file, a malformed key, or an unavailable
+    # `cryptography` package all raise EvidenceConfigError (fail closed).
     evidence_cfg = getattr(config, "evidence", None)
     if evidence_cfg and evidence_cfg.signing_key_path:
+        from acp.errors import EvidenceConfigError
         try:
             key_bytes = evidence_cfg.signing_key_path.read_bytes()
-            if len(key_bytes) != 32:
-                raise ValueError(
-                    f"signing key file must be exactly 32 bytes, got {len(key_bytes)}"
-                )
+        except OSError as exc:
+            raise EvidenceConfigError(
+                f"signing key file not readable: {evidence_cfg.signing_key_path} ({exc})"
+            ) from exc
+        if len(key_bytes) != 32:
+            raise EvidenceConfigError(
+                f"signing key file must be exactly 32 bytes, got {len(key_bytes)}: "
+                f"{evidence_cfg.signing_key_path}"
+            )
+        try:
             events.set_signing_key(key_bytes)
-        except ImportError:
-            # cryptography not installed — warn but continue unsigned.
-            pass  # The error is surfaced when verification is attempted.
-        except Exception:
-            # Don't crash the run if the key file is missing — just skip signing.
-            pass
+        except ImportError as exc:
+            raise EvidenceConfigError(
+                "signing is configured but the 'cryptography' package is not "
+                "installed — refusing to run unsigned. Install with: uv sync --extra crypto"
+            ) from exc
 
     # Wire SQLite durable store if configured. The store is additive: events
     # go to both JSONL (canonical) and SQLite (queryable index). We wrap the

@@ -28,7 +28,7 @@ from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
-from acp.evidence.manifest import write_evidence_manifest
+from acp.evidence.manifest import write_evidence_config, write_evidence_manifest
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
 from acp.models import EventType, TaskStatus
@@ -70,17 +70,37 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
     ``node.failed`` events, not raised.
 
     The re-rendered report includes the event timeline (full projection of
-    the event log) and the manifest hash (evidence binding).
+    the event log) and the manifest hash (evidence binding). For early
+    failures (no diff/review), the minimal failure report is re-rendered with
+    the final event timeline + manifest hash so it is a true projection of the
+    final event log, not a snapshot from before the terminal event.
+
+    Also persists the run's evidence config (signing key / durable store /
+    public key paths) as a sidecar so post-run lifecycle commands can recover
+    the same signing key + durable store the run used.
     """
     try:
+        run_dir = ctx.store.run_dir(state["task_id"])
         _, manifest_hash = write_evidence_manifest(
-            run_dir=ctx.store.run_dir(state["task_id"]),
+            run_dir=run_dir,
             events_writer=ctx.events,
         )
+        # Persist the evidence config sidecar so approve/reject can recover the
+        # run's signing key + durable store (lifecycle events must be signed
+        # with the same key and dual-written to the same SQLite index).
+        cfg = state.get("config")
+        evidence_cfg = getattr(cfg, "evidence", None)
+        if evidence_cfg is not None:
+            write_evidence_config(
+                run_dir,
+                signing_key_path=evidence_cfg.signing_key_path,
+                durable_store=evidence_cfg.durable_store,
+                public_key_path=evidence_cfg.public_key_path,
+            )
+
         # Re-render the report with the manifest hash + event timeline so
         # the report ↔ evidence binding is verifiable and the report is a
-        # true projection of the event log. Only if we have a review (full
-        # report path); the minimal failure report is handled separately.
+        # true projection of the event log.
         report_path = state.get("report_path")
         review = state.get("review_result")
         events = ctx.events.read_all()
@@ -94,6 +114,18 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 agent_result=state.get("agent_result"),
                 repair_history=state.get("repair_history", []),
                 gate_result=state.get("gate_result"),
+                manifest_hash=manifest_hash,
+                events=events,
+            )
+        elif report_path and review is None and state.get("diff") is None:
+            # Early failure: re-render the minimal failure report with the
+            # final event timeline + manifest hash. The first render (in
+            # failed_node) happened before report.written/task.failed were
+            # appended, so its timeline was stale.
+            write_failure_report(
+                task=state["task"],
+                error=state.get("error", "unknown"),
+                artifact_dir=state["artifacts_dir"],
                 manifest_hash=manifest_hash,
                 events=events,
             )
@@ -490,7 +522,11 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         },
     )
     # Write the evidence manifest AFTER the terminal event so the chain head
-    # is current. Best-effort — don't mask the real failure.
+    # is current. Best-effort — don't mask the real failure. Surface the
+    # locally-written report path into state so _finalize_evidence can re-render
+    # the early-failure report with the final event timeline + manifest hash.
+    if report_path is not None:
+        state["report_path"] = report_path
     manifest_hash = _finalize_evidence(state, ctx)
     return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path, "manifest_hash": manifest_hash}
 

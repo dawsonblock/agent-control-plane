@@ -43,3 +43,16 @@ class SkillLoadError(ACPError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, exit_code=5)
+
+
+class EvidenceConfigError(ACPError):
+    """Evidence integrity could not be established as configured.
+
+    Raised when signing was requested but the key could not be loaded, or
+    when a configured evidence primitive is unavailable. This is a fail-closed
+    error: a trust mode must never silently downgrade signed evidence to
+    unsigned evidence.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, exit_code=6)

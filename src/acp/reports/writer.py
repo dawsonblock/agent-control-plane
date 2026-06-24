@@ -62,6 +62,7 @@ def write_failure_report(
     error: str,
     artifact_dir: Path,
     events: list[Event] | None = None,
+    manifest_hash: str | None = None,
 ) -> Path:
     """Render a minimal final_report.md for early failures (no diff/review).
 
@@ -69,10 +70,14 @@ def write_failure_report(
     review (dirty repo, worktree error, node crash). The spec rule is "a
     failed task produces an evidence report" — this ensures that's true even
     for early failures. When ``events`` is provided, an event timeline is
-    included so the report shows what happened before the failure.
+    included so the report shows what happened before the failure. When
+    ``manifest_hash`` is provided, it's included so the report ↔ evidence
+    binding is verifiable.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    body = render_failure_report(task=task, error=error, events=events)
+    body = render_failure_report(
+        task=task, error=error, events=events, manifest_hash=manifest_hash
+    )
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)
     return report_path
