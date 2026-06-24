@@ -69,7 +69,7 @@ def build_evidence_manifest(
                 artifact_hashes[rel] = _sha256_file(path)
 
     events = events_writer.read_all()
-    chain_valid = verify_event_chain(events) if events else True
+    chain_valid = verify_event_chain(events)
     chain_head = events_writer.last_hash
 
     manifest: dict[str, Any] = {
@@ -140,19 +140,23 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
         if on_disk != manifest_files:
             return False
 
-    # Verify event chain.
+    # Verify event chain. The event log is the source of truth — if it's
+    # missing or empty, the manifest cannot be valid.
     events_path = run_dir / "events.jsonl"
-    if events_path.is_file():
-        from acp.models import Event
-        events = [
-            Event.model_validate_json(line)
-            for line in events_path.read_text().splitlines()
-            if line.strip()
-        ]
-        if not verify_event_chain(events):
-            return False
-        if events and events[-1].hash != manifest.get("event_chain_head"):
-            return False
+    if not events_path.is_file():
+        return False
+    from acp.models import Event
+    events = [
+        Event.model_validate_json(line)
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+    ]
+    if not verify_event_chain(events):
+        return False
+    if not events:
+        return False
+    if events[-1].hash != manifest.get("event_chain_head"):
+        return False
 
     return True
 

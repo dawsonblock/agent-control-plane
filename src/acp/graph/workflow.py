@@ -254,6 +254,9 @@ def run_workflow(
     a SQLite database in addition to the JSONL log.
     """
     store = TaskStore(runs_root=runs_root)
+    # Ensure vault_root exists — the workflow writes a vault note at the end
+    # and the vault directory must be present by then.
+    Path(vault_root).mkdir(parents=True, exist_ok=True)
     # Placeholder writer — create_task will relocate it to the real run dir.
     events = EventWriter("__pending__", store.root / "__pending__")
 

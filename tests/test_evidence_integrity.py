@@ -81,8 +81,9 @@ def test_event_chain_detects_reordered_events(tmp_path: Path):
     assert verify_event_chain([events[1], events[0]]) is False
 
 
-def test_event_chain_empty_list_is_valid(tmp_path: Path):
-    assert verify_event_chain([]) is True
+def test_event_chain_empty_list_is_invalid(tmp_path: Path):
+    """An empty event log has no evidence trail — verification must fail."""
+    assert verify_event_chain([]) is False
 
 
 def test_event_writer_resumes_chain_after_restart(tmp_path: Path):

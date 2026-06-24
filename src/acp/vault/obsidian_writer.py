@@ -40,6 +40,10 @@ def write_vault_note(
     vault_root = Path(vault_root)
     tasks_dir = vault_root / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
+    # Guard against path traversal — task_id is used to construct the filename.
+    # A task_id with "/" or ".." could escape the tasks directory.
+    if "/" in task.task_id or "\\" in task.task_id or ".." in task.task_id:
+        raise ValueError(f"task_id contains path separators — refusing to write: {task.task_id}")
     note_path = tasks_dir / f"{task.task_id}.md"
 
     if note_path.exists():

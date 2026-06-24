@@ -379,6 +379,13 @@ def events(
     ]
 
     if filter_type:
+        valid_types = {t.value for t in EventType}
+        if filter_type not in valid_types:
+            console.print(
+                f"[red]✗[/] unknown event type: {filter_type!r} "
+                f"(valid types: {', '.join(sorted(valid_types))})"
+            )
+            raise typer.Exit(code=1)
         all_events = [e for e in all_events if e.type.value == filter_type]
 
     if limit > 0:
@@ -640,6 +647,7 @@ def list_tasks(
         return
 
     tasks: list[tuple[str, str, str, str]] = []
+    skipped = 0
     for task_json in sorted(runs_root.rglob("task.json")):
         try:
             t = Task.model_validate_json(task_json.read_text())
@@ -647,7 +655,10 @@ def list_tasks(
                 continue
             tasks.append((t.task_id, t.status.value, t.repo_name, t.created_at))
         except Exception:  # noqa: BLE001
-            pass
+            skipped += 1
+
+    if skipped:
+        console.print(f"[yellow]![/] skipped {skipped} malformed task.json file(s)")
 
     if not tasks:
         console.print(f"[dim]No tasks found{f' with status={status}' if status else ''}.[/]")

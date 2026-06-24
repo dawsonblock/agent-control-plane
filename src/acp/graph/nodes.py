@@ -245,6 +245,11 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         artifact_dir=state["artifacts_dir"],
         timeout_seconds=cfg.agent.timeout_seconds,
     )
+    if agent_result is None:
+        raise RuntimeError(
+            f"agent '{agent.name}' returned None instead of an AgentResult — "
+            f"this is a bug in the agent implementation"
+        )
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {
@@ -647,6 +652,11 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
         artifact_dir=state["artifacts_dir"],
         timeout_seconds=cfg.agent.timeout_seconds,
     )
+    if agent_result is None:
+        raise RuntimeError(
+            f"agent '{agent.name}' returned None instead of an AgentResult — "
+            f"this is a bug in the agent implementation"
+        )
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {

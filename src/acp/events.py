@@ -68,7 +68,12 @@ def verify_event_chain(events: list[Event]) -> bool:
     Returns ``True`` iff every event's ``prev_hash`` matches the preceding
     event's ``hash`` and every event's ``hash`` matches the recomputed
     value. The first event must have ``prev_hash == "GENESIS"``.
+
+    An empty event list returns ``False`` — a run with zero events has no
+    evidence trail to verify and is likely a deleted or tampered log.
     """
+    if not events:
+        return False
     prev = GENESIS_HASH
     for evt in events:
         if evt.prev_hash != prev:
@@ -103,6 +108,8 @@ def verify_event_signatures(events: list[Event], public_key: bytes) -> bool:
             "Install it with: uv sync --extra crypto"
         )
     pk = Ed25519PublicKey.from_public_bytes(public_key)
+    if not events:
+        return False
     for evt in events:
         if not evt.signature:
             return False
@@ -149,8 +156,13 @@ class EventWriter:
 
         After this is called, every event written will include a
         ``signature`` field (Ed25519 signature over the event's hash).
-        Requires the ``cryptography`` package.
+        Requires the ``cryptography`` package. The key must be exactly 32
+        bytes (Ed25519 raw private key format).
         """
+        if len(private_key) != 32:
+            raise ValueError(
+                f"Ed25519 private key must be exactly 32 bytes, got {len(private_key)}"
+            )
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         except ImportError:
@@ -229,14 +241,24 @@ class EventWriter:
         return event
 
     def read_all(self) -> list[Event]:
-        """Read every event in log order. Used by the report writer."""
+        """Read every event in log order. Used by the report writer.
+
+        Malformed lines are skipped — a corrupt line in the middle of the log
+        should not prevent reading the valid events before and after it. The
+        hash chain may be broken at that point, but ``verify_event_chain``
+        will catch that during verification.
+        """
         if not self.path.exists():
             return []
-        return [
-            Event.model_validate_json(line)
-            for line in self.path.read_text().splitlines()
-            if line.strip()
-        ]
+        events: list[Event] = []
+        for line in self.path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(Event.model_validate_json(line))
+            except Exception:  # noqa: BLE001
+                continue  # skip malformed line
+        return events
 
     @property
     def count(self) -> int:
