@@ -13,7 +13,7 @@ from typing import Any
 
 from acp.gitops.diff import DiffCapture
 from acp.models import AgentResult, CommandResult, ReviewResult, Task
-from acp.reports.templates import render_report
+from acp.reports.templates import render_failure_report, render_report
 from acp.review.gates import GateResult
 
 
@@ -27,11 +27,14 @@ def write_report(
     agent_result: AgentResult | None = None,
     repair_history: list[dict[str, Any]] | None = None,
     gate_result: GateResult | None = None,
+    manifest_hash: str | None = None,
 ) -> Path:
     """Render final_report.md into ``artifact_dir`` and return its path.
 
     When ``gate_result`` is provided, passes it through to the template so
     the Gate Summary section renders from the authoritative GateResult.
+    When ``manifest_hash`` is provided, it's included in the Evidence section
+    so the report ↔ evidence binding is verifiable.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     body = render_report(
@@ -42,7 +45,28 @@ def write_report(
         agent_result=agent_result,
         repair_history=repair_history,
         gate_result=gate_result,
+        manifest_hash=manifest_hash,
     )
+    report_path = artifact_dir / "final_report.md"
+    report_path.write_text(body)
+    return report_path
+
+
+def write_failure_report(
+    *,
+    task: Task,
+    error: str,
+    artifact_dir: Path,
+) -> Path:
+    """Render a minimal final_report.md for early failures (no diff/review).
+
+    Used by ``failed_node`` when the task failed before producing a diff or
+    review (dirty repo, worktree error, node crash). The spec rule is "a
+    failed task produces an evidence report" — this ensures that's true even
+    for early failures.
+    """
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    body = render_failure_report(task=task, error=error)
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)
     return report_path

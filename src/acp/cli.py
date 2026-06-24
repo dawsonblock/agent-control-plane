@@ -314,6 +314,9 @@ class EvidenceLoop:
             {"vault_note_path": str(vault_note_path)},
         )
 
+        # 11b. (Evidence manifest is written after the terminal event below
+        #      so the event chain head in the manifest matches the last event.)
+
         # 12. Final event -------------------------------------------------- #
         status = task.status
         if status == TaskStatus.PASSED:
@@ -332,6 +335,31 @@ class EvidenceLoop:
                 "recommendation": review.recommendation.value,
             },
         )
+
+        # 12b. Write evidence manifest + re-render report with manifest hash. #
+        #      After the terminal event so the chain head is current.
+        manifest_hash = None
+        try:
+            from acp.evidence.manifest import write_evidence_manifest
+            _, manifest_hash = write_evidence_manifest(
+                run_dir=self.store.run_dir(task.task_id),
+                events_writer=events,
+            )
+            report_path = write_report(
+                task=task,
+                command_results=command_results,
+                review=review,
+                diff=diff,
+                artifact_dir=artifacts,
+                agent_result=agent_result,
+                gate_result=gate_result,
+                manifest_hash=manifest_hash,
+            )
+        except Exception as exc:  # noqa: BLE001
+            events.write(
+                EventType.NODE_FAILED,
+                {"node": "evidence_loop.manifest", "message": str(exc)},
+            )
 
         console.print(f"[green]✓ report:[/] {report_path}")
         console.print(f"[green]✓ vault note:[/] {vault_note_path}")
@@ -371,43 +399,49 @@ def run(
         "--vault",
         help="Obsidian vault root (default: ./vault).",
     ),
-    legacy: bool = typer.Option(
-        False,
-        "--legacy",
-        help=("Use the M1 linear EvidenceLoop instead of the M3 LangGraph workflow. "
-              "Deprecated — will be removed before v0.6; use graph mode (the default)."),
-    ),
 ) -> None:
     """Run one coding task in an isolated worktree and write an evidence report."""
     cfg = load_repo_config(config)
     console.print(
         f"[bold]ACP run[/] · repo={cfg.repo.name} · "
-        f"agent={cfg.agent.default} · engine={'legacy' if legacy else 'graph'} · "
-        f"task={task!r}"
+        f"agent={cfg.agent.default} · task={task!r}"
     )
     try:
-        if legacy:
+        from acp.graph.workflow import run_workflow
+        result = run_workflow(
+            config=cfg,
+            user_request=task,
+            runs_root="data/runs",
+            vault_root=vault,
+        )
+        status = result.get("status")
+        report_path = result.get("report_path")
+        vault_note_path = result.get("vault_note_path")
+
+        # Print output that reflects the actual outcome — no green checkmarks
+        # on failures or missing evidence. A failed run must look failed.
+        if status == TaskStatus.PASSED:
+            console.print(f"[green]✓[/] report: {report_path or '(missing)'}")
+            console.print(f"[green]✓[/] vault: {vault_note_path or '(missing)'}")
             console.print(
-                "[yellow]![/] --legacy is deprecated and will be removed before v0.6. "
-                "Use graph mode (the default)."
+                f"\n[dim]Task {result.get('task_id')} → passed. "
+                f"Review the vault note and set approved: true to promote memory.[/]"
             )
-            loop = EvidenceLoop(config=cfg, user_request=task, vault_root=vault)
-            loop.run()
+        elif status == TaskStatus.NEEDS_REVIEW:
+            console.print(f"[yellow]![/] report: {report_path or '(missing)'}")
+            console.print(f"[yellow]![/] vault: {vault_note_path or '(missing)'}")
+            console.print(
+                f"\n[dim]Task {result.get('task_id')} → needs review. "
+                f"Review the vault note and set approved: true to promote memory.[/]"
+            )
         else:
-            from acp.graph.workflow import run_workflow
-            result = run_workflow(
-                config=cfg,
-                user_request=task,
-                runs_root="data/runs",
-                vault_root=vault,
-            )
-            console.print(f"[green]✓[/] report: {result.get('report_path', '—')}")
-            console.print(f"[green]✓[/] vault: {result.get('vault_note_path', '—')}")
+            console.print(f"[red]✗[/] report: {report_path or '(missing)'}")
+            console.print(f"[red]✗[/] vault: {vault_note_path or '(missing)'}")
+            error = result.get("error", "unknown")
             console.print(
-                f"\n[dim]Task {result.get('task_id')} → "
-                f"{result.get('status', '?')}. Review the vault note and set "
-                f"approved: true to promote memory.[/]"
+                f"\n[dim]Task {result.get('task_id')} → failed: {error}.[/]"
             )
+            raise typer.Exit(code=1)
     except ACPError as exc:
         console.print(f"[red]✗[/] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
@@ -418,6 +452,76 @@ def version() -> None:
     """Print the ACP version."""
     from acp import __version__
     console.print(f"agent-control-plane {__version__}")
+
+
+@app.command()
+def cleanup(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config (for the repo to clean up).",
+    ),
+    task_id: str = typer.Option(
+        ...,
+        "--task",
+        "-t",
+        help="Task id to clean up (e.g. task_20260624_0001).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force-remove the worktree even if it has uncommitted changes.",
+    ),
+) -> None:
+    """Remove the worktree and branch for a completed task.
+
+    Worktrees and branches accumulate across runs. This command cleans up a
+    specific task's worktree (via ``git worktree remove``) and its
+    ``agent/<task_id>`` branch (via ``git branch -D``). The run directory
+    under ``data/runs/<task_id>/`` (events, artifacts, report) is preserved
+    — that's the evidence trail, not clutter.
+    """
+    cfg = load_repo_config(config)
+    repo_path = cfg.repo.path
+    store = TaskStore(runs_root=runs_root)
+    task_branch = f"agent/{task_id}"
+    worktree_path = store.worktree_path(task_id)
+
+    cleaned = []
+
+    # 1. Remove the worktree.
+    if worktree_path.exists():
+        try:
+            remove_worktree(repo_path, worktree_path, force=force)
+            cleaned.append(f"worktree: {worktree_path}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]✗[/] worktree removal failed: {exc}")
+    else:
+        console.print(f"[dim]worktree not present: {worktree_path}[/]")
+
+    # 2. Delete the branch.
+    try:
+        from acp.gitops.branches import delete_branch
+        delete_branch(repo_path, task_branch, force=force)
+        cleaned.append(f"branch: {task_branch}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/] branch removal failed: {exc}")
+
+    for item in cleaned:
+        console.print(f"[green]✓[/] removed {item}")
+    if cleaned:
+        console.print(
+            f"\n[dim]Task {task_id} cleaned up. "
+            f"Run data preserved at {store.run_dir(task_id)}.[/]"
+        )
+    else:
+        console.print(f"\n[dim]Nothing to clean for task {task_id}.[/]")
 
 
 if __name__ == "__main__":  # pragma: no cover

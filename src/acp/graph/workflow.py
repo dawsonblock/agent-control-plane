@@ -77,18 +77,23 @@ def node_error_handler(node_fn: Callable) -> Callable:
         try:
             return node_fn(state, ctx)
         except Exception as exc:
-            # Write a node failure event directly (best effort).
+            # Write a node failure event directly (best effort). If the event
+            # write itself fails, surface that in the state so it's not silent.
+            event_write_failed = False
             try:
                 ctx.events.write(
                     EventType.NODE_FAILED,
                     {"node": node_fn.__name__, "exception_type": type(exc).__name__, "message": str(exc)},
                 )
             except Exception:  # noqa: BLE001
-                pass
-            return {
+                event_write_failed = True
+            patch: dict[str, Any] = {
                 "status": TaskStatus.FAILED,
                 "error": f"{node_fn.__name__}: {exc}",
             }
+            if event_write_failed:
+                patch["node_failed_event_write_failed"] = True
+            return patch
 
     return wrapper
 

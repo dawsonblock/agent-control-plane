@@ -28,10 +28,11 @@ from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
+from acp.evidence.manifest import write_evidence_manifest
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
 from acp.models import EventType, TaskStatus
-from acp.reports.writer import write_report
+from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
@@ -58,6 +59,45 @@ class NodeContext:
 # Node signature: takes (state, ctx) → patch dict.
 # We use functools.partial-style binding in workflow.py to inject ctx.
 # --------------------------------------------------------------------------- #
+
+
+def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
+    """Write the evidence manifest + re-render the report with its hash.
+
+    Called by terminal nodes AFTER the terminal event is written, so the
+    manifest's event chain head matches the last event. Returns the manifest
+    hash (or ``None`` on failure). Best-effort: failures are logged as
+    ``node.failed`` events, not raised.
+    """
+    try:
+        _, manifest_hash = write_evidence_manifest(
+            run_dir=ctx.store.run_dir(state["task_id"]),
+            events_writer=ctx.events,
+        )
+        # Re-render the report with the manifest hash so the report ↔
+        # evidence binding is verifiable. Only if we have a review (full
+        # report path); the minimal failure report doesn't include it.
+        report_path = state.get("report_path")
+        review = state.get("review_result")
+        if report_path and review is not None and state.get("diff") is not None:
+            write_report(
+                task=state["task"],
+                command_results=state.get("command_results", []),
+                review=review,
+                diff=state["diff"],
+                artifact_dir=state["artifacts_dir"],
+                agent_result=state.get("agent_result"),
+                repair_history=state.get("repair_history", []),
+                gate_result=state.get("gate_result"),
+                manifest_hash=manifest_hash,
+            )
+        return manifest_hash
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {"node": "finalize_evidence.manifest", "message": str(exc)},
+        )
+        return None
 
 
 def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
@@ -92,9 +132,10 @@ def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         {"repo_path": str(repo_path), "clean": clean},
     )
     if not clean:
-        # Mark the task failed + write the terminal event; the graph routes
-        # to `failed` based on status. Dirty repo is a pre-worktree failure:
-        # there's no diff to report on, so the failed node skips the report.
+        # Set status=FAILED so the graph routes to `failed_node`, which writes
+        # the single terminal event. Non-terminal nodes never write terminal
+        # events (task.failed / task.completed / task.needs_review) — only the
+        # terminal nodes do. This prevents duplicate terminal events.
         task = state["task"]
         task.status = TaskStatus.FAILED
         ctx.store.save(task)
@@ -115,9 +156,11 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
         task.base_commit_sha = base_sha
         ctx.store.save(task)
     except Exception as exc:  # noqa: BLE001
+        # Write a node.failed event (NOT a terminal task.failed) — the
+        # failed_node terminal node writes the single terminal event.
         ctx.events.write(
-            EventType.TASK_FAILED,
-            {"reason": "worktree creation failed", "detail": str(exc)},
+            EventType.NODE_FAILED,
+            {"node": "create_worktree", "reason": "worktree creation failed", "detail": str(exc)},
         )
         task.status = TaskStatus.FAILED
         ctx.store.save(task)
@@ -187,6 +230,25 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         timeout_seconds=cmd_timeout,
         event_writer=ctx.events,
     )
+
+    # If repair attempts have been used, tests still fail, and the cap is
+    # reached, write repair.exhausted — meaning "another repair was needed
+    # but the cap blocked it." This is distinct from repair.attempted (which
+    # is written for every attempt, including the last one).
+    from acp.testing.runner import validation_passed, validation_ran
+    attempts = int(state.get("repair_attempts", 0))
+    max_attempts = cfg.agent.max_repair_attempts
+    has_failures = validation_ran(command_results) and not validation_passed(command_results)
+    if has_failures and attempts >= max_attempts and attempts > 0:
+        ctx.events.write(
+            EventType.REPAIR_EXHAUSTED,
+            {
+                "attempt": attempts,
+                "max_attempts": max_attempts,
+                "reason": "tests still failing after cap reached",
+            },
+        )
+
     return {"command_results": command_results}
 
 
@@ -316,6 +378,11 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
                     {"report_path": str(report_path), "reason": "vault-failure downgrade"},
                 )
 
+    # The evidence manifest is written by the terminal nodes (after the
+    # terminal event) so the event chain head in the manifest matches the
+    # last event. The terminal node then re-renders the report with the
+    # manifest hash.
+
     return {
         "report_path": report_path,
         "vault_note_path": vault_note_path,
@@ -338,46 +405,62 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
-    return {"status": task.status}
+    manifest_hash = _finalize_evidence(state, ctx)
+    return {"status": task.status, "manifest_hash": manifest_hash}
 
 
 def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    """Terminal failure node.
+    """Terminal failure node — the ONLY node that writes ``TASK_FAILED``.
 
     If ``write_report_node`` already wrote the report (normal graph path),
     this node only writes the terminal ``TASK_FAILED`` event. If we failed
-    before ``write_report_node`` ran (e.g. dirty repo, worktree error), we
-    write a best-effort report — but only if we got far enough to have a diff.
+    before ``write_report_node`` ran (e.g. dirty repo, worktree error, node
+    crash), we write a minimal failure report so the evidence trail is never
+    empty — even when there's no diff or review to render. When a diff +
+    review exist (mid-run failure), we write the full report instead.
     """
     task = state["task"]
     report_path = state.get("report_path")
     vault_note_path = state.get("vault_note_path")
+    error = state.get("error", "unknown")
 
     # Only write report/vault note if NOT already written by write_report_node.
-    if report_path is None and state.get("diff") is not None and state.get("review_result") is not None:
+    if report_path is None:
         try:
-            report_path = write_report(
-                task=task,
-                command_results=state.get("command_results", []),
-                review=state["review_result"],
-                diff=state["diff"],
-                artifact_dir=state["artifacts_dir"],
-                agent_result=state.get("agent_result"),
-                repair_history=state.get("repair_history", []),
-                gate_result=state.get("gate_result"),
-            )
+            if state.get("diff") is not None and state.get("review_result") is not None:
+                # Mid-run failure: we have a diff and review → full report.
+                report_path = write_report(
+                    task=task,
+                    command_results=state.get("command_results", []),
+                    review=state["review_result"],
+                    diff=state["diff"],
+                    artifact_dir=state["artifacts_dir"],
+                    agent_result=state.get("agent_result"),
+                    repair_history=state.get("repair_history", []),
+                    gate_result=state.get("gate_result"),
+                )
+            else:
+                # Early failure: no diff/review → minimal failure report.
+                report_path = write_failure_report(
+                    task=task,
+                    error=error,
+                    artifact_dir=state["artifacts_dir"],
+                )
             ctx.events.write(EventType.REPORT_WRITTEN, {"report_path": str(report_path)})
-            vault_note_path = write_vault_note(
-                report_body=report_path.read_text(),
-                task=task,
-                review=state["review_result"],
-                diff=state["diff"],
-                vault_root=state["vault_root"],
-            )
-            ctx.events.write(
-                EventType.VAULT_NOTE_WRITTEN,
-                {"vault_note_path": str(vault_note_path)},
-            )
+
+            # Write vault note if we have a review (needed for frontmatter).
+            if state.get("review_result") is not None and state.get("diff") is not None:
+                vault_note_path = write_vault_note(
+                    report_body=report_path.read_text(),
+                    task=task,
+                    review=state["review_result"],
+                    diff=state["diff"],
+                    vault_root=state["vault_root"],
+                )
+                ctx.events.write(
+                    EventType.VAULT_NOTE_WRITTEN,
+                    {"vault_note_path": str(vault_note_path)},
+                )
         except Exception as exc:  # noqa: BLE001
             # Evidence write failure is visible — don't mask the real failure.
             ctx.events.write(
@@ -392,13 +475,16 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         EventType.TASK_FAILED,
         {
             "status": task.status.value,
-            "error": state.get("error", "unknown"),
+            "error": error,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
             "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
             "validation_status": validation_status(state.get("command_results", [])),
         },
     )
-    return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path}
+    # Write the evidence manifest AFTER the terminal event so the chain head
+    # is current. Best-effort — don't mask the real failure.
+    manifest_hash = _finalize_evidence(state, ctx)
+    return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path, "manifest_hash": manifest_hash}
 
 
 def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
@@ -426,6 +512,7 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         "status": TaskStatus.NEEDS_REVIEW,
         "report_path": state.get("report_path"),
         "vault_note_path": state.get("vault_note_path"),
+        "manifest_hash": _finalize_evidence(state, ctx),
     }
 
 
@@ -444,10 +531,12 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
 def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Build a repair prompt from the most recent command failures.
 
-    Increments ``repair_attempts`` and records a history entry. Writes a
-    ``repair.attempted`` event (or ``repair.exhausted`` on the final allowed
-    attempt — though routing still sends us here for that last try; the
-    exhausted event is informational).
+    Increments ``repair_attempts`` and records a history entry. Every repair
+    attempt is logged as ``repair.attempted`` — including the last one. The
+    ``repair.exhausted`` event is written separately by the router (in
+    ``_route_after_tests``) when tests still fail after the cap is reached,
+    so "exhausted" means "another repair was needed but the cap blocked it,"
+    not "this was the last allowed attempt."
     """
     cfg = state["config"]
     task = state["task"]
@@ -468,12 +557,8 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         max_attempts=max_attempts,
     )
 
-    event_type = (
-        EventType.REPAIR_EXHAUSTED if attempts >= max_attempts
-        else EventType.REPAIR_ATTEMPTED
-    )
     ctx.events.write(
-        event_type,
+        EventType.REPAIR_ATTEMPTED,
         {
             "attempt": attempts,
             "max_attempts": max_attempts,

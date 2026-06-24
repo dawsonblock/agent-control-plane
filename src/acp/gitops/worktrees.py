@@ -3,6 +3,12 @@
 A task runs entirely inside a linked worktree on its own branch. The repo's
 default branch is never checked out by ACP, never committed to, and its HEAD
 must be identical before and after a run (verified by the caller / tests).
+
+**This is workflow isolation, not a security sandbox.** The worktree
+prevents the agent from touching the default branch, but it does NOT
+prevent a malicious agent or command from accessing the filesystem, network,
+SSH keys, environment variables, home directory, or other repos. True
+sandboxing (containers, seccomp, etc.) is a future concern.
 """
 
 from __future__ import annotations

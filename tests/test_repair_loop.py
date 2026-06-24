@@ -147,14 +147,16 @@ def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
     )
 
     events = _event_types(store, result["task_id"])
-    # Exactly one repair round happened. With max=1 the single round is logged
-    # as repair.exhausted (it's attempt 1 of 1, the last allowed attempt); with
-    # max>1 earlier rounds are repair.attempted. Count both.
+    # One repair attempt → one repair.attempted event. No repair.exhausted
+    # because the repair succeeded (tests pass, no further repair needed).
     repair_rounds = sum(
         1 for e in events
         if e in (EventType.REPAIR_ATTEMPTED.value, EventType.REPAIR_EXHAUSTED.value)
     )
-    assert repair_rounds == 1, f"expected 1 repair round, got {repair_rounds}"
+    assert repair_rounds == 1, f"expected 1 repair event, got {repair_rounds}"
+    assert EventType.REPAIR_ATTEMPTED.value in events
+    # No exhausted event because the repair fixed the test.
+    assert EventType.REPAIR_EXHAUSTED.value not in events
     # The final outcome: NEEDS_REVIEW or PASSED both complete.
     if result["status"] == TaskStatus.NEEDS_REVIEW:
         assert EventType.TASK_NEEDS_REVIEW.value in events
@@ -205,15 +207,17 @@ def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
     assert Path(str(result["vault_note_path"])).is_file()
 
     events = _event_types(store, result["task_id"])
-    # Exactly max_repair_attempts repair attempts — the cap is enforced.
+    # Every repair attempt is logged as repair.attempted (2 attempts = 2 events).
+    # repair.exhausted is written once, after the cap is reached and tests
+    # still fail — meaning "another repair was needed but the cap blocked it."
     repair_events = [e for e in events if e == EventType.REPAIR_ATTEMPTED.value]
     exhausted = [e for e in events if e == EventType.REPAIR_EXHAUSTED.value]
-    assert len(repair_events) + len(exhausted) == 2, (
-        f"expected exactly 2 repair attempts total, got "
-        f"{len(repair_events)} attempted + {len(exhausted)} exhausted"
+    assert len(repair_events) == 2, (
+        f"expected exactly 2 repair.attempted events, got {len(repair_events)}"
     )
-    # The final attempt is logged as exhausted (last allowed attempt).
-    assert len(exhausted) == 1
+    assert len(exhausted) == 1, (
+        f"expected exactly 1 repair.exhausted event, got {len(exhausted)}"
+    )
     # A terminal failure event was written and a report produced.
     assert EventType.TASK_FAILED.value in events
     assert EventType.REPORT_WRITTEN.value in events

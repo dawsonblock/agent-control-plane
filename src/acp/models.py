@@ -121,13 +121,22 @@ class Task(BaseModel):
 
 
 class Event(BaseModel):
-    """One append-only log line. The atom of truth."""
+    """One append-only log line. The atom of truth.
+
+    Events form a hash chain: each event includes ``prev_hash`` (the hash of
+    the preceding event, or ``GENESIS`` for the first event) and ``hash``
+    (sha256 of ``prev_hash + event_id + task_id + type + timestamp + payload``).
+    This makes the log tamper-evident — removing, reordering, or modifying any
+    event breaks the chain.
+    """
 
     event_id: str
     task_id: str
     type: EventType
     timestamp: str = Field(default_factory=_utcnow_iso)
     payload: dict[str, Any] = Field(default_factory=dict)
+    prev_hash: str = ""   # hash of the preceding event; "GENESIS" for the first
+    hash: str = ""        # sha256 of (prev_hash + event_id + task_id + type + timestamp + payload)
 
 
 class CommandResult(BaseModel):

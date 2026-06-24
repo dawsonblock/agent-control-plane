@@ -34,6 +34,7 @@ def render_report(
     agent_result: AgentResult | None,
     repair_history: list[dict[str, object]] | None = None,
     gate_result: GateResult | None = None,
+    manifest_hash: str | None = None,
 ) -> str:
     """Render the full final_report.md body (no frontmatter).
 
@@ -249,8 +250,17 @@ def render_report(
     lines.append("- `commands.json` -- command results table")
     lines.append("- `diff.patch` / `diff_stat.txt` -- the captured change")
     lines.append("- `review.json` -- this review, machine-readable")
+    lines.append("- `evidence_manifest.json` -- content-addressed artifact hashes + event chain head")
     lines.append("")
     lines.append("The event log (`events.jsonl`) is the source of truth; this report is its human-readable projection.")
+    if manifest_hash:
+        lines.append("")
+        lines.append(f"**Evidence manifest hash:** `{manifest_hash}`")
+        lines.append("")
+        lines.append(
+            "This hash covers every artifact + the event chain head. "
+            "Verify with `evidence_manifest.json` in the run directory."
+        )
     lines.append("")
 
     return "\n".join(lines)
@@ -264,3 +274,39 @@ def _status_word(status: TaskStatus) -> str:
     if status == TaskStatus.NEEDS_REVIEW:
         return "\U0001f536 needs review"
     return status.value
+
+
+def render_failure_report(
+    *,
+    task: Task,
+    error: str,
+) -> str:
+    """Minimal report for early failures (before diff/review exist).
+
+    The spec rule is "a failed task produces an evidence report." For failures
+    that happen before a diff is captured (dirty repo, worktree creation error,
+    node crash before agent run), there's no diff or review to render — but
+    there is still a task, an error, and an event log. This minimal report
+    records what we know so the evidence trail is never empty.
+    """
+    lines: list[str] = []
+    lines.append(f"# Task report: {task.task_id}")
+    lines.append("")
+    lines.append(f"- **Status:** {_status_word(task.status)}")
+    lines.append(f"- **Repo:** `{task.repo_name}` (`{task.base_branch}` -> `{task.task_branch}`)")
+    lines.append(f"- **Base commit:** `{task.base_commit_sha or '(not recorded)'}`")
+    lines.append(f"- **Request:** {task.user_request}")
+    lines.append(f"- **Created:** {task.created_at}")
+    lines.append("")
+    lines.append("## Failure")
+    lines.append("")
+    lines.append(f"The task failed before producing a diff or review.")
+    lines.append("")
+    lines.append(f"**Error:** {error}")
+    lines.append("")
+    lines.append("## Evidence")
+    lines.append("")
+    lines.append("This task failed early — no diff, review, or command artifacts were produced.")
+    lines.append("The event log (`events.jsonl`) is the source of truth for what happened.")
+    lines.append("")
+    return "\n".join(lines)

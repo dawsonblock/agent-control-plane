@@ -60,6 +60,11 @@ class ACPState(TypedDict, total=False):
     gate_result: Any         # GateResult — stored by write_report_node, consumed
                              # by terminal nodes and report rendering.
 
+    # --- evidence manifest (v0.5.5: tamper-evident evidence) ------------- #
+    manifest_hash: str       # sha256 over the evidence manifest; included in
+                             # the report so report ↔ evidence binding is
+                             # verifiable.
+
     # --- failure tracking (for the M4 repair loop and reports) ---------- #
     error: str             # human-readable reason if status == FAILED
     failure_event: EventType  # which final event to write (task.failed / task.completed)

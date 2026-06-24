@@ -54,5 +54,6 @@ A note with `approved: false` can never become memory. This is the single most i
 
 ## What ACP does not do (yet)
 
-- Run untrusted code in a sandbox. (M13 — OpenHands/Superserve.) Until then, agents run with the user's full local privileges, which is why isolation is *git-level* (worktrees) not *OS-level*.
+- Run untrusted code in a sandbox. (M13 — OpenHands/Superserve.) Until then, agents run with the user's full local privileges, which is why isolation is *git-level* (worktrees) not *OS-level*. The worktree prevents the agent from touching `main`; it does NOT prevent a malicious agent or command from accessing the filesystem, network, SSH keys, environment variables, home directory, or other repos.
 - Detect secrets exhaustively. M1 uses path heuristics; M5 adds string scanning. Treat M1's secret detection as a tripwire, not a guarantee.
+- Defend against malicious repo config. The `agent.command_template` is run with `shell=True` and is **trusted config** — the operator writing the repo config is trusted. Do not point ACP at a repo config you did not write.

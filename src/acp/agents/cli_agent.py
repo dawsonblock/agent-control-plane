@@ -7,6 +7,12 @@ it's calling — it just substitutes placeholders, runs the command in the
 worktree, and captures output. Swapping agents is a config change only;
 the workflow never changes.
 
+**Security note:** the command is run with ``shell=True`` because templates
+may include pipes, redirects, or env vars. This is **trusted config** — the
+operator writing the repo config is trusted to provide a safe command
+template. This is NOT safe against malicious repo config. Do not point ACP
+at a repo config you did not write.
+
 Supported placeholders in ``command_template``:
 
     {prompt_path}        → path to the agent prompt file

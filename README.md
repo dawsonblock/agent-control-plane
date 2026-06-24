@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.4 alpha — Dogfood readiness cleanup
+## Current scope: v0.5.5 alpha — Dogfood hardening
 
 This repository currently implements:
 
@@ -35,10 +35,10 @@ This repository currently implements:
 | **M0** | Repo scaffold | Stable |
 | **M1** | Manual evidence loop — `acp run` produces `final_report.md` + vault note | Stable |
 | **M2** | Generic CLI agent adapter | Stable |
-| **M3** | LangGraph state machine | Stable (default engine) |
+| **M3** | LangGraph state machine | Stable (default + only engine) |
 | **M4** | Repair loop — bounded retry on test failure | Stable |
 | **M5** | Review hardening — risk taxonomy, secret scanner, `GateResult` artifact | Stable |
-| **v0.5.x** | Gate evidence consolidation, `scripts/validate.sh` CI gate, explicit `validation_status`, `--legacy` deprecated | Current |
+| **v0.5.x** | Gate consolidation, explicit `validation_status`, `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow | Current |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 
@@ -51,7 +51,7 @@ cd agent-control-plane
 uv venv
 uv sync                    # deps: typer, pydantic, pyyaml, rich, gitpython, langgraph
 uv sync --extra dev        # add pytest for local testing
-bash scripts/validate.sh   # compileall + pytest gate
+bash scripts/validate.sh   # compileall + pytest gate (uses uv run internally)
 
 # run one task against a configured repo
 uv run acp run \
