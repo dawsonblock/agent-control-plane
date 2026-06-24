@@ -28,7 +28,7 @@ from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
-from acp.testing.runner import all_passed, run_commands
+from acp.testing.runner import all_passed, run_commands, validation_status
 from acp.vault.obsidian_writer import write_vault_note
 
 app = typer.Typer(
@@ -328,7 +328,7 @@ class EvidenceLoop:
                 "status": status.value,
                 "validation_commands_ran": gate_result.validation_commands_ran,
                 "validation_commands_failed": gate_result.validation_commands_failed,
-                "validation_status": gate_result.outcome.value,
+                "validation_status": validation_status(command_results),
                 "recommendation": review.recommendation.value,
             },
         )
@@ -374,7 +374,8 @@ def run(
     legacy: bool = typer.Option(
         False,
         "--legacy",
-        help="Use the M1 linear EvidenceLoop instead of the M3 LangGraph workflow.",
+        help=("Use the M1 linear EvidenceLoop instead of the M3 LangGraph workflow. "
+              "Deprecated — will be removed before v0.6; use graph mode (the default)."),
     ),
 ) -> None:
     """Run one coding task in an isolated worktree and write an evidence report."""
@@ -386,6 +387,10 @@ def run(
     )
     try:
         if legacy:
+            console.print(
+                "[yellow]![/] --legacy is deprecated and will be removed before v0.6. "
+                "Use graph mode (the default)."
+            )
             loop = EvidenceLoop(config=cfg, user_request=task, vault_root=vault)
             loop.run()
         else:

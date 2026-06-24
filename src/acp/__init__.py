@@ -13,4 +13,4 @@ The hard rule:
     Agents are workers, not decision-makers.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.5.4"

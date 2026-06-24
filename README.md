@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.3 alpha — Gate-correct evidence loop
+## Current scope: v0.5.4 alpha — Dogfood readiness cleanup
 
 This repository currently implements:
 
@@ -38,7 +38,7 @@ This repository currently implements:
 | **M3** | LangGraph state machine | Stable (default engine) |
 | **M4** | Repair loop — bounded retry on test failure | Stable |
 | **M5** | Review hardening — risk taxonomy, secret scanner, `GateResult` artifact | Stable |
-| **v0.5.x** | Gate evidence consolidation, `scripts/validate.sh` CI gate, `--legacy` aligned | Current |
+| **v0.5.x** | Gate evidence consolidation, `scripts/validate.sh` CI gate, explicit `validation_status`, `--legacy` deprecated | Current |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 
@@ -52,7 +52,6 @@ uv venv
 uv sync                    # deps: typer, pydantic, pyyaml, rich, gitpython, langgraph
 uv sync --extra dev        # add pytest for local testing
 bash scripts/validate.sh   # compileall + pytest gate
-uv sync --extra dev        # add pytest
 
 # run one task against a configured repo
 uv run acp run \

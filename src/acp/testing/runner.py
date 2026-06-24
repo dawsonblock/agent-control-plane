@@ -140,5 +140,46 @@ def _skipped(name: str, command: str, cwd: Path, artifact_dir: Path) -> CommandR
 
 
 def all_passed(results: list[CommandResult]) -> bool:
-    """True iff no non-skipped command failed. (Skipped commands don't count.)"""
+    """True iff no non-skipped command failed. (Skipped commands don't count.)
+
+    Note: returns ``True`` for an empty/all-skipped list. That is mathematically
+    correct but operationally ambiguous — "no failures" is not the same as
+    "validation ran and passed". Prefer :func:`validation_ran` +
+    :func:`validation_passed` (or :func:`validation_status`) in new code so
+    "skipped" is never represented as a flavor of "passed".
+    """
     return all(r.passed for r in results if not r.skipped)
+
+
+def validation_ran(results: list[CommandResult]) -> bool:
+    """True iff at least one non-skipped command actually ran."""
+    return any(not r.skipped for r in results)
+
+
+def validation_passed(results: list[CommandResult]) -> bool:
+    """True iff validation ran AND every non-skipped command passed.
+
+    Returns ``False`` when no validation commands ran — "skipped" is not a
+    flavor of "passed". Callers that need to distinguish "no validation ran"
+    from "validation ran and failed" should use :func:`validation_ran` first
+    or :func:`validation_status` for a three-state string.
+    """
+    ran = [r for r in results if not r.skipped]
+    if not ran:
+        return False
+    return all(r.passed for r in ran)
+
+
+def validation_status(results: list[CommandResult]) -> str:
+    """Explicit three-state validation outcome: ``skipped`` | ``passed`` | ``failed``.
+
+    * ``skipped`` — no non-skipped command ran (no validation to report on).
+    * ``passed``  — at least one command ran and every non-skipped one passed.
+    * ``failed``  — at least one non-skipped command ran and one of them failed.
+
+    This replaces the ambiguous ``all_passed([]) == True`` pattern: "no
+    validation ran" must never be worded as "tests pass".
+    """
+    if not validation_ran(results):
+        return "skipped"
+    return "passed" if validation_passed(results) else "failed"

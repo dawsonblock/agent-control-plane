@@ -238,7 +238,10 @@ def test_terminal_event_uses_validation_fields_not_tests_pass(disposable_repo, i
     assert "validation_status" in p, f"payload missing validation_status: {p}"
     assert "tests_pass" not in p, f"payload should not contain tests_pass: {p}"
     assert p["validation_commands_ran"] == 0
-    assert p["validation_status"] == "needs_review"
+    # validation_status is the explicit three-state validation outcome
+    # (skipped|passed|failed), distinct from the task status (needs_review).
+    # No validation ran → "skipped", never a flavor of "passed".
+    assert p["validation_status"] == "skipped"
 
 
 def test_terminal_event_on_pass_has_validation_fields(disposable_repo, isolated_workspace):

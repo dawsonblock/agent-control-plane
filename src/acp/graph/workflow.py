@@ -6,12 +6,23 @@ path is linear:
 
     START → create_task → check_repo → create_worktree → build_context
          → run_agent → run_tests → capture_diff → review_diff
-         → write_report → write_vault_note → done → END
+         → write_report → done → END
+
+There is **no separate ``write_vault_note`` node**: vault-note writing
+happens inside ``write_report_node`` (for every status), so the report and
+the vault note always come from the same render. ``write_report`` then
+routes to ``done`` (PASSED), ``needs_review`` (NEEDS_REVIEW), or ``failed``
+(FAILED).
 
 Failure short-circuits route to ``failed`` instead. The ``failed`` node
 still writes a report when it can (spec rule: a failed task produces an
 evidence report) — except for the pre-worktree dirty-repo case, where
 nothing exists to report on yet.
+
+The M4 repair loop branches off ``run_tests``: when validation ran and a
+non-skipped command failed (and attempts remain), ``run_tests`` routes to
+``repair_plan → run_repair → run_tests`` (re-evaluated). The cap at
+``config.agent.max_repair_attempts`` guarantees termination.
 
 Compiled with an in-memory ``MemorySaver`` checkpointer so runs are
 inspectable. (Durable checkpointing is a later concern; M3 only needs the
@@ -50,7 +61,7 @@ from acp.graph.nodes import (
 from acp.graph.state import ACPState
 from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
-from acp.testing.runner import all_passed
+from acp.testing.runner import validation_passed, validation_ran
 
 
 def node_error_handler(node_fn: Callable) -> Callable:
@@ -111,14 +122,19 @@ def _route_after_worktree(state: dict[str, Any]) -> str:
 
 
 def _route_after_tests(state: dict[str, Any]) -> str:
-    """Route after run_tests: repair if failing + attempts remain, else proceed.
+    """Route after run_tests: repair only on actual failures, else proceed.
 
-    This is the M4 repair loop's cap. When ``max_repair_attempts`` is 0 the
-    behavior is identical to M3 — a failing test falls straight through to
-    capture_diff → review → FAILED report.
+    Repair triggers iff validation ran AND at least one non-skipped command
+    failed — never on the "no validation ran" case (``all_passed([])`` used
+    to mask that as a pass and skip repair accidentally). When
+    ``max_repair_attempts`` is 0, or attempts are exhausted, a failing test
+    falls straight through to capture_diff → review → FAILED report.
     """
     cfg = state.get("config")
-    if all_passed(state.get("command_results", [])):
+    results = state.get("command_results", [])
+    # Actual failures only: validation ran but not everything passed.
+    has_failures = validation_ran(results) and not validation_passed(results)
+    if not has_failures:
         return "capture_diff"
     if cfg is None:
         return "capture_diff"

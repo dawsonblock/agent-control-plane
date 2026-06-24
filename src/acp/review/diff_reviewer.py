@@ -36,7 +36,7 @@ from acp.gitops.diff import DiffCapture
 from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
 from acp.review.secret_scanner import scan_patch
-from acp.testing.runner import all_passed
+from acp.testing.runner import all_passed, validation_ran, validation_status
 
 # --- path heuristics (lowercase substring matches) ------------------------- #
 
@@ -262,7 +262,7 @@ def _evaluate(
         recommendation=recommendation,
         changed_files=diff.changed_files,
         concerns=engine.concerns,
-        summary=_summary(risk, recommendation, diff, tests_pass, engine),
+        summary=_summary(risk, recommendation, diff, command_results, engine),
         hard_block=engine.hard_block,
     )
 
@@ -284,14 +284,19 @@ def _summary(
     risk: RiskLevel,
     rec: Recommendation,
     diff: DiffCapture,
-    tests_pass: bool,
+    command_results: list[CommandResult],
     engine: RiskEngine,
 ) -> str:
-    test_clause = "tests pass" if tests_pass else "tests failing"
+    # Wording is evidence — "no validation ran" must never read as "tests pass".
+    if not validation_ran(command_results):
+        validation_clause = "no validation commands ran"
+    else:
+        status = validation_status(command_results)
+        validation_clause = f"validation {status}"  # "validation passed" / "validation failed"
     block_clause = " [HARD BLOCK]" if engine.hard_block else ""
     return (
         f"{len(diff.changed_files)} file(s) changed "
-        f"({diff.insertions}+, {diff.deletions}-), {test_clause}. "
+        f"({diff.insertions}+, {diff.deletions}-), {validation_clause}. "
         f"Risk: {risk.value}. Recommendation: {rec.value}.{block_clause}"
     )
 

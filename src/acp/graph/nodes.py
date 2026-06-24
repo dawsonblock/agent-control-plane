@@ -36,7 +36,7 @@ from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
 from acp.testing.parsers import extract_failures
-from acp.testing.runner import all_passed, run_commands
+from acp.testing.runner import run_commands, validation_status
 from acp.vault.obsidian_writer import write_vault_note
 
 
@@ -287,10 +287,34 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
                 {"node": "write_report_node.vault", "message": str(exc)},
             )
             # If the task would have been PASSED, degrade to NEEDS_REVIEW
-            # because the review surface (vault note) was not written.
+            # because the review surface (vault note) was not written. The
+            # report was already rendered with status=PASSED, so we must
+            # re-render it from the downgraded state — otherwise the on-disk
+            # final_report.md would say "passed" while the terminal status is
+            # "needs_review". The GateResult is downgraded too so the Gate
+            # Summary section stays consistent with the final outcome.
             if task.status == TaskStatus.PASSED:
                 task.status = TaskStatus.NEEDS_REVIEW
                 ctx.store.save(task)
+                gate_result.outcome = GateOutcome.NEEDS_REVIEW
+                gate_result.reasons.append(
+                    "Vault note write failed — review surface not written; "
+                    "downgraded from PASSED to NEEDS_REVIEW."
+                )
+                report_path = write_report(
+                    task=task,
+                    command_results=command_results,
+                    review=review,
+                    diff=diff,
+                    artifact_dir=state["artifacts_dir"],
+                    agent_result=agent_result,
+                    repair_history=state.get("repair_history", []),
+                    gate_result=gate_result,
+                )
+                ctx.events.write(
+                    EventType.REPORT_WRITTEN,
+                    {"report_path": str(report_path), "reason": "vault-failure downgrade"},
+                )
 
     return {
         "report_path": report_path,
@@ -310,7 +334,7 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "status": task.status.value,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
             "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
-            "validation_status": gate_result.outcome.value if gate_result else "unknown",
+            "validation_status": validation_status(state.get("command_results", [])),
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
@@ -371,7 +395,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "error": state.get("error", "unknown"),
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
             "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
-            "validation_status": gate_result.outcome.value if gate_result else "unknown",
+            "validation_status": validation_status(state.get("command_results", [])),
         },
     )
     return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path}
@@ -394,7 +418,7 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             "report_path": str(state.get("report_path", "")),
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
             "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
-            "validation_status": gate_result.outcome.value if gate_result else "unknown",
+            "validation_status": validation_status(state.get("command_results", [])),
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
