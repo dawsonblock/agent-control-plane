@@ -28,18 +28,25 @@ Usage::
 Schema:
 
     CREATE TABLE events (
-        event_id   TEXT PRIMARY KEY,
         task_id    TEXT NOT NULL,
+        event_id   TEXT NOT NULL,
         type       TEXT NOT NULL,
         timestamp  TEXT NOT NULL,
         payload    TEXT NOT NULL,  -- JSON
         prev_hash  TEXT NOT NULL,
         hash       TEXT NOT NULL,
-        signature  TEXT DEFAULT ''
+        signature  TEXT DEFAULT '',
+        PRIMARY KEY (task_id, event_id)
     );
     CREATE INDEX idx_events_task ON events(task_id);
     CREATE INDEX idx_events_type ON events(type);
     CREATE INDEX idx_events_time ON events(timestamp);
+
+The composite primary key (task_id, event_id) is critical: event IDs are
+per-task (evt_000001, evt_000002, ...), so a single-task primary key would
+collide across tasks. The composite key ensures every (task_id, event_id)
+pair is unique, allowing a single SQLite database to hold events from many
+tasks without collision.
 """
 
 from __future__ import annotations
@@ -65,7 +72,14 @@ class DurableEventStore:
         self._conn: sqlite3.Connection | None = None
 
     def init(self) -> None:
-        """Initialize the database schema. Idempotent."""
+        """Initialize the database schema. Idempotent.
+
+        Handles migration from the old single-column primary key schema
+        (event_id TEXT PRIMARY KEY) to the composite key schema
+        (PRIMARY KEY (task_id, event_id)). If the old schema is detected,
+        the table is dropped and recreated — the JSONL log is the canonical
+        source, so the SQLite store can be safely rebuilt.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -74,16 +88,27 @@ class DurableEventStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+
+        # Check for old schema (event_id as sole PRIMARY KEY) and migrate.
+        cols = self._conn.execute("PRAGMA table_info(events)").fetchall()
+        if cols:
+            pk_cols = [c[1] for c in cols if c[5]]  # c[5] is pk flag
+            if pk_cols == ["event_id"]:
+                # Old schema — drop and recreate with composite key.
+                # The JSONL log is canonical; SQLite is a derived index.
+                self._conn.execute("DROP TABLE IF EXISTS events")
+
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
-                event_id   TEXT PRIMARY KEY,
                 task_id    TEXT NOT NULL,
+                event_id   TEXT NOT NULL,
                 type       TEXT NOT NULL,
                 timestamp  TEXT NOT NULL,
                 payload    TEXT NOT NULL,
                 prev_hash  TEXT NOT NULL,
                 hash       TEXT NOT NULL,
-                signature  TEXT DEFAULT ''
+                signature  TEXT DEFAULT '',
+                PRIMARY KEY (task_id, event_id)
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id)")
@@ -91,15 +116,15 @@ class DurableEventStore:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp)")
 
     def append(self, event: Event) -> None:
-        """Insert one event. Raises if the event_id already exists."""
+        """Insert one event. Raises if (task_id, event_id) already exists."""
         if self._conn is None:
             raise RuntimeError("DurableEventStore not initialized — call .init() first")
         self._conn.execute(
-            "INSERT INTO events (event_id, task_id, type, timestamp, payload, prev_hash, hash, signature) "
+            "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                event.event_id,
                 event.task_id,
+                event.event_id,
                 event.type.value,
                 event.timestamp,
                 json.dumps(event.payload, sort_keys=True),
@@ -117,11 +142,11 @@ class DurableEventStore:
         try:
             for event in events:
                 self._conn.execute(
-                    "INSERT INTO events (event_id, task_id, type, timestamp, payload, prev_hash, hash, signature) "
+                    "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        event.event_id,
                         event.task_id,
+                        event.event_id,
                         event.type.value,
                         event.timestamp,
                         json.dumps(event.payload, sort_keys=True),
@@ -169,8 +194,8 @@ class DurableEventStore:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         rows = self._conn.execute(
-            f"SELECT event_id, task_id, type, timestamp, payload, prev_hash, hash, signature "
-            f"FROM events{where} ORDER BY event_id ASC LIMIT ?",
+            f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature "
+            f"FROM events{where} ORDER BY task_id ASC, event_id ASC LIMIT ?",
             params,
         ).fetchall()
         return [_row_to_event(row) for row in rows]
@@ -223,10 +248,14 @@ class DurableEventStore:
 
 
 def _row_to_event(row: tuple) -> Event:
-    """Convert a SQLite row to an Event model."""
+    """Convert a SQLite row to an Event model.
+
+    Column order matches the SELECT statements: task_id, event_id, type,
+    timestamp, payload, prev_hash, hash, signature.
+    """
     return Event(
-        event_id=row[0],
-        task_id=row[1],
+        task_id=row[0],
+        event_id=row[1],
         type=EventType(row[2]),
         timestamp=row[3],
         payload=json.loads(row[4]),

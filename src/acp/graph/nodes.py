@@ -28,7 +28,7 @@ from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
-from acp.evidence.manifest import write_evidence_config, write_evidence_manifest
+from acp.evidence.manifest import build_evidence_manifest, compute_artifact_content_hash, write_evidence_config, write_evidence_manifest
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
 from acp.models import EventType, TaskStatus
@@ -62,32 +62,59 @@ class NodeContext:
 
 
 def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
-    """Write the evidence manifest + re-render the report with its hash.
+    """Write the evidence manifest, bind it to the signed event log, re-render.
 
-    Called by terminal nodes AFTER the terminal event is written, so the
-    manifest's event chain head matches the last event. Returns the manifest
-    hash (or ``None`` on failure). Best-effort: failures are logged as
-    ``node.failed`` events, not raised.
+    Called by terminal nodes AFTER the terminal event is written. The sequence:
 
-    The re-rendered report includes the event timeline (full projection of
-    the event log) and the manifest hash (evidence binding). For early
-    failures (no diff/review), the minimal failure report is re-rendered with
-    the final event timeline + manifest hash so it is a true projection of the
-    final event log, not a snapshot from before the terminal event.
+    1. Write ``evidence_manifest.json`` (artifact hashes + event chain head).
+    2. Write an ``evidence.finalized`` event containing the manifest hash +
+       artifact count. This event is part of the hash-chained, optionally
+       signed event log — so the artifact manifest is cryptographically bound
+       to the signed evidence. Tampering with any artifact changes the
+       manifest hash, which breaks the signed ``evidence.finalized`` event.
+    3. Rewrite the manifest so its chain head includes the finalized event.
+    4. Re-render the report with the final manifest hash + event timeline.
 
-    Also persists the run's evidence config (signing key / durable store /
-    public key paths) as a sidecar so post-run lifecycle commands can recover
-    the same signing key + durable store the run used.
+    For early failures (no diff/review), the minimal failure report is
+    re-rendered with the final event timeline + manifest hash.
+
+    Also persists the run's evidence config as a sidecar so post-run lifecycle
+    commands can recover the same signing key + durable store.
     """
     try:
         run_dir = ctx.store.run_dir(state["task_id"])
+
+        # 1. Compute the artifact content hash — this is stable across manifest
+        # rewrites (it only covers artifact files, not the event chain). It's
+        # what we put in the evidence.finalized event to bind artifacts to the
+        # signed event log.
+        artifact_content_hash = compute_artifact_content_hash(run_dir)
+
+        # 2. Write the initial manifest (artifact hashes + current chain head).
+        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=ctx.events)
+        manifest_hash = manifest["manifest_hash"]
+        artifact_count = len(manifest.get("artifacts", {}))
+
+        # 3. Write the evidence.finalized event — this binds the artifacts to
+        # the signed event log. The artifact_content_hash is stable (doesn't
+        # change when the chain head changes), so it can be verified later
+        # even though the manifest is rewritten after this event.
+        ctx.events.write(
+            EventType.EVIDENCE_FINALIZED,
+            {
+                "artifact_content_hash": artifact_content_hash,
+                "artifact_count": artifact_count,
+                "event_chain_head_before_finalize": ctx.events.last_hash,
+            },
+        )
+
+        # 4. Rewrite the manifest so its chain head includes evidence.finalized.
         _, manifest_hash = write_evidence_manifest(
             run_dir=run_dir,
             events_writer=ctx.events,
         )
-        # Persist the evidence config sidecar so approve/reject can recover the
-        # run's signing key + durable store (lifecycle events must be signed
-        # with the same key and dual-written to the same SQLite index).
+
+        # Persist the evidence config sidecar.
         cfg = state.get("config")
         evidence_cfg = getattr(cfg, "evidence", None)
         if evidence_cfg is not None:
@@ -98,9 +125,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 public_key_path=evidence_cfg.public_key_path,
             )
 
-        # Re-render the report with the manifest hash + event timeline so
-        # the report ↔ evidence binding is verifiable and the report is a
-        # true projection of the event log.
+        # 4. Re-render the report with the final manifest hash + event timeline.
         report_path = state.get("report_path")
         review = state.get("review_result")
         events = ctx.events.read_all()

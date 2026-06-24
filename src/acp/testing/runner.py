@@ -9,6 +9,7 @@ report can cite exact stdout/stderr. Empty commands in config are skipped
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -86,6 +87,11 @@ def _run_one(
 
     start = time.monotonic()
     try:
+        # Set PYTHONDONTWRITEBYTECODE=1 to prevent .pyc/__pycache__ generation
+        # during validation commands. These generated files would otherwise be
+        # staged by `git add --all` in capture_diff and pollute the evidence.
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         proc = subprocess.run(
             command,
             cwd=str(cwd),
@@ -93,6 +99,7 @@ def _run_one(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
         exit_code = proc.returncode
         out, err = proc.stdout, proc.stderr

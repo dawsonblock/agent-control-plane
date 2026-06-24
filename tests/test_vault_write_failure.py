@@ -98,8 +98,11 @@ def test_vault_write_failure_downgrades_passed_to_needs_review_and_rerenders_rep
         f"expected a node.failed event for the vault write, got {node_failed}"
     )
 
-    # The terminal event is needs_review (not completed/passed).
-    terminal = events[-1]
+    # The terminal task event is needs_review (not completed/passed).
+    # evidence.finalized is written after the terminal event, so it's the
+    # last event in the log — but the task status event is what matters.
+    task_events = [e for e in events if e["type"].startswith("task.")]
+    terminal = task_events[-1]
     assert terminal["type"] == EventType.TASK_NEEDS_REVIEW.value
     assert terminal["payload"]["status"] == TaskStatus.NEEDS_REVIEW.value
 

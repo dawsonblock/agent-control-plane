@@ -1,0 +1,495 @@
+"""Regression tests for build-7 evidence binding fixes.
+
+Covers the 8 items from the verdict's priority fix plan:
+
+  P0-1: DurableEventStore composite primary key (task_id, event_id) — multiple
+        tasks in the same SQLite DB no longer collide.
+  P0-2: evidence.finalized event binds artifact content hash to the signed
+        event log — tampering with an artifact breaks verification even if
+        the manifest is edited to match.
+  P0-3: verify_evidence_manifest recomputes manifest_hash and rejects mismatches.
+  P0-4: Task identity binding — verify checks CLI task_id == task.json.task_id
+        == manifest.task_id == every event.task_id == directory name.
+  P1-5: Report + vault note re-rendered after lifecycle events (no stale hashes).
+  P1-6: Clean verifier failure handling (no tracebacks for malformed data).
+  P1-7: acp run --runs-root works.
+  P1-8: Generated junk (__pycache__, *.pyc) filtered from captured diffs.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from acp.cli import app
+from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.evidence.durable_store import DurableEventStore
+from acp.evidence.manifest import compute_artifact_content_hash, verify_evidence_manifest, write_evidence_manifest
+from acp.events import EventWriter, verify_event_chain
+from acp.graph.workflow import run_workflow
+from acp.models import Event, EventType, TaskStatus
+from acp.store import TaskStore
+
+
+runner = CliRunner()
+
+
+def _config(repo_path: Path, **evidence_kwargs) -> RepoConfig:
+    return RepoConfig(
+        repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=0),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(),
+        evidence=EvidenceSection(**evidence_kwargs) if evidence_kwargs else EvidenceSection(),
+    )
+
+
+def _events(store: TaskStore, task_id: str) -> list[Event]:
+    p = store.events_path(task_id)
+    return [Event.model_validate_json(l) for l in p.read_text().splitlines() if l.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# P0-1: DurableEventStore composite primary key — multi-task collision
+# --------------------------------------------------------------------------- #
+
+
+def test_durable_store_multi_task_no_collision(tmp_path):
+    """Two tasks with the same event_id sequence must coexist in one SQLite DB."""
+    db_path = tmp_path / "events.db"
+    store1 = TaskStore(runs_root=tmp_path / "runs1")
+    store1.root.mkdir(parents=True, exist_ok=True)
+    run_dir1 = store1.run_dir("task_20260624_0001")
+    run_dir1.mkdir(parents=True, exist_ok=True)
+    events1 = EventWriter("task_20260624_0001", run_dir1)
+    events1.write(EventType.TASK_CREATED, {"request": "task 1"})
+    events1.write(EventType.REPO_CHECKED, {"repo": "demo"})
+
+    store2 = TaskStore(runs_root=tmp_path / "runs2")
+    store2.root.mkdir(parents=True, exist_ok=True)
+    run_dir2 = store2.run_dir("task_20260624_0002")
+    run_dir2.mkdir(parents=True, exist_ok=True)
+    events2 = EventWriter("task_20260624_0002", run_dir2)
+    events2.write(EventType.TASK_CREATED, {"request": "task 2"})
+    events2.write(EventType.REPO_CHECKED, {"repo": "demo"})
+
+    with DurableEventStore(db_path) as db:
+        for evt in events1.read_all():
+            db.append(evt)
+        for evt in events2.read_all():
+            db.append(evt)
+
+        # Both tasks have all their events — no collision.
+        assert db.count(task_id="task_20260624_0001") == 2
+        assert db.count(task_id="task_20260624_0002") == 2
+        assert db.count() == 4
+
+
+def test_durable_store_old_schema_migration(tmp_path):
+    """Old schema (event_id PRIMARY KEY) is migrated to composite key."""
+    import sqlite3
+
+    db_path = tmp_path / "events.db"
+    # Create old-style schema.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE events (
+            event_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            prev_hash TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            signature TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("INSERT INTO events VALUES ('evt_000001', 'task_1', 'task.created', '2024-01-01', '{}', '', 'h1', '')")
+    conn.commit()
+    conn.close()
+
+    # Opening with DurableEventStore should detect old schema and migrate.
+    with DurableEventStore(db_path) as db:
+        # Old data was dropped (JSONL is canonical), but the new schema works.
+        assert db.count() == 0
+        # Now we can insert with composite key — two tasks, same event_id.
+        store = TaskStore(runs_root=tmp_path / "runs")
+        store.root.mkdir(parents=True, exist_ok=True)
+        for task_id in ("task_20260624_0001", "task_20260624_0002"):
+            rd = store.run_dir(task_id)
+            rd.mkdir(parents=True, exist_ok=True)
+            ew = EventWriter(task_id, rd)
+            ew.write(EventType.TASK_CREATED, {"request": task_id})
+            db.append(ew.read_all()[0])
+        assert db.count() == 2
+
+
+# --------------------------------------------------------------------------- #
+# P0-2: evidence.finalized binds artifacts to signed event log
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_finalized_event_written(disposable_repo, isolated_workspace):
+    """A completed run writes an evidence.finalized event with artifact_content_hash."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events = _events(store, task_id)
+
+    finalized = [e for e in events if e.type == EventType.EVIDENCE_FINALIZED]
+    assert len(finalized) == 1, "evidence.finalized event must be written"
+    assert "artifact_content_hash" in finalized[0].payload
+    assert "artifact_count" in finalized[0].payload
+
+
+def test_tampered_artifact_breaks_verification(disposable_repo, isolated_workspace):
+    """Tampering with an artifact must break verify_evidence_manifest, even if
+    the manifest is edited to match the tampered file."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Verify passes before tampering.
+    assert verify_evidence_manifest(run_dir) is True
+
+    # Tamper with an artifact file.
+    artifacts_dir = run_dir / "artifacts"
+    artifact_files = [p for p in artifacts_dir.rglob("*") if p.is_file() and p.name != "final_report.md"]
+    assert artifact_files, "expected at least one artifact file"
+    target = artifact_files[0]
+    original = target.read_bytes()
+    target.write_bytes(original + b"\n# tampered\n")
+
+    # Verify fails — the artifact content hash in evidence.finalized no longer matches.
+    assert verify_evidence_manifest(run_dir) is False
+
+    # Even if the attacker edits the manifest to match the tampered file,
+    # verification still fails because evidence.finalized has the old hash.
+    manifest_path = run_dir / "evidence_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    rel = str(target.relative_to(run_dir))
+    import hashlib
+    h = hashlib.sha256()
+    with target.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    manifest["artifacts"][rel] = h.hexdigest()
+    # Recompute manifest_hash to match the edited manifest.
+    manifest.pop("manifest_hash")
+    manifest["manifest_hash"] = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    # Still fails — evidence.finalized binds the original artifact content hash.
+    assert verify_evidence_manifest(run_dir) is False
+
+
+# --------------------------------------------------------------------------- #
+# P0-3: manifest_hash recompute
+# --------------------------------------------------------------------------- #
+
+
+def test_manifest_hash_recompute_rejects_garbage(disposable_repo, isolated_workspace):
+    """verify_evidence_manifest must reject a manifest with a wrong manifest_hash."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    assert verify_evidence_manifest(run_dir) is True
+
+    # Corrupt the manifest_hash.
+    manifest_path = run_dir / "evidence_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["manifest_hash"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    assert verify_evidence_manifest(run_dir) is False
+
+
+# --------------------------------------------------------------------------- #
+# P0-4: Task identity binding
+# --------------------------------------------------------------------------- #
+
+
+def test_transplanted_run_directory_rejected(disposable_repo, isolated_workspace):
+    """Copying a valid run dir to a different task_id must fail verification."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Verify passes for the correct task_id.
+    r0 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r0.exit_code == 0
+
+    # Copy to a different task_id directory.
+    fake_task_id = "task_20260624_9999"
+    fake_run_dir = store.run_dir(fake_task_id)
+    shutil.copytree(run_dir, fake_run_dir)
+
+    # Verify fails — the events have the original task_id, not the fake one.
+    r1 = runner.invoke(app, [
+        "verify", "--task", fake_task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r1.exit_code == 1
+    assert "mismatch" in r1.output.lower()
+
+
+def test_task_json_mismatch_rejected(disposable_repo, isolated_workspace):
+    """A task.json with a different task_id must fail verification."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Edit task.json to have a different task_id.
+    task_json_path = run_dir / "task.json"
+    task_json = json.loads(task_json_path.read_text())
+    task_json["task_id"] = "task_20260624_XXXX"
+    task_json_path.write_text(json.dumps(task_json, indent=2))
+
+    r = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r.exit_code == 1
+    assert "mismatch" in r.output.lower()
+
+
+# --------------------------------------------------------------------------- #
+# P1-5: Report re-rendered after lifecycle events
+# --------------------------------------------------------------------------- #
+
+
+def test_report_rerendered_after_approval(disposable_repo, isolated_workspace):
+    """After approval, the report's manifest hash must match the current manifest."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Read the manifest hash before approval.
+    manifest_before = json.loads((run_dir / "evidence_manifest.json").read_text())
+    hash_before = manifest_before["manifest_hash"]
+
+    # Approve.
+    note_path = run_dir / "artifacts" / "vault_note.md"
+    if not note_path.is_file():
+        # Find the vault note in the vault root.
+        for p in isolated_workspace["vault_root"].rglob("*.md"):
+            note_path = p
+            break
+
+    r = runner.invoke(app, [
+        "approve", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+    ])
+    assert r.exit_code == 0, f"approve failed: {r.output}"
+
+    # The manifest hash should have changed (new event in the chain).
+    manifest_after = json.loads((run_dir / "evidence_manifest.json").read_text())
+    hash_after = manifest_after["manifest_hash"]
+
+    # The report must reflect the new hash, not the old one.
+    report_path = run_dir / "artifacts" / "final_report.md"
+    report = report_path.read_text()
+    assert hash_after in report, "report should contain the updated manifest hash"
+    assert hash_before not in report or hash_before == hash_after, \
+        "report should not contain the stale manifest hash"
+
+
+# --------------------------------------------------------------------------- #
+# P1-6: Clean verifier failure handling (no tracebacks)
+# --------------------------------------------------------------------------- #
+
+
+def test_malformed_event_log_clean_error(disposable_repo, isolated_workspace):
+    """A malformed events.jsonl line produces a clean error, not a traceback."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+
+    # Append a malformed line to events.jsonl.
+    events_path = store.events_path(task_id)
+    events_path.write_text(events_path.read_text() + "THIS IS NOT JSON\n")
+
+    r = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r.exit_code == 1
+    assert "malformed" in r.output.lower()
+    # No traceback — the output should not contain Python traceback markers.
+    assert "Traceback" not in r.output
+    assert "ValidationError" not in r.output
+
+
+def test_malformed_manifest_clean_error(disposable_repo, isolated_workspace):
+    """A malformed evidence_manifest.json produces a clean error."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Corrupt the manifest.
+    manifest_path = run_dir / "evidence_manifest.json"
+    manifest_path.write_text("THIS IS NOT JSON\n")
+
+    r = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r.exit_code == 1
+    assert "Traceback" not in r.output
+
+
+# --------------------------------------------------------------------------- #
+# P1-7: acp run --runs-root
+# --------------------------------------------------------------------------- #
+
+
+def test_run_with_runs_root_option(disposable_repo, tmp_path):
+    """acp run --runs-root writes to the specified directory, not cwd/data/runs."""
+    os.environ["ACP_TEST"] = "1"
+    custom_runs_root = tmp_path / "custom_runs"
+
+    # Create a config file.
+    config_path = tmp_path / "test.repo.yaml"
+    config_path.write_text(f"""
+repo:
+  name: demo
+  path: {disposable_repo.path}
+  default_branch: main
+agent:
+  default: shell
+  max_repair_attempts: 0
+commands:
+  test: echo ok
+review: {{}}
+""")
+
+    r = runner.invoke(app, [
+        "run", "--config", str(config_path),
+        "--task", "test task",
+        "--runs-root", str(custom_runs_root),
+        "--vault", str(tmp_path / "vault"),
+    ])
+    assert r.exit_code == 0, f"run failed: {r.output}"
+    assert custom_runs_root.is_dir(), "runs-root directory should be created"
+    # The run directory should be under custom_runs_root, not data/runs.
+    run_dirs = list(custom_runs_root.iterdir())
+    assert any(d.name.startswith("task_") for d in run_dirs), \
+        "expected a task directory under custom_runs_root"
+
+
+# --------------------------------------------------------------------------- #
+# P1-8: Generated junk filtered from diffs
+# --------------------------------------------------------------------------- #
+
+
+def test_diff_ignores_pycache(tmp_path):
+    """capture_diff should not include __pycache__/*.pyc files."""
+    from acp.gitops.diff import capture_diff, _matches_ignore_pattern
+
+    # Test the pattern matcher directly.
+    assert _matches_ignore_pattern("__pycache__/foo.pyc")
+    assert _matches_ignore_pattern("tests/__pycache__/test.cpython-313.pyc")
+    assert _matches_ignore_pattern("foo.pyc")
+    assert _matches_ignore_pattern("node_modules/foo.js")
+    assert _matches_ignore_pattern("dist/bundle.js")
+    assert not _matches_ignore_pattern("src/main.py")
+    assert not _matches_ignore_pattern("tests/test_foo.py")
+
+
+def test_diff_filters_pycache_from_worktree(disposable_repo, tmp_path):
+    """A full capture_diff call should exclude __pycache__ files from the patch."""
+    from acp.gitops.diff import capture_diff
+
+    # Create a __pycache__ directory with a .pyc file in the repo.
+    pycache_dir = disposable_repo.path / "__pycache__"
+    pycache_dir.mkdir(exist_ok=True)
+    (pycache_dir / "module.cpython-313.pyc").write_bytes(b"\x00\x01\x02\x03")
+
+    # Also create a real source file change.
+    (disposable_repo.path / "new_file.py").write_text("print('hello')\n")
+
+    artifacts_dir = tmp_path / "artifacts"
+    diff = capture_diff(
+        worktree_path=disposable_repo.path,
+        base_branch="main",
+        artifacts_dir=artifacts_dir,
+    )
+
+    # The patch should include new_file.py but NOT the .pyc file.
+    assert "new_file.py" in diff.patch
+    assert ".pyc" not in diff.patch
+    assert "__pycache__" not in diff.patch

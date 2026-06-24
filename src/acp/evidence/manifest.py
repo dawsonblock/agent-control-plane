@@ -40,6 +40,29 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def compute_artifact_content_hash(run_dir: Path) -> str:
+    """Compute a hash over just the artifact files (not the event chain).
+
+    This hash is stable across manifest rewrites — it doesn't change when the
+    event chain head changes (e.g. after writing the ``evidence.finalized``
+    event). It's used in the ``evidence.finalized`` event payload to bind the
+    artifacts to the signed event log: if any artifact is tampered with, this
+    hash changes, and the signed event's payload no longer matches.
+    """
+    run_dir = Path(run_dir)
+    artifacts_dir = run_dir / "artifacts"
+    artifact_hashes: dict[str, str] = {}
+    if artifacts_dir.is_dir():
+        for path in sorted(artifacts_dir.rglob("*")):
+            if path.is_file():
+                rel = str(path.relative_to(run_dir))
+                if rel == "artifacts/final_report.md":
+                    continue
+                artifact_hashes[rel] = _sha256_file(path)
+    content = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
 def build_evidence_manifest(
     *,
     run_dir: Path,
@@ -111,12 +134,31 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
       * no extra artifact files exist that aren't in the manifest
       * the event chain head matches
       * the event chain is valid
+      * the manifest's own ``manifest_hash`` is correct (recomputed from the
+        manifest content excluding ``manifest_hash`` itself)
+      * if an ``evidence.finalized`` event exists, its ``artifact_manifest_hash``
+        matches the recomputed manifest hash (binds artifacts to signed evidence)
     """
     run_dir = Path(run_dir)
     manifest_path = run_dir / "evidence_manifest.json"
     if not manifest_path.is_file():
         return False
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    # Verify the manifest's own hash — recompute from content excluding
+    # manifest_hash itself. This prevents an attacker from tampering with
+    # artifact hashes and then updating manifest_hash to match.
+    stored_hash = manifest.pop("manifest_hash", None)
+    recomputed = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if stored_hash != recomputed:
+        return False
+    # Restore it for the rest of the function.
+    manifest["manifest_hash"] = stored_hash
 
     # Verify artifact hashes.
     artifacts_dir = run_dir / "artifacts"
@@ -145,18 +187,34 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
     events_path = run_dir / "events.jsonl"
     if not events_path.is_file():
         return False
-    from acp.models import Event
-    events = [
-        Event.model_validate_json(line)
-        for line in events_path.read_text().splitlines()
-        if line.strip()
-    ]
+    from acp.models import Event, EventType
+    events: list[Event] = []
+    for line in events_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(Event.model_validate_json(line))
+        except Exception:  # noqa: BLE001
+            return False  # malformed event log
     if not verify_event_chain(events):
         return False
     if not events:
         return False
     if events[-1].hash != manifest.get("event_chain_head"):
         return False
+
+    # Verify the evidence.finalized event — if present, its artifact_content_hash
+    # must match the recomputed artifact content hash. This is what binds artifacts
+    # to the signed event log. If an attacker tampers with an artifact and
+    # updates the manifest to match, the evidence.finalized event's payload
+    # still has the old hash — and that event is signed and hash-chained.
+    finalized_events = [e for e in events if e.type == EventType.EVIDENCE_FINALIZED]
+    if finalized_events:
+        finalized = finalized_events[-1]
+        expected_artifact_hash = finalized.payload.get("artifact_content_hash")
+        recomputed_artifact_hash = compute_artifact_content_hash(run_dir)
+        if expected_artifact_hash != recomputed_artifact_hash:
+            return False
 
     return True
 

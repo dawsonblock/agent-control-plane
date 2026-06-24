@@ -292,23 +292,31 @@ def run_workflow(
     # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
     # EventWriter's write method to dual-write.
     durable_store = None
+    durable_store_failures: list[str] = []
     if evidence_cfg and evidence_cfg.durable_store:
         try:
             from acp.evidence.durable_store import DurableEventStore
             durable_store = DurableEventStore(evidence_cfg.durable_store)
             durable_store.init()
-            # Wrap the write method to dual-write.
+            # Wrap the write method to dual-write. Failures are recorded but
+            # don't crash the run — the JSONL log is canonical. However, they
+            # are NOT silently swallowed: the failure count is surfaced after
+            # the run so the operator knows the durable index is incomplete.
             original_write = events.write
             def _dual_write(type, payload=None):
                 evt = original_write(type, payload)
                 try:
                     durable_store.append(evt)
-                except Exception:  # noqa: BLE001
-                    pass  # Don't crash the run if SQLite write fails.
+                except Exception as exc:  # noqa: BLE001
+                    durable_store_failures.append(
+                        f"{evt.event_id} ({evt.type.value}): {exc}"
+                    )
                 return evt
             events.write = _dual_write  # type: ignore[method-assign]
-        except Exception:
-            pass  # Don't crash the run if the store can't be initialized.
+        except Exception as exc:
+            # Store initialization failed — record it but don't crash.
+            # The run can proceed with JSONL-only durability.
+            durable_store_failures.append(f"init: {exc}")
 
     wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
 
@@ -323,5 +331,11 @@ def run_workflow(
     # Close the durable store if it was opened.
     if durable_store is not None:
         durable_store.close()
+
+    # Surface durable-store failures to the caller. The JSONL log is canonical,
+    # so the run can succeed, but the operator must know the durable index is
+    # incomplete — silent evidence loss is unacceptable in a trust system.
+    if durable_store_failures:
+        result["durable_store_warnings"] = durable_store_failures
 
     return result

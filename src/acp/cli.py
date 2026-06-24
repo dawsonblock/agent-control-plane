@@ -60,6 +60,35 @@ def _revert_vault_note(note_path: Path, original_content: str) -> None:
         console.print(f"[red]✗[/] could not revert vault note: {note_path}")
 
 
+def _update_vault_note_body(note_path: Path, run_dir: Path) -> None:
+    """Update the vault note's body to match the re-rendered report.
+
+    After a lifecycle event, the report is re-rendered with the updated event
+    timeline + manifest hash. The vault note is a copy of the report with
+    frontmatter prepended — so we need to update the body (everything after
+    the frontmatter) to match the new report, while preserving the frontmatter
+    that was just modified by approve/reject.
+
+    Best-effort: if anything fails, the vault note keeps its current content.
+    The manifest + event log are authoritative; the note is a human convenience.
+    """
+    try:
+        report_path = run_dir / "artifacts" / "final_report.md"
+        if not report_path.is_file() or not note_path.is_file():
+            return
+        note_content = note_path.read_text()
+        # Split frontmatter from body. Frontmatter is delimited by --- lines.
+        if note_content.startswith("---\n"):
+            end = note_content.find("\n---\n", 4)
+            if end == -1:
+                return  # malformed frontmatter — don't touch it
+            frontmatter = note_content[: end + 5]  # include the closing ---
+            new_body = report_path.read_text()
+            note_path.write_text(frontmatter + "\n" + new_body)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Post-run lifecycle evidence — used by ``acp approve`` / ``acp reject``.
 #
@@ -81,8 +110,12 @@ def _record_lifecycle_event(
     run_dir: Path,
     event_type: EventType,
     payload: dict,
-) -> None:
-    """Append a post-run lifecycle event and keep the evidence manifest valid."""
+) -> str | None:
+    """Append a post-run lifecycle event and keep the evidence manifest valid.
+
+    Returns a warning string if the durable store write failed, or ``None``
+    if everything succeeded (or no durable store was configured).
+    """
     from acp.errors import EvidenceConfigError
     from acp.evidence.manifest import read_evidence_config, write_evidence_manifest
 
@@ -129,21 +162,35 @@ def _record_lifecycle_event(
 
     evt = events.write(event_type, payload)
 
-    # Dual-write to the run's durable store if it had one. Best-effort: the
-    # SQLite store is a derived index, rebuildable from the JSONL log.
+    # Dual-write to the run's durable store if it had one. The SQLite store
+    # is a derived index, but failures must be visible — not silently swallowed.
+    # We surface the error via a warning printed to the console; the JSONL log
+    # (the canonical source) already has the lifecycle event.
     durable_store_path = ev_cfg["durable_store"]
+    durable_warning = None
     if durable_store_path is not None:
         try:
             from acp.evidence.durable_store import DurableEventStore
             with DurableEventStore(durable_store_path) as db:
                 db.append(evt)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            durable_warning = f"durable store write failed: {exc}"
 
     # Recompute + rewrite the evidence manifest so its event chain head
     # matches the new last event. ``acp verify`` checks events[-1].hash
     # against manifest.event_chain_head, so this must be current.
     write_evidence_manifest(run_dir=run_dir, events_writer=events)
+
+    # Re-render the report so its event timeline + manifest hash reflect the
+    # updated event log. Without this, the report shows stale evidence after
+    # lifecycle events — the report claims one hash while the manifest has another.
+    try:
+        from acp.reports.writer import rerender_report_from_run
+        rerender_report_from_run(run_dir)
+    except Exception:  # noqa: BLE001
+        pass  # report re-render is best-effort; the manifest is authoritative
+
+    return durable_warning
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +216,11 @@ def run(
         "--vault",
         help="Obsidian vault root (default: ./vault).",
     ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
 ) -> None:
     """Run one coding task in an isolated worktree and write an evidence report."""
     try:
@@ -185,7 +237,7 @@ def run(
         result = run_workflow(
             config=cfg,
             user_request=task,
-            runs_root="data/runs",
+            runs_root=runs_root,
             vault_root=vault,
         )
         status = result.get("status")
@@ -250,15 +302,20 @@ def verify(
     """Verify the evidence integrity of a completed run.
 
     Checks:
-      1. Event hash chain is valid (tamper-evident)
-      2. Evidence manifest exists and all artifact hashes match
-      3. (Optional) Ed25519 event signatures are valid
+      1. Task identity binding — CLI task_id == task.json.task_id ==
+         manifest.task_id == every event.task_id == directory name
+      2. Event hash chain is valid (tamper-evident)
+      3. Evidence manifest exists, manifest_hash is correct, and all artifact
+         hashes match
+      4. evidence.finalized event binds artifact manifest to signed event log
+      5. (Optional) Ed25519 event signatures are valid
 
-    Exits 0 if all checks pass, 1 if any fail.
+    Exits 0 if all checks pass, 1 if any fail. Malformed data produces clean
+    error messages, not tracebacks.
     """
     from acp.events import verify_event_chain, verify_event_signatures
     from acp.evidence.manifest import verify_evidence_manifest
-    from acp.models import Event
+    from acp.models import Event, EventType
 
     _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
@@ -271,18 +328,51 @@ def verify(
     all_ok = True
     events: list[Event] = []
 
-    # 1. Event hash chain.
+    # 0. Task identity binding — all identity fields must agree.
+    dir_name = run_dir.name
+    if dir_name != task_id:
+        console.print(f"[red]✗[/] task ID mismatch: CLI='{task_id}' vs dir='{dir_name}'")
+        all_ok = False
+
+    # task.json task_id
+    task_json_path = run_dir / "task.json"
+    task_json_id: str | None = None
+    if task_json_path.is_file():
+        try:
+            import json as _json
+            task_json_id = _json.loads(task_json_path.read_text()).get("task_id")
+        except Exception:
+            console.print(f"[red]✗[/] task.json is malformed — cannot read task_id")
+            all_ok = False
+    else:
+        console.print(f"[yellow]![/] task.json not found — cannot verify task_id binding")
+        all_ok = False
+    if task_json_id is not None and task_json_id != task_id:
+        console.print(f"[red]✗[/] task ID mismatch: CLI='{task_id}' vs task.json='{task_json_id}'")
+        all_ok = False
+
+    # 1. Event hash chain — with clean error handling for malformed lines.
     events_path = store.events_path(task_id)
     if not events_path.is_file():
         console.print(f"[red]✗[/] event log not found: {events_path}")
         all_ok = False
     else:
-        events = [
-            Event.model_validate_json(line)
-            for line in events_path.read_text().splitlines()
-            if line.strip()
-        ]
-        if not events:
+        lines = events_path.read_text().splitlines()
+        events = []
+        malformed_lines: list[int] = []
+        for i, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                events.append(Event.model_validate_json(line))
+            except Exception:
+                malformed_lines.append(i)
+        if malformed_lines:
+            console.print(
+                f"[red]✗[/] event log malformed at line(s): {', '.join(str(n) for n in malformed_lines[:5])}"
+            )
+            all_ok = False
+        elif not events:
             console.print(f"[red]✗[/] event log is empty")
             all_ok = False
         elif verify_event_chain(events):
@@ -291,15 +381,39 @@ def verify(
             console.print(f"[red]✗[/] event chain INVALID — log has been tampered with")
             all_ok = False
 
-    # 2. Evidence manifest.
+        # Check every event's task_id matches the CLI task_id.
+        if events:
+            mismatched = [e for e in events if e.task_id != task_id]
+            if mismatched:
+                console.print(
+                    f"[red]✗[/] task ID mismatch: {len(mismatched)} event(s) have "
+                    f"task_id != '{task_id}' (e.g. '{mismatched[0].task_id}')"
+                )
+                all_ok = False
+
+    # 2. Evidence manifest (includes manifest_hash recompute + evidence.finalized check).
     manifest_path = run_dir / "evidence_manifest.json"
     if not manifest_path.is_file():
         console.print(f"[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
-    elif verify_evidence_manifest(run_dir):
-        console.print(f"[green]✓[/] evidence manifest valid (artifacts + event chain match)")
     else:
-        console.print(f"[red]✗[/] evidence manifest INVALID — artifacts or event log don't match")
-        all_ok = False
+        try:
+            import json as _json
+            manifest = _json.loads(manifest_path.read_text())
+            manifest_task_id = manifest.get("task_id")
+            if manifest_task_id is not None and manifest_task_id != task_id:
+                console.print(
+                    f"[red]✗[/] task ID mismatch: CLI='{task_id}' vs manifest='{manifest_task_id}'"
+                )
+                all_ok = False
+        except Exception:
+            console.print(f"[red]✗[/] evidence manifest is malformed JSON")
+            all_ok = False
+
+        if verify_evidence_manifest(run_dir):
+            console.print(f"[green]✓[/] evidence manifest valid (artifacts + event chain + manifest_hash match)")
+        else:
+            console.print(f"[red]✗[/] evidence manifest INVALID — artifacts, event log, or manifest_hash don't match")
+            all_ok = False
 
     # 3. Ed25519 signatures (optional).
     if public_key is not None:
@@ -492,7 +606,7 @@ def approve(
     # to its durable store, then recompute the evidence manifest so acp verify
     # still passes. Lifecycle evidence must not break the run's verifier.
     try:
-        _record_lifecycle_event(
+        durable_warning = _record_lifecycle_event(
             task_id=task_id,
             run_dir=run_dir,
             event_type=EventType.HUMAN_APPROVED,
@@ -510,6 +624,14 @@ def approve(
         _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
         raise typer.Exit(code=1) from exc
+
+    if durable_warning:
+        console.print(f"[yellow]![/] {durable_warning}")
+
+    # Update the vault note body to match the re-rendered report (the
+    # frontmatter was already updated by approve_vault_note; this updates
+    # the body so the event timeline + manifest hash are current).
+    _update_vault_note_body(note_path, run_dir)
 
     # Update task status to APPROVED.
     task.status = TaskStatus.APPROVED
@@ -592,7 +714,7 @@ def reject(
         raise typer.Exit(code=1)
 
     try:
-        _record_lifecycle_event(
+        durable_warning = _record_lifecycle_event(
             task_id=task_id,
             run_dir=run_dir,
             event_type=EventType.HUMAN_REJECTED,
@@ -611,6 +733,12 @@ def reject(
         _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
         raise typer.Exit(code=1) from exc
+
+    if durable_warning:
+        console.print(f"[yellow]![/] {durable_warning}")
+
+    # Update the vault note body to match the re-rendered report.
+    _update_vault_note_body(note_path, run_dir)
 
     task.status = TaskStatus.ARCHIVED
     store.save(task)

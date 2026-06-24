@@ -13,6 +13,25 @@ from pathlib import Path
 
 from git import Repo
 
+# Default ignore patterns for generated/junk files that should never appear
+# in a captured diff. These are applied in addition to the repo's own
+# .gitignore. Without this, running validation commands (pytest, mypy, etc.)
+# inside the worktree can create __pycache__/, *.pyc, .pytest_cache/ etc.
+# that get staged by `git add --all` and pollute the evidence diff.
+DEFAULT_IGNORE_PATTERNS = [
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+    "dist/",
+    "build/",
+    "*.egg-info/",
+    ".DS_Store",
+]
+
 
 @dataclass
 class DiffCapture:
@@ -21,6 +40,22 @@ class DiffCapture:
     changed_files: list[str]
     insertions: int
     deletions: int
+
+
+def _matches_ignore_pattern(path_str: str) -> bool:
+    """Check if a path matches any of the default ignore patterns."""
+    parts = path_str.replace("\\", "/").split("/")
+    for pattern in DEFAULT_IGNORE_PATTERNS:
+        pat = pattern.rstrip("/")
+        if pat.startswith("*"):
+            # Suffix match (e.g. *.pyc)
+            suffix = pat[1:]
+            if any(p.endswith(suffix) for p in parts):
+                return True
+        else:
+            if pat in parts:
+                return True
+    return False
 
 
 def capture_diff(
@@ -35,6 +70,9 @@ def capture_diff(
     than resolving the branch name (avoids races if the branch moves). Writes
     ``diff.patch`` and ``diff_stat.txt`` into ``artifacts_dir`` and returns a
     parsed summary (changed files, insertions, deletions).
+
+    Generated junk (``__pycache__``, ``*.pyc``, ``.pytest_cache``, etc.) is
+    filtered out so the evidence diff contains only meaningful changes.
     """
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     repo = Repo(str(worktree_path))
@@ -57,6 +95,17 @@ def capture_diff(
     # including new files the agent created but never `git add`ed / committed.
     # We stage into the index only; nothing is committed to the branch.
     repo.git.add("--all")
+
+    # Unstage generated junk files that were caught by `git add --all` but
+    # shouldn't be in the evidence diff. We check what's staged and remove
+    # anything matching our default ignore patterns.
+    try:
+        staged_files = repo.git.diff("--cached", "--name-only").splitlines()
+        junk_to_unstage = [f for f in staged_files if _matches_ignore_pattern(f)]
+        if junk_to_unstage:
+            repo.git.reset("--", *junk_to_unstage)
+    except Exception:  # noqa: BLE001
+        pass  # best-effort; if reset fails, the diff just includes the junk
 
     # One diff of the (now fully-staged) index vs. base → complete patch.
     patch = repo.git.diff(base_commit, cached=True, no_color=True)

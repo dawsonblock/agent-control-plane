@@ -323,9 +323,14 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposab
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)
 
-    # The event log's terminal event is task.failed.
+    # The event log includes task.failed, and evidence.finalized is the last
+    # event (it's written after the terminal event to bind artifacts to the
+    # signed event log).
     log_events = [json.loads(l) for l in store.events_path(task_id).read_text().splitlines() if l.strip()]
-    assert log_events[-1]["type"] == EventType.TASK_FAILED.value
+    event_types = [e["type"] for e in log_events]
+    assert EventType.TASK_FAILED.value in event_types, "missing task.failed event"
+    assert log_events[-1]["type"] == EventType.EVIDENCE_FINALIZED.value, \
+        "evidence.finalized should be the last event"
 
     # The report must show the FULL timeline (including task.failed), not the
     # stale pre-terminal snapshot, and must include the manifest hash.
