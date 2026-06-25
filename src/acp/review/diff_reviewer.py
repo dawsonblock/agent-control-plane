@@ -35,7 +35,7 @@ from acp.config import RepoConfig
 from acp.gitops.diff import DiffCapture
 from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
-from acp.review.secret_scanner import scan_patch
+from acp.review.secret_scanner import scan_diff, scan_patch
 from acp.testing.runner import all_passed, validation_ran, validation_status
 
 # --- path heuristics (lowercase substring matches) ------------------------- #
@@ -86,10 +86,16 @@ def review_diff(
     command_results: list[CommandResult],
     repo_config: RepoConfig,
     artifacts_dir: Path,
+    worktree_path: Path | None = None,
 ) -> ReviewResult:
-    """Run the M5 taxonomy over the captured diff; write review.json."""
+    """Run the M5 taxonomy over the captured diff; write review.json.
+
+    v0.5.14: When ``worktree_path`` is provided, the secret scanner uses
+    TruffleHog for verified detection (if installed), falling back to the
+    regex scanner. When not provided, only the regex scanner is used.
+    """
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    review = _evaluate(diff, command_results, repo_config)
+    review = _evaluate(diff, command_results, repo_config, worktree_path=worktree_path)
     (artifacts_dir / "review.json").write_text(
         review.model_dump_json(indent=2)
     )
@@ -105,14 +111,18 @@ def _evaluate(
     diff: DiffCapture,
     command_results: list[CommandResult],
     cfg: RepoConfig,
+    *,
+    worktree_path: Path | None = None,
 ) -> ReviewResult:
     engine = RiskEngine()
     paths_lower = [p.lower() for p in diff.changed_files]
     tests_pass = all_passed(command_results)
 
     # --- secret scanning (HARD BLOCK) ------------------------------------- #
+    # v0.5.14: Use TruffleHog for verified detection when available.
     if cfg.review.block_secret_leaks:
-        findings = scan_patch(diff.patch)
+        use_th = getattr(cfg.review, "use_trufflehog", True)
+        findings = scan_diff(diff.patch, worktree_path=worktree_path, use_trufflehog=use_th)
         if findings:
             kinds = sorted({f.kind for f in findings})
             engine.add(

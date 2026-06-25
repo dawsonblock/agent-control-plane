@@ -11,6 +11,7 @@ test-only equivalence checks.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -49,10 +50,9 @@ def _require_valid_task_id(task_id: str) -> None:
 def _revert_vault_note(note_path: Path, original_content: str) -> None:
     """Best-effort revert of a vault note to its pre-modification content.
 
-    Used when a lifecycle event write fails after the vault note has already
-    been modified. The event log is the source of truth — a modified vault note
-    without a corresponding event is an inconsistent state that must not persist.
-    Revert failures are logged but not raised (we're already in an error path).
+    Deprecated in v0.5.14: with pure-projection re-rendering, the vault note
+    is no longer modified before the event log is written, so this function
+    is only kept for backward compatibility with any external callers.
     """
     try:
         note_path.write_text(original_content)
@@ -60,33 +60,83 @@ def _revert_vault_note(note_path: Path, original_content: str) -> None:
         console.print(f"[red]✗[/] could not revert vault note: {note_path}")
 
 
-def _update_vault_note_body(note_path: Path, run_dir: Path) -> None:
-    """Update the vault note's body to match the re-rendered report.
+def _rerender_vault_note_from_state(
+    *,
+    note_path: Path,
+    run_dir: Path,
+    task: Any,
+    store: TaskStore,
+    vault_root: Path,
+) -> None:
+    """Re-render a vault note from scratch as a pure projection of state.
 
-    After a lifecycle event, the report is re-rendered with the updated event
-    timeline + manifest hash. The vault note is a copy of the report with
-    frontmatter prepended — so we need to update the body (everything after
-    the frontmatter) to match the new report, while preserving the frontmatter
-    that was just modified by approve/reject.
+    v0.5.14: Replaces the old in-place editing + body-update approach.
+    Reads the current event log, report, and task state, then rebuilds
+    the vault note entirely. The note's frontmatter (approved, memory_status,
+    audit_trail) is derived from the event log, not modified in-place.
 
-    Best-effort: if anything fails, the vault note keeps its current content.
-    The manifest + event log are authoritative; the note is a human convenience.
+    Best-effort: if re-rendering fails, the vault note keeps its current
+    content. The event log is authoritative; the note is a human convenience.
     """
     try:
+        from acp.events import EventWriter
+        from acp.gitops.diff import DiffCapture
+        from acp.models import ReviewResult
+        from acp.vault.obsidian_writer import rerender_vault_note
+
+        # Read the current report.
         report_path = run_dir / "artifacts" / "final_report.md"
-        if not report_path.is_file() or not note_path.is_file():
-            return
-        note_content = note_path.read_text()
-        # Split frontmatter from body. Frontmatter is delimited by --- lines.
-        if note_content.startswith("---\n"):
-            end = note_content.find("\n---\n", 4)
-            if end == -1:
-                return  # malformed frontmatter — don't touch it
-            frontmatter = note_content[: end + 5]  # include the closing ---
-            new_body = report_path.read_text()
-            note_path.write_text(frontmatter + "\n" + new_body)
-    except Exception:  # noqa: BLE001
-        pass
+        report_body = report_path.read_text() if report_path.is_file() else ""
+
+        # Read the current event log.
+        events_writer = EventWriter(task.task_id, run_dir)
+        events = events_writer.read_all()
+
+        # Read the review result if it exists.
+        review_path = run_dir / "artifacts" / "review.json"
+        review = ReviewResult(risk="low", recommendation="merge")
+        if review_path.is_file():
+            import json
+            try:
+                review = ReviewResult.model_validate_json(review_path.read_text())
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Build a minimal diff capture for frontmatter stats.
+        diff = DiffCapture(
+            patch="",
+            stat="",
+            changed_files=[],
+            insertions=0,
+            deletions=0,
+        )
+        diff_stat_path = run_dir / "artifacts" / "diff_stat.txt"
+        if diff_stat_path.is_file():
+            from acp.gitops.diff import _parse_stat
+            try:
+                changed, ins, dels = _parse_stat(diff_stat_path.read_text())
+                diff = DiffCapture(
+                    patch="",
+                    stat=diff_stat_path.read_text(),
+                    changed_files=changed,
+                    insertions=ins,
+                    deletions=dels,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        rerender_vault_note(
+            note_path=note_path,
+            report_body=report_body,
+            task=task,
+            review=review,
+            diff=diff,
+            events=events,
+            vault_root=vault_root,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]![/] vault note re-render failed: {exc}")
+        console.print(f"    event log is authoritative; note may be stale")
 
 
 # --------------------------------------------------------------------------- #
@@ -854,14 +904,19 @@ def approve(
     cannot gaslight itself, because every fact it remembers was first read
     and approved by a human. This command:
 
-      1. Reads the vault note and flips ``approved: true`` + ``memory_status: active``
-      2. Writes a ``human.approved`` event to the event log
+      1. Writes a ``human.approved`` event to the event log (source of truth)
+      2. Re-renders the vault note from scratch as a pure projection
       3. Updates the task status to ``APPROVED``
+
+    v0.5.14: The vault note is no longer modified in-place. The event log is
+    written first; if that fails, the vault note is untouched (no revert
+    needed). The note is then re-rendered from the event log + report.
 
     Only ``PASSED`` and ``NEEDS_REVIEW`` tasks can be approved. Already-approved
     notes cannot be approved again.
     """
-    from acp.vault.approval import approve_vault_note, can_approve
+    from acp.vault.approval import can_approve
+    from acp.vault.obsidian_writer import rerender_vault_note
 
     _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
@@ -891,24 +946,9 @@ def approve(
         console.print(f"[red]✗[/] vault note not found: {note_path}")
         raise typer.Exit(code=1)
 
-    # Approve the note (flips frontmatter) + write the lifecycle event as one
-    # atomic-ish unit. If the lifecycle event write fails, revert the vault note
-    # to its pre-approval state — the event log is the source of truth, and a
-    # modified vault note without a corresponding event is an inconsistent state
-    # that must not persist.
-    original_note_content = note_path.read_text()
-    try:
-        fm = approve_vault_note(note_path, approver=approver)
-    except PermissionError as exc:
-        console.print(f"[red]✗[/] {exc}")
-        raise typer.Exit(code=1)
-    except Exception as exc:
-        console.print(f"[red]✗[/] approval failed: {exc}")
-        raise typer.Exit(code=1)
-
-    # Write the human.approved event — signed with the run's key + dual-written
-    # to its durable store, then recompute the evidence manifest so acp verify
-    # still passes. Lifecycle evidence must not break the run's verifier.
+    # v0.5.14 pure projection: write the lifecycle event FIRST (source of
+    # truth), then re-render the vault note from scratch. If the event write
+    # fails, the vault note is untouched — no revert needed.
     try:
         durable_warning = _record_lifecycle_event(
             task_id=task_id,
@@ -917,33 +957,37 @@ def approve(
             payload={
                 "approver": approver or "unknown",
                 "vault_note_path": str(note_path),
-                "memory_status": fm.memory_status,
             },
         )
     except ACPError as exc:
-        _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
     except Exception as exc:
-        _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
         raise typer.Exit(code=1) from exc
 
     if durable_warning:
         console.print(f"[yellow]![/] {durable_warning}")
 
-    # Update the vault note body to match the re-rendered report (the
-    # frontmatter was already updated by approve_vault_note; this updates
-    # the body so the event timeline + manifest hash are current).
-    _update_vault_note_body(note_path, run_dir)
-
-    # Update task status to APPROVED.
+    # Update task status to APPROVED before re-rendering the vault note.
     task.status = TaskStatus.APPROVED
     store.save(task)
 
+    # Re-render the vault note from scratch as a pure projection of the
+    # current state (event log + report + task). The note's frontmatter
+    # (approved=true, memory_status=active, audit_trail) is derived from
+    # the event log, not modified in-place.
+    _rerender_vault_note_from_state(
+        note_path=note_path,
+        run_dir=run_dir,
+        task=task,
+        store=store,
+        vault_root=vault_root,
+    )
+
     console.print(f"[green]✓[/] task {task_id} approved by {approver or 'unknown'}")
     console.print(f"  vault note: {note_path}")
-    console.print(f"  memory_status: {fm.memory_status}")
+    console.print(f"  memory_status: active")
     console.print(f"  event: human.approved written to {store.events_path(task_id)}")
     console.print(f"  lifecycle evidence written — `acp verify` remains valid")
 
@@ -982,8 +1026,13 @@ def reject(
     Sets ``memory_status: archived`` and writes a ``human.rejected`` event.
     The task status is updated to ``ARCHIVED``. Cannot reject an already-
     approved note (approval is a commitment).
+
+    v0.5.14: The vault note is no longer modified in-place. The event log is
+    written first; if that fails, the vault note is untouched. The note is
+    then re-rendered from the event log + report.
     """
-    from acp.vault.approval import reject_vault_note
+    from acp.vault.approval import can_approve
+    from acp.vault.obsidian_writer import rerender_vault_note
 
     _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
@@ -999,24 +1048,25 @@ def reject(
         console.print(f"[red]✗[/] cannot load task.json: {exc}")
         raise typer.Exit(code=1)
 
+    # Cannot reject an already-approved or already-archived task.
+    if task.status == TaskStatus.APPROVED:
+        console.print(
+            f"[red]✗[/] task is already approved — cannot reject after approval."
+        )
+        raise typer.Exit(code=1)
+    if task.status == TaskStatus.ARCHIVED:
+        console.print(
+            f"[red]✗[/] task is already archived — cannot reject again."
+        )
+        raise typer.Exit(code=1)
+
     note_path = vault_root / "tasks" / f"{task_id}.md"
     if not note_path.is_file():
         console.print(f"[red]✗[/] vault note not found: {note_path}")
         raise typer.Exit(code=1)
 
-    # Reject the note (archives it) + write the lifecycle event as one
-    # atomic-ish unit. If the lifecycle event write fails, revert the vault note
-    # so we don't leave a modified note without a corresponding event.
-    original_note_content = note_path.read_text()
-    try:
-        fm = reject_vault_note(note_path, rejecter=rejecter)
-    except PermissionError as exc:
-        console.print(f"[red]✗[/] {exc}")
-        raise typer.Exit(code=1)
-    except Exception as exc:
-        console.print(f"[red]✗[/] rejection failed: {exc}")
-        raise typer.Exit(code=1)
-
+    # v0.5.14 pure projection: write the lifecycle event FIRST, then
+    # re-render the vault note. No in-place modification, no revert.
     try:
         durable_warning = _record_lifecycle_event(
             task_id=task_id,
@@ -1026,30 +1076,33 @@ def reject(
                 "rejecter": rejecter or "unknown",
                 "reason": reason,
                 "vault_note_path": str(note_path),
-                "memory_status": fm.memory_status,
             },
         )
     except ACPError as exc:
-        _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
     except Exception as exc:
-        _revert_vault_note(note_path, original_note_content)
         console.print(f"[red]✗[/] lifecycle event write failed: {exc}")
         raise typer.Exit(code=1) from exc
 
     if durable_warning:
         console.print(f"[yellow]![/] {durable_warning}")
 
-    # Update the vault note body to match the re-rendered report.
-    _update_vault_note_body(note_path, run_dir)
-
     task.status = TaskStatus.ARCHIVED
     store.save(task)
 
+    # Re-render the vault note from scratch as a pure projection.
+    _rerender_vault_note_from_state(
+        note_path=note_path,
+        run_dir=run_dir,
+        task=task,
+        store=store,
+        vault_root=vault_root,
+    )
+
     console.print(f"[green]✓[/] task {task_id} rejected by {rejecter or 'unknown'}")
     console.print(f"  vault note: {note_path}")
-    console.print(f"  memory_status: {fm.memory_status}")
+    console.print(f"  memory_status: archived")
     console.print(f"  event: human.rejected written to {store.events_path(task_id)}")
     console.print(f"  lifecycle evidence written — `acp verify` remains valid")
 

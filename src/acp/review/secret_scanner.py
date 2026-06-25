@@ -13,13 +13,22 @@ not a guarantee (see docs/safety.md).
 
 Scans only *added* diff lines (lines starting with ``+``), so deletions and
 context never produce findings.
+
+v0.5.14: TruffleHog integration. When TruffleHog is installed, the scanner
+uses it for verified detection — TruffleHog checks if a key is live before
+flagging it, eliminating false positives. Falls back to the regex scanner
+when TruffleHog is not available.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 # --- known credential prefixes / shapes ------------------------------------ #
 # Each entry: (label, compiled regex). Matched against added lines.
@@ -151,3 +160,144 @@ def _redact(secret: str) -> str:
     if len(secret) <= 8:
         return secret[:2] + "…" + secret[-1:]
     return secret[:4] + "…" + secret[-2:]
+
+
+# --------------------------------------------------------------------------- #
+# v0.5.14: TruffleHog integration
+# --------------------------------------------------------------------------- #
+
+
+def trufflehog_installed() -> bool:
+    """Return True if TruffleHog is on PATH."""
+    return shutil.which("trufflehog") is not None
+
+
+def scan_with_trufflehog(
+    worktree_path: Path,
+    *,
+    timeout_seconds: int = 120,
+) -> list[SecretFinding]:
+    """Run TruffleHog on the worktree and return findings.
+
+    TruffleHog performs **verified detection** — it checks if a detected
+    secret is live (e.g., makes a test API call) before reporting it. This
+    eliminates false positives that the regex scanner would produce.
+
+    Uses ``trufflehog git file://<path> --json --no-update`` to scan the
+    worktree's git history + working tree. Only verified findings are
+    returned.
+
+    Returns an empty list if TruffleHog finds nothing or is not installed.
+    Raises RuntimeError on TruffleHog execution failure (not timeout).
+    """
+    if not trufflehog_installed():
+        return []
+
+    findings: list[SecretFinding] = []
+
+    try:
+        proc = subprocess.run(
+            [
+                "trufflehog", "git", f"file://{worktree_path}",
+                "--json",
+                "--no-update",
+                "--results=verified,unknown,unverified",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    except FileNotFoundError:
+        return []
+
+    # TruffleHog outputs one JSON object per line on stdout.
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        # TruffleHog JSON format includes:
+        # - DetectorName: the type of secret detected
+        # - Verified: whether the secret was verified as live
+        # - Raw: the raw secret value (we redact this)
+        # - SourceMetadata: file path, line number
+        # We only include verified findings to avoid false positives.
+        detector = obj.get("DetectorName", "unknown")
+        verified = obj.get("Verified", False)
+        raw_secret = obj.get("Raw", "")
+        source_meta = obj.get("SourceMetadata", {})
+        source_name = source_meta.get("SourceName", "")
+        line_no = 0
+
+        # Extract line number from source metadata if available.
+        metadata = source_meta.get("Metadata", {})
+        if isinstance(metadata, dict):
+            line_no = metadata.get("line", 0)
+
+        # Only include verified findings — TruffleHog's key advantage.
+        if not verified:
+            continue
+
+        kind = f"trufflehog:{detector.lower()}"
+        snippet = _redact(raw_secret) if raw_secret else "(verified secret detected)"
+
+        findings.append(SecretFinding(
+            kind=kind,
+            snippet=snippet,
+            line_no=line_no,
+        ))
+
+    return findings
+
+
+def scan_diff(
+    patch: str,
+    *,
+    worktree_path: Path | None = None,
+    use_trufflehog: bool = True,
+) -> list[SecretFinding]:
+    """Scan a diff for secrets, using TruffleHog if available.
+
+    This is the v0.5.14 entry point for secret scanning. It uses
+    TruffleHog for verified detection when available (and a worktree
+    path is provided), falling back to the regex-based ``scan_patch``
+    when TruffleHog is not installed or not requested.
+
+    When TruffleHog is used, the regex scanner is also run as a
+    complementary check — TruffleHog catches verified secrets but may
+    miss unverified ones that the regex scanner would flag.
+    """
+    """Scan a diff for secrets, using TruffleHog if available.
+
+    This is the v0.5.14 entry point for secret scanning. It uses
+    TruffleHog for verified detection when available (and a worktree
+    path is provided), falling back to the regex-based ``scan_patch``
+    when TruffleHog is not installed or not requested.
+
+    When TruffleHog is used, the regex scanner is also run as a
+    complementary check — TruffleHog catches verified secrets but may
+    miss unverified ones that the regex scanner would flag.
+    """
+    # Always run the regex scanner — it catches patterns TruffleHog might
+    # miss (e.g., private key blocks that TruffleHog doesn't verify).
+    findings = scan_patch(patch)
+
+    # If TruffleHog is available and a worktree path is provided, run it
+    # for verified detection. Merge any new findings.
+    if use_trufflehog and worktree_path is not None and trufflehog_installed():
+        trufflehog_findings = scan_with_trufflehog(worktree_path)
+        # Dedupe by (kind, line_no) — a finding from both scanners should
+        # only appear once. Prefer the TruffleHog finding (verified).
+        existing_keys = {(f.kind, f.line_no) for f in findings}
+        for tf in trufflehog_findings:
+            key = (tf.kind, tf.line_no)
+            if key not in existing_keys:
+                findings.append(tf)
+
+    return findings

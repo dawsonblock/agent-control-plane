@@ -553,6 +553,7 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         command_results=state["command_results"],
         repo_config=cfg,
         artifacts_dir=state["artifacts_dir"],
+        worktree_path=state.get("worktree_path"),
     )
     # Add binary file warnings as review concerns — binary changes are hard
     # to review and should be flagged for human attention.

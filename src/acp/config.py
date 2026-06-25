@@ -79,6 +79,11 @@ class ReviewSection(BaseModel):
     warn_on_auth_changes: bool = True
     warn_on_database_changes: bool = True
     require_human_approval: bool = True
+    # v0.5.14: TruffleHog verified secret detection. When True and
+    # TruffleHog is installed, the secret scanner uses TruffleHog for
+    # verified detection (checks if a key is live before flagging).
+    # Falls back to the regex scanner when TruffleHog is not installed.
+    use_trufflehog: bool = True
 
 
 class ContextSection(BaseModel):

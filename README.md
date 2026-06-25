@@ -26,20 +26,17 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.13 alpha — Docker Sandboxes executor backend
+## Current scope: v0.5.14 alpha — Pure-projection vault notes + TruffleHog
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
 binds the complete evidence record — artifacts, task metadata, the
 human-facing report, and the evidence policy — to the signed event log.
-Lifecycle writes (approve/reject) are fully transactional: on failure, all
-evidence files are restored to their pre-lifecycle state. v0.5.13 adds
-Docker Sandboxes (``sbx``) as an execution backend: the coding agent runs
-inside an isolated microVM with its own Docker daemon, filesystem, and
-network, and ACP captures the diff from the sandbox's private Git clone
-rather than from host worktree mutation. It is under active hardening and
-should be used for controlled dogfooding, not production autonomous
-operation.
+v0.5.14 makes the Obsidian vault note a **pure projection** of the event log
+(eliminating the brittle 3-way transactional rollback) and integrates
+**TruffleHog** for verified secret detection (replacing regex-only scanning).
+It is under active hardening and should be used for controlled dogfooding,
+not production autonomous operation.
 
 This repository currently implements:
 
@@ -59,7 +56,8 @@ This repository currently implements:
 | **v0.5.10** | Evidence binding: `evidence.finalized` binds artifact content hash to signed event log; composite durable store key; task identity binding; manifest hash recompute; lifecycle manifest; durable mode; `--runs-root`; diff junk filtering; `--debug` on verify | Stable |
 | **v0.5.11** | Full evidence binding: `evidence.finalized` binds artifacts + task.json (immutable fields); `evidence.report_bound` binds the human-facing report; missing manifest/report/lifecycle-manifest fails verification; `durable_mode` persisted + fail-closed lifecycle writes; malformed event log suppresses signature success; `acp verify --deep` mode with `DigestCache`; immutable run manifest + separate lifecycle evidence | Stable |
 | **v0.5.12** | Lifecycle transaction integrity: full evidence rollback (events.jsonl + final_report.md + lifecycle_manifest.json + SQLite single-transaction); `evidence_config_hash` binds evidence policy to signed event log (prevents silent durable_mode downgrade); `acp verify --check-durable` checks SQLite matches events.jsonl (auto-enabled when durable_mode=required); `DEFAULT_IGNORE_PATTERNS` applied in artifact hashing; task.json.status consistency check; CLI wording corrected | Stable |
-| **v0.5.13** | Docker Sandboxes executor backend: `SbxExecutor` runs the coding agent inside an isolated microVM via `sbx run --clone`; clone mode enforced (ACP refuses non-clone); network policy recorded (locked_down/balanced, never open); `sandbox.started`/`sandbox.stopped` events bind executor metadata to signed event log; `capture_diff_from_remote` fetches sandbox remote and diffs agent's private clone; sandbox cleanup (stop/remove) on run completion; `ExecutorSection` in repo config | Current |
+| **v0.5.13** | Docker Sandboxes executor backend: `SbxExecutor` runs the coding agent inside an isolated microVM via `sbx run --clone`; clone mode enforced (ACP refuses non-clone); network policy recorded (locked_down/balanced, never open); `sandbox.started`/`sandbox.stopped` events bind executor metadata to signed event log; `capture_diff_from_remote` fetches sandbox remote and diffs agent's private clone; sandbox cleanup (stop/remove) on run completion; `ExecutorSection` in repo config | Stable |
+| **v0.5.14** | Pure-projection vault notes: `rerender_vault_note` rebuilds the note from scratch from the event log (no more in-place frontmatter editing or 3-way transactional rollback); TruffleHog integration: `scan_diff` uses TruffleHog for verified secret detection when installed (checks if keys are live before flagging), falls back to regex scanner; `use_trufflehog` config in `ReviewSection`; `review_diff` accepts `worktree_path` for TruffleHog scanning | Current |
 | **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
