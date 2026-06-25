@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-control-plane"
-version = "0.5.11"
+version = "0.5.12"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

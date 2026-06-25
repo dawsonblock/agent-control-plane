@@ -160,6 +160,31 @@ class DurableEventStore:
             self._conn.execute("ROLLBACK")
             raise
 
+    def begin_transaction(self) -> None:
+        """Begin an explicit transaction. Use with :meth:`append` + :meth:`commit`
+        or :meth:`rollback_transaction` for multi-event atomic writes.
+
+        The connection is in autocommit mode (``isolation_level=None``), so
+        ``BEGIN`` must be issued explicitly. All subsequent ``append`` calls
+        are part of the transaction until :meth:`commit` or
+        :meth:`rollback_transaction` is called.
+        """
+        if self._conn is None:
+            raise RuntimeError("DurableEventStore not initialized — call .init() first")
+        self._conn.execute("BEGIN")
+
+    def commit(self) -> None:
+        """Commit the current explicit transaction."""
+        if self._conn is None:
+            raise RuntimeError("DurableEventStore not initialized — call .init() first")
+        self._conn.execute("COMMIT")
+
+    def rollback_transaction(self) -> None:
+        """Roll back the current explicit transaction."""
+        if self._conn is None:
+            raise RuntimeError("DurableEventStore not initialized — call .init() first")
+        self._conn.execute("ROLLBACK")
+
     def query(
         self,
         *,

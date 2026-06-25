@@ -31,6 +31,7 @@ from acp.events import EventWriter
 from acp.evidence.manifest import (
     build_evidence_manifest,
     compute_artifact_content_hash,
+    compute_evidence_config_hash,
     compute_report_hash,
     compute_task_json_hash,
     write_evidence_config,
@@ -113,29 +114,10 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         # 3. Determine final status from the state.
         final_status = str(state.get("status", "unknown"))
 
-        # 4. Write the evidence.finalized event — this binds the artifacts
-        # AND task.json to the signed event log. The hashes are stable (don't
-        # change when the chain head changes), so they can be verified later
-        # even though the manifest is rewritten after this event.
-        finalize_payload: dict[str, Any] = {
-            "task_id": state["task_id"],
-            "run_schema_version": "1.0",
-            "artifact_content_hash": artifact_content_hash,
-            "artifact_count": artifact_count,
-            "event_chain_head_before_finalize": ctx.events.last_hash,
-            "final_status": final_status,
-        }
-        if task_json_hash is not None:
-            finalize_payload["task_json_hash"] = task_json_hash
-        ctx.events.write(EventType.EVIDENCE_FINALIZED, finalize_payload)
-
-        # 5. Rewrite the manifest so its chain head includes evidence.finalized.
-        _, manifest_hash = write_evidence_manifest(
-            run_dir=run_dir,
-            events_writer=ctx.events,
-        )
-
-        # Persist the evidence config sidecar (including durable_mode).
+        # 3b. Persist the evidence config sidecar (including durable_mode)
+        # BEFORE writing evidence.finalized, so we can compute its hash and
+        # bind it to the signed event. This prevents an operator from
+        # silently downgrading durable_mode after finalize.
         cfg = state.get("config")
         evidence_cfg = getattr(cfg, "evidence", None)
         if evidence_cfg is not None:
@@ -146,6 +128,32 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 public_key_path=evidence_cfg.public_key_path,
                 durable_mode=getattr(evidence_cfg, "durable_mode", None),
             )
+        evidence_config_hash = compute_evidence_config_hash(run_dir)
+
+        # 4. Write the evidence.finalized event — this binds the artifacts,
+        # task.json, AND the evidence config (policy) to the signed event log.
+        # The hashes are stable (don't change when the chain head changes),
+        # so they can be verified later even though the manifest is rewritten
+        # after this event.
+        finalize_payload: dict[str, Any] = {
+            "task_id": state["task_id"],
+            "run_schema_version": "1.0",
+            "artifact_content_hash": artifact_content_hash,
+            "artifact_count": artifact_count,
+            "event_chain_head_before_finalize": ctx.events.last_hash,
+            "final_status": final_status,
+        }
+        if task_json_hash is not None:
+            finalize_payload["task_json_hash"] = task_json_hash
+        if evidence_config_hash is not None:
+            finalize_payload["evidence_config_hash"] = evidence_config_hash
+        ctx.events.write(EventType.EVIDENCE_FINALIZED, finalize_payload)
+
+        # 5. Rewrite the manifest so its chain head includes evidence.finalized.
+        _, manifest_hash = write_evidence_manifest(
+            run_dir=run_dir,
+            events_writer=ctx.events,
+        )
 
         # 6. Re-render the report with the final manifest hash + event timeline.
         # The timeline now includes evidence.finalized.

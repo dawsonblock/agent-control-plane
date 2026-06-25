@@ -302,7 +302,12 @@ def test_durable_mode_none_when_not_configured(disposable_repo, isolated_workspa
 def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspace, tmp_path):
     """When durable_mode=required, approval must fail if the SQLite store
     is unavailable — not just warn. And the human.approved event must be
-    rolled back from events.jsonl so the run is not left half-approved."""
+    rolled back from events.jsonl so the run is not left half-approved.
+
+    Note: we break the actual DB file (not the config) because
+    evidence_config.json is now bound to the signed event log —
+    changing it would be correctly detected as tampering.
+    """
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
         disposable_repo, isolated_workspace,
@@ -313,13 +318,13 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
     events_before = _events(store, task_id)
     count_before = len(events_before)
 
-    # Make the durable store path unusable — point the config to a path
-    # inside a file (not a directory) so SQLite can't open it.
-    ev_cfg_path = run_dir / "evidence_config.json"
-    ev_cfg = json.loads(ev_cfg_path.read_text())
-    ev_cfg["durable_store"] = str(tmp_path / "blocker_file" / "events.db")
-    ev_cfg_path.write_text(json.dumps(ev_cfg, indent=2) + "\n")
-    (tmp_path / "blocker_file").write_text("blocker")
+    # Corrupt the DB file so SQLite can't open it. We don't modify
+    # evidence_config.json — that would break the config hash binding.
+    # Save the original DB so we can restore it after the failed approval
+    # (the corruption is test setup, not a result of the approval).
+    db_backup = db_path.read_bytes()
+    db_path.unlink()
+    db_path.write_text("not a sqlite database")
 
     # Approve must fail (not just warn).
     r = runner.invoke(app, [
@@ -329,10 +334,9 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
         "--approver", "test@example.com",
     ])
     assert r.exit_code == 1, f"approve should have failed closed: {r.output}"
-    assert "rolled back" in r.output
+    assert "all evidence restored" in r.output
 
     # CRITICAL: the human.approved event must NOT be in the event log.
-    # The rollback must have restored the log to its pre-approval state.
     events_after = _events(store, task_id)
     assert len(events_after) == count_before, (
         f"event log was not rolled back: {count_before} events before, "
@@ -348,7 +352,144 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
         "event chain broken after rollback"
     )
 
+    # Restore the DB (the corruption was test setup, not a result of the
+    # approval — we need a valid DB for verify to check durable consistency).
+    db_path.write_bytes(db_backup)
+
     # Verify must still pass (the run is in its pre-approval state).
+    r2 = runner.invoke(app, ["verify", "--task", task_id,
+                             "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r2.exit_code == 0, f"verify should pass after rollback: {r2.output}"
+
+
+# --------------------------------------------------------------------------- #
+# 8b. Second durable-write failure — full evidence rollback
+# --------------------------------------------------------------------------- #
+
+
+def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_workspace, tmp_path):
+    """The critical regression test from the v0.5.11 review:
+
+    If the SQLite write for the SECOND lifecycle event (evidence.report_bound)
+    fails — after the first event (human.approved) was already written to
+    both events.jsonl and SQLite, and the report was already re-rendered —
+    ALL evidence must be restored to the pre-approval state:
+
+      * events.jsonl: no human.approved, no evidence.report_bound
+      * final_report.md: original content (no human.approved in timeline)
+      * SQLite: no orphan human.approved
+      * lifecycle_manifest.json: original or absent
+      * acp verify: passes (run is in pre-approval state)
+    """
+    db_path = tmp_path / "events.db"
+    task_id, store, run_dir = _run(
+        disposable_repo, isolated_workspace,
+        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+    )
+
+    # Count events and save report content before approval.
+    events_before = _events(store, task_id)
+    count_before = len(events_before)
+    report_path = run_dir / "artifacts" / "final_report.md"
+    report_before = report_path.read_bytes()
+
+    # Pre-seed the SQLite store with a duplicate of the event_id that the
+    # evidence.report_bound event will use. The next event_id after the
+    # current count will be evt_{count+1:06d}, and the one after that will
+    # be evt_{count+2:06d}. We pre-insert a row with the SECOND event_id
+    # (the report_bound one) so that the first durable write (human.approved)
+    # succeeds but the second (evidence.report_bound) fails with a duplicate
+    # key constraint.
+    from acp.evidence.durable_store import DurableEventStore
+    from acp.models import Event, EventType as ET
+
+    # Determine what event_ids the approval will use.
+    # human.approved will be evt_{count+1:06d}, report_bound will be evt_{count+2:06d}
+    report_bound_id = f"evt_{count_before + 2:06d}"
+
+    # Pre-seed the duplicate.
+    with DurableEventStore(db_path) as db:
+        # Insert a dummy event with the same (task_id, event_id) that the
+        # report_bound event will use. This will cause the second append to fail.
+        dummy = Event(
+            event_id=report_bound_id,
+            task_id=task_id,
+            type=ET.TASK_CREATED,  # type doesn't matter, just the PK collision
+            timestamp="2025-01-01T00:00:00Z",
+            payload={},
+            prev_hash="GENESIS",
+            hash="dummy_hash",
+            signature="",
+        )
+        db.append(dummy)
+
+    # Now run approve. The first durable write (human.approved) should succeed,
+    # the report gets re-rendered, then the second durable write
+    # (evidence.report_bound) fails due to the duplicate key.
+    r = runner.invoke(app, [
+        "approve", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+        "--approver", "test@example.com",
+    ])
+    assert r.exit_code == 1, f"approve should have failed: {r.output}"
+    assert "all evidence restored" in r.output
+
+    # 1. events.jsonl: no human.approved, no extra evidence.report_bound.
+    events_after = _events(store, task_id)
+    assert len(events_after) == count_before, (
+        f"event log not rolled back: {count_before} before, "
+        f"{len(events_after)} after"
+    )
+    assert not any(e.type == EventType.HUMAN_APPROVED for e in events_after), (
+        "human.approved survived rollback!"
+    )
+    # The original run may have one evidence.report_bound; the lifecycle
+    # write adds a second. After rollback, the count should match the original.
+    report_bound_after = [e for e in events_after if e.type == EventType.EVIDENCE_REPORT_BOUND]
+    report_bound_before = [e for e in events_before if e.type == EventType.EVIDENCE_REPORT_BOUND]
+    assert len(report_bound_after) == len(report_bound_before), (
+        f"evidence.report_bound count changed: {len(report_bound_before)} before, "
+        f"{len(report_bound_after)} after — lifecycle report_bound not rolled back!"
+    )
+
+    # 2. final_report.md: must be the original content.
+    report_after = report_path.read_bytes()
+    assert report_after == report_before, (
+        "final_report.md was not restored to pre-approval state after rollback!"
+    )
+
+    # 3. SQLite: no orphan human.approved, no extra report_bound.
+    # The original run may have a report_bound in SQLite; the lifecycle write
+    # would add a second. After rollback, only the original should remain.
+    with DurableEventStore(db_path) as db:
+        db_approved = db.query(task_id=task_id, type=EventType.HUMAN_APPROVED.value)
+        assert len(db_approved) == 0, (
+            f"orphan human.approved in SQLite: {len(db_approved)} events"
+        )
+        db_report_bound = db.query(task_id=task_id, type=EventType.EVIDENCE_REPORT_BOUND.value)
+        # The original run has 1 report_bound. The pre-seeded dummy has a
+        # different type (task.created). So after rollback, we should have
+        # exactly 1 (the original) — not 2 (original + lifecycle).
+        assert len(db_report_bound) == 1, (
+            f"expected 1 report_bound in SQLite (original), got {len(db_report_bound)} "
+            f"— lifecycle report_bound not rolled back from SQLite!"
+        )
+
+    # 4. Event chain still valid.
+    from acp.events import verify_event_chain
+    assert verify_event_chain(events_after) is True, "event chain broken after rollback"
+
+    # 5. Clean up the pre-seeded dummy event from SQLite (it was only needed
+    # to trigger the duplicate key failure). After cleanup, SQLite should
+    # match events.jsonl exactly.
+    with DurableEventStore(db_path) as db:
+        db._conn.execute(
+            "DELETE FROM events WHERE task_id = ? AND event_id = ?",
+            (task_id, report_bound_id),
+        )
+
+    # 6. acp verify passes (run is in pre-approval state, SQLite is clean).
     r2 = runner.invoke(app, ["verify", "--task", task_id,
                              "--runs-root", str(isolated_workspace["runs_root"])])
     assert r2.exit_code == 0, f"verify should pass after rollback: {r2.output}"
@@ -745,3 +886,65 @@ def test_derive_status_from_events_unit():
         Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_FAILED, prev_hash="h1", hash="h2"),
     ]
     assert derive_status_from_events(events) == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# evidence_config_hash binding — prevents silent policy downgrade
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_config_hash_bound_in_finalized(disposable_repo, isolated_workspace):
+    """The evidence.finalized event must include evidence_config_hash."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+    events = _events(store, task_id)
+
+    finalized = [e for e in events if e.type == EventType.EVIDENCE_FINALIZED]
+    assert len(finalized) == 1
+    assert "evidence_config_hash" in finalized[0].payload
+    assert finalized[0].payload["evidence_config_hash"] is not None
+
+
+def test_evidence_config_tamper_fails_verify(disposable_repo, isolated_workspace, tmp_path):
+    """Tampering with evidence_config.json (e.g. downgrading durable_mode)
+    must fail acp verify — the config hash in evidence.finalized won't match."""
+    db_path = tmp_path / "events.db"
+    task_id, store, run_dir = _run(
+        disposable_repo, isolated_workspace,
+        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+    )
+
+    # Verify passes before tampering.
+    assert verify_evidence_manifest(run_dir) is True
+
+    # Tamper: downgrade durable_mode from required to best_effort.
+    ev_cfg_path = run_dir / "evidence_config.json"
+    ev_cfg = json.loads(ev_cfg_path.read_text())
+    ev_cfg["durable_mode"] = "best_effort"
+    ev_cfg_path.write_text(json.dumps(ev_cfg, indent=2) + "\n")
+
+    # verify_evidence_manifest must fail — config hash doesn't match.
+    assert verify_evidence_manifest(run_dir) is False
+
+    # CLI verify must also fail.
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 1
+
+
+def test_evidence_config_durable_store_tamper_fails_verify(disposable_repo, isolated_workspace, tmp_path):
+    """Changing the durable_store path in evidence_config.json must fail verify."""
+    db_path = tmp_path / "events.db"
+    task_id, store, run_dir = _run(
+        disposable_repo, isolated_workspace,
+        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+    )
+
+    assert verify_evidence_manifest(run_dir) is True
+
+    # Tamper: change the durable_store path.
+    ev_cfg_path = run_dir / "evidence_config.json"
+    ev_cfg = json.loads(ev_cfg_path.read_text())
+    ev_cfg["durable_store"] = "/different/path/events.db"
+    ev_cfg_path.write_text(json.dumps(ev_cfg, indent=2) + "\n")
+
+    assert verify_evidence_manifest(run_dir) is False

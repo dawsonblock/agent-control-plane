@@ -111,13 +111,17 @@ def _record_lifecycle_event(
     event_type: EventType,
     payload: dict,
 ) -> str | None:
-    """Append a post-run lifecycle event and keep the evidence manifest valid.
+    """Append a post-run lifecycle event with full transactional integrity.
 
-    Returns a warning string if the durable store write failed (in best_effort
-    mode), or ``None`` if everything succeeded (or no durable store was
-    configured). In ``required`` durable mode, a durable store write failure
-    raises ``ACPError`` instead of returning a warning — the lifecycle action
-    must not succeed if the durable store is unavailable.
+    All evidence mutations — events.jsonl, final_report.md,
+    lifecycle_manifest.json, and the SQLite durable store — are staged
+    and committed as one transaction. If ANY step fails (especially a
+    required-mode durable store write), ALL evidence files are restored
+    to their pre-lifecycle state. No partial state survives.
+
+    Returns a warning string if the durable store write failed in
+    best_effort mode, or ``None`` if everything succeeded. In required
+    mode, any failure raises ``ACPError`` after rolling back all evidence.
     """
     from acp.errors import ACPError, EvidenceConfigError
     from acp.evidence.manifest import (
@@ -138,9 +142,6 @@ def _record_lifecycle_event(
     if signing_key_path is None:
         existing = events.read_all()
         if any(e.signature for e in existing):
-            # Pre-v0.5.9 signed run with no sidecar. We know it was signed but
-            # don't know which key was used. Fail closed — refuse to write an
-            # unsigned lifecycle event that would break signature verification.
             raise EvidenceConfigError(
                 "run has signed events but no evidence_config sidecar — cannot "
                 "determine signing key for lifecycle event. Re-run with v0.5.9+ "
@@ -167,44 +168,67 @@ def _record_lifecycle_event(
                 "lifecycle event. Install with: uv sync --extra crypto"
             ) from exc
 
-    # --- Transactional lifecycle write ------------------------------------- #
-    # The lifecycle event + its durable-store dual-write + the report_bound
-    # event + its durable-store dual-write form one transaction. If ANY step
-    # fails in a way that makes the state inconsistent (required-mode durable
-    # failure), we roll back ALL events written in this transaction —
-    # truncating events.jsonl to the checkpoint and restoring the hash chain.
-    # This prevents the half-approved bug: a human.approved event in the log
-    # with no corresponding durable-store entry or lifecycle manifest.
-    checkpoint = events.checkpoint()
+    # --- Full evidence checkpoint ------------------------------------------ #
+    # Save the state of every evidence file that could be modified during the
+    # lifecycle transaction. On failure, we restore ALL of them — not just
+    # events.jsonl. This is what makes the lifecycle write truly transactional.
+    report_path = run_dir / "artifacts" / "final_report.md"
+    lifecycle_manifest_path = run_dir / "lifecycle_manifest.json"
+
+    event_checkpoint = events.checkpoint()
+    report_backup = report_path.read_bytes() if report_path.is_file() else None
+    lifecycle_manifest_backup = (
+        lifecycle_manifest_path.read_bytes()
+        if lifecycle_manifest_path.is_file()
+        else None
+    )
+
     durable_store_path = ev_cfg["durable_store"]
     durable_mode = ev_cfg.get("durable_mode")
     durable_warning = None
 
+    # For the durable store, we use a single SQLite transaction spanning both
+    # the lifecycle event and the report_bound event. This way, if the second
+    # insert fails, the first is automatically rolled back by SQLite — no
+    # orphan human.approved in the DB.
+    durable_db = None
+    durable_tx_active = False
+
     try:
+        # Open the durable store connection once and begin a transaction.
+        if durable_store_path is not None:
+            from acp.evidence.durable_store import DurableEventStore
+            durable_db = DurableEventStore(durable_store_path)
+            durable_db.init()
+            if durable_mode == "required":
+                # Use a single explicit transaction for both events.
+                durable_db.begin_transaction()
+                durable_tx_active = True
+
+        # 1. Write the lifecycle event to events.jsonl.
         evt = events.write(event_type, payload)
 
-        # Dual-write the lifecycle event to the durable store.
-        if durable_store_path is not None:
+        # 2. Write the lifecycle event to the durable store.
+        if durable_db is not None:
             try:
-                from acp.evidence.durable_store import DurableEventStore
-                with DurableEventStore(durable_store_path) as db:
-                    db.append(evt)
-            except Exception as exc:  # noqa: BLE001
+                if durable_tx_active:
+                    durable_db.append(evt)  # within the explicit transaction
+                else:
+                    durable_db.append(evt)
+                    durable_db.commit()
+            except Exception as exc:
                 if durable_mode == "required":
-                    raise  # triggers rollback below
+                    raise  # triggers full rollback below
                 durable_warning = f"durable store write failed: {exc}"
 
-        # Re-render the report so its event timeline + manifest hash reflect
-        # the updated event log.
+        # 3. Re-render the report (this overwrites final_report.md).
         try:
             from acp.reports.writer import rerender_report_from_run
             rerender_report_from_run(run_dir)
         except Exception:  # noqa: BLE001
             pass  # report re-render is best-effort
 
-        # Write a second evidence.report_bound event binding the re-rendered
-        # report to the signed event log. This is the key security property:
-        # the post-lifecycle report is bound to a SIGNED, hash-chained event.
+        # 4. Write the evidence.report_bound event to events.jsonl.
         report_hash = compute_report_hash(run_dir)
         report_bound_evt = None
         if report_hash is not None:
@@ -218,19 +242,30 @@ def _record_lifecycle_event(
                 },
             )
 
-        # Dual-write the report_bound event to the durable store.
-        if report_bound_evt is not None and durable_store_path is not None:
+        # 5. Write the report_bound event to the durable store.
+        if report_bound_evt is not None and durable_db is not None:
             try:
-                from acp.evidence.durable_store import DurableEventStore
-                with DurableEventStore(durable_store_path) as db:
-                    db.append(report_bound_evt)
-            except Exception as exc:  # noqa: BLE001
+                if durable_tx_active:
+                    durable_db.append(report_bound_evt)
+                else:
+                    durable_db.append(report_bound_evt)
+                    durable_db.commit()
+            except Exception as exc:
                 if durable_mode == "required":
-                    raise  # triggers rollback below
+                    raise  # triggers full rollback below
                 durable_warning = f"durable store write failed: {exc}"
 
-        # Write a lifecycle manifest — a separate record of post-run lifecycle
-        # events. Best-effort; the signed event log is authoritative.
+        # 6. Commit the durable transaction (both events at once).
+        if durable_tx_active:
+            try:
+                durable_db.commit()
+                durable_tx_active = False
+            except Exception as exc:
+                if durable_mode == "required":
+                    raise  # triggers full rollback
+                durable_warning = f"durable store commit failed: {exc}"
+
+        # 7. Write the lifecycle manifest (best-effort).
         try:
             write_lifecycle_manifest(
                 run_dir=run_dir, events_writer=events, report_hash=report_hash
@@ -239,18 +274,50 @@ def _record_lifecycle_event(
             pass
 
     except Exception:
-        # Rollback: truncate events.jsonl to the checkpoint and restore the
-        # hash chain. This removes the lifecycle event AND the report_bound
-        # event, leaving the log as if the lifecycle command never ran.
-        events.rollback(checkpoint)
+        # --- Full rollback: restore ALL evidence files --------------------- #
+        # 1. Restore events.jsonl (truncation + hash chain restore).
+        events.rollback(event_checkpoint)
+
+        # 2. Restore final_report.md.
+        if report_backup is not None:
+            report_path.write_bytes(report_backup)
+        elif report_path.is_file():
+            report_path.unlink()
+
+        # 3. Restore lifecycle_manifest.json.
+        if lifecycle_manifest_backup is not None:
+            lifecycle_manifest_path.write_bytes(lifecycle_manifest_backup)
+        elif lifecycle_manifest_path.is_file():
+            lifecycle_manifest_path.unlink()
+
+        # 4. Roll back the SQLite transaction (undoes both inserts).
+        if durable_tx_active and durable_db is not None:
+            try:
+                durable_db.rollback_transaction()
+            except Exception:  # noqa: BLE001
+                pass  # best-effort; connection close will also undo
+
+        # 5. Close the durable connection.
+        if durable_db is not None:
+            try:
+                durable_db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
         if durable_mode == "required":
             raise ACPError(
-                f"lifecycle event rolled back — durable store write failed "
-                f"(mode=required). The event log has been restored to its "
-                f"pre-lifecycle state.",
+                "lifecycle event aborted — all evidence restored to pre-lifecycle "
+                "state. Durable store write failed (mode=required).",
                 exit_code=1,
             )
         raise
+
+    # Close the durable connection on success.
+    if durable_db is not None:
+        try:
+            durable_db.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     return durable_warning
 
@@ -371,6 +438,12 @@ def verify(
         "--deep",
         help="Deep mode: recompute all declared artifact hashes from disk (slower, stricter).",
     ),
+    check_durable: bool = typer.Option(
+        False,
+        "--check-durable",
+        help="Check that the SQLite durable store contains the same events as events.jsonl. "
+             "Automatically enabled when durable_mode=required.",
+    ),
     debug: bool = typer.Option(
         False,
         "--debug",
@@ -399,7 +472,7 @@ def verify(
     error messages, not tracebacks. Use ``--debug`` to see full tracebacks.
     """
     try:
-        _verify_impl(task_id, runs_root, public_key, deep, debug)
+        _verify_impl(task_id, runs_root, public_key, deep, check_durable, debug)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -414,6 +487,7 @@ def _verify_impl(
     runs_root: Path,
     public_key: Path | None,
     deep: bool,
+    check_durable: bool,
     debug: bool,
 ) -> None:
     """Internal verify implementation — separated for clean error handling."""
@@ -627,6 +701,49 @@ def _verify_impl(
         elif rejected:
             console.print(f"[dim]Final approval state: rejected[/]")
 
+    # 5. Durable store consistency check — when --check-durable is passed
+    # or when durable_mode=required, verify that the SQLite store contains
+    # the same events as events.jsonl. This catches orphan events from
+    # failed lifecycle writes and SQLite/JSONL divergence.
+    from acp.evidence.manifest import read_evidence_config
+    ev_cfg = read_evidence_config(run_dir)
+    durable_store_path = ev_cfg.get("durable_store")
+    durable_mode = ev_cfg.get("durable_mode")
+    should_check_durable = check_durable or durable_mode == "required"
+    if should_check_durable and durable_store_path is not None and events:
+        try:
+            from acp.evidence.durable_store import DurableEventStore
+            with DurableEventStore(durable_store_path) as db:
+                db_events = db.query(task_id=task_id, limit=10000)
+                if len(db_events) == len(events):
+                    # Check that every event in the JSONL log is in SQLite.
+                    jsonl_hashes = {e.hash for e in events}
+                    db_hashes = {e.hash for e in db_events}
+                    if jsonl_hashes == db_hashes:
+                        console.print(
+                            f"[green]✓[/] durable store consistent "
+                            f"({len(db_events)} events match events.jsonl)"
+                        )
+                    else:
+                        missing = jsonl_hashes - db_hashes
+                        extra = db_hashes - jsonl_hashes
+                        console.print(
+                            f"[red]✗[/] durable store inconsistent: "
+                            f"{len(missing)} event(s) missing from SQLite, "
+                            f"{len(extra)} orphan event(s) in SQLite"
+                        )
+                        all_ok = False
+                else:
+                    console.print(
+                        f"[red]✗[/] durable store inconsistent: "
+                        f"events.jsonl has {len(events)} events, "
+                        f"SQLite has {len(db_events)}"
+                    )
+                    all_ok = False
+        except Exception as exc:
+            console.print(f"[red]✗[/] durable store check failed: {exc}")
+            all_ok = False
+
     if all_ok:
         console.print(f"\n[green]✓ All evidence checks passed for task {task_id}.[/]")
     else:
@@ -828,7 +945,7 @@ def approve(
     console.print(f"  vault note: {note_path}")
     console.print(f"  memory_status: {fm.memory_status}")
     console.print(f"  event: human.approved written to {store.events_path(task_id)}")
-    console.print(f"  evidence manifest refreshed — `acp verify` remains valid")
+    console.print(f"  lifecycle evidence written — `acp verify` remains valid")
 
 
 @app.command()
@@ -934,7 +1051,7 @@ def reject(
     console.print(f"  vault note: {note_path}")
     console.print(f"  memory_status: {fm.memory_status}")
     console.print(f"  event: human.rejected written to {store.events_path(task_id)}")
-    console.print(f"  evidence manifest refreshed — `acp verify` remains valid")
+    console.print(f"  lifecycle evidence written — `acp verify` remains valid")
 
 
 @app.command("list")

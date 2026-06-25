@@ -101,6 +101,23 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _should_ignore_path(path: Path, relative_to: Path) -> bool:
+    """Check if a path matches any DEFAULT_IGNORE_PATTERNS entry.
+
+    Supports both exact directory/file name matches (e.g. ``__pycache__``)
+    and glob patterns (e.g. ``*.pyc``).
+    """
+    import fnmatch
+    rel = str(path.relative_to(relative_to))
+    parts = path.parts
+    for pattern in DEFAULT_IGNORE_PATTERNS:
+        # Check if any path component matches the pattern.
+        for part in parts:
+            if fnmatch.fnmatch(part, pattern):
+                return True
+    return False
+
+
 def compute_artifact_content_hash(run_dir: Path) -> str:
     """Compute a hash over just the artifact files (not the event chain).
 
@@ -109,6 +126,9 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
     event). It's used in the ``evidence.finalized`` event payload to bind the
     artifacts to the signed event log: if any artifact is tampered with, this
     hash changes, and the signed event's payload no longer matches.
+
+    Files matching DEFAULT_IGNORE_PATTERNS (``__pycache__``, ``*.pyc``, etc.)
+    are excluded — they are generated junk, not evidence.
     """
     run_dir = Path(run_dir)
     artifacts_dir = run_dir / "artifacts"
@@ -118,6 +138,8 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
             if path.is_file():
                 rel = str(path.relative_to(run_dir))
                 if rel == "artifacts/final_report.md":
+                    continue
+                if _should_ignore_path(path, run_dir):
                     continue
                 artifact_hashes[rel] = _sha256_file(path)
     content = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
@@ -603,6 +625,17 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
             if recomputed_task_hash != expected_task_hash:
                 return False
 
+        # Evidence config hash — binds the evidence *policy* (durable_mode,
+        # durable_store, signing_key_path, public_key_path) to the signed
+        # event log. An operator who downgrades durable_mode from required
+        # to best_effort (or changes the durable_store path) after finalize
+        # breaks this binding.
+        expected_config_hash = finalized.payload.get("evidence_config_hash")
+        if expected_config_hash is not None:
+            recomputed_config_hash = compute_evidence_config_hash(run_dir)
+            if recomputed_config_hash != expected_config_hash:
+                return False
+
     # Verify the evidence.report_bound event — if present, its report_hash
     # must match the on-disk report. After lifecycle events, a SECOND
     # evidence.report_bound event is written with the re-rendered report's
@@ -706,3 +739,29 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None | str]:
         "public_key_path": Path(data["public_key_path"]) if data.get("public_key_path") else None,
         "durable_mode": data.get("durable_mode"),
     }
+
+
+def compute_evidence_config_hash(run_dir: Path) -> str | None:
+    """Compute a sha256 over the run's ``evidence_config.json`` content.
+
+    This hash is recorded in the ``evidence.finalized`` event to bind the
+    evidence *policy* (durable_mode, durable_store path, signing_key_path,
+    public_key_path) to the signed event log. Tampering with any of these
+    fields after finalize breaks the binding — an operator cannot silently
+    downgrade ``durable_mode`` from ``required`` to ``best_effort`` without
+    detection.
+
+    Only the resolved path *strings* are hashed (never key material). The
+    hash uses canonical JSON for determinism.
+    """
+    run_dir = Path(run_dir)
+    config_path = run_dir / EVIDENCE_CONFIG_FILENAME
+    if not config_path.is_file():
+        return None
+    try:
+        data = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return hashlib.sha256(
+        json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

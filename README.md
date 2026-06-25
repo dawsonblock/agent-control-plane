@@ -26,14 +26,16 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.11 alpha — Full evidence binding
+## Current scope: v0.5.12 alpha — Lifecycle transaction integrity
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
-binds the complete evidence record — artifacts, task metadata, and the
-human-facing report — to the signed event log. It is under active hardening
-and should be used for controlled dogfooding, not production autonomous
-operation.
+binds the complete evidence record — artifacts, task metadata, the
+human-facing report, and the evidence policy — to the signed event log.
+Lifecycle writes (approve/reject) are fully transactional: on failure, all
+evidence files are restored to their pre-lifecycle state. It is under active
+hardening and should be used for controlled dogfooding, not production
+autonomous operation.
 
 This repository currently implements:
 
@@ -51,7 +53,8 @@ This repository currently implements:
 | **v0.5.8** | Human approval workflow — `acp approve`, `acp reject`, `acp list`, vault note audit trail | Stable |
 | **v0.5.9** | Approval-safe evidence: lifecycle events signed + manifest-refreshed; fail-closed signing; task_id validation; `EvidenceLoop` quarantined | Stable |
 | **v0.5.10** | Evidence binding: `evidence.finalized` binds artifact content hash to signed event log; composite durable store key; task identity binding; manifest hash recompute; lifecycle manifest; durable mode; `--runs-root`; diff junk filtering; `--debug` on verify | Stable |
-| **v0.5.11** | Full evidence binding: `evidence.finalized` binds artifacts + task.json (immutable fields); `evidence.report_bound` binds the human-facing report; missing manifest/report/lifecycle-manifest fails verification; `durable_mode` persisted + fail-closed lifecycle writes; malformed event log suppresses signature success; `acp verify --deep` mode with `DigestCache`; immutable run manifest + separate lifecycle evidence | Current |
+| **v0.5.11** | Full evidence binding: `evidence.finalized` binds artifacts + task.json (immutable fields); `evidence.report_bound` binds the human-facing report; missing manifest/report/lifecycle-manifest fails verification; `durable_mode` persisted + fail-closed lifecycle writes; malformed event log suppresses signature success; `acp verify --deep` mode with `DigestCache`; immutable run manifest + separate lifecycle evidence | Stable |
+| **v0.5.12** | Lifecycle transaction integrity: full evidence rollback (events.jsonl + final_report.md + lifecycle_manifest.json + SQLite single-transaction); `evidence_config_hash` binds evidence policy to signed event log (prevents silent durable_mode downgrade); `acp verify --check-durable` checks SQLite matches events.jsonl (auto-enabled when durable_mode=required); `DEFAULT_IGNORE_PATTERNS` applied in artifact hashing; task.json.status consistency check; CLI wording corrected | Current |
 | **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
