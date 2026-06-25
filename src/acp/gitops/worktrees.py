@@ -80,3 +80,25 @@ def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -
     # removal. Without this, git may still consider the branch "checked out"
     # in a now-removed worktree, blocking branch deletion.
     repo.git.worktree("prune")
+
+
+def create_worktree_from_ref(
+    repo_path: Path,
+    ref: str,
+    target_path: Path,
+) -> Path:
+    """Create a linked worktree from an arbitrary ref (e.g. a sandbox remote).
+
+    Used by the ``docker_sbx`` executor backend: after the agent finishes
+    inside the sandbox and ACP fetches the sandbox remote, this creates a
+    temporary worktree from the remote's branch so the existing test runner
+    and diff capture can operate on the agent's actual changes.
+
+    Returns the worktree path.
+    """
+    target_path = target_path.resolve()
+    if target_path.exists():
+        raise FileExistsError(f"worktree target already exists: {target_path}")
+    repo = Repo(str(repo_path))
+    repo.git.worktree("add", str(target_path), ref)
+    return target_path

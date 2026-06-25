@@ -62,3 +62,32 @@ context:
 memory:
   graphiti_group_id: my-app
   promote_reports_by_default: false
+
+# Execution backend (v0.5.13). Determines HOW the coding agent runs.
+#
+#   worktree    — traditional git worktree isolation (default). The agent
+#                 edits a linked worktree on a task-specific branch. This is
+#                 workflow isolation, NOT a security sandbox.
+#   docker_sbx  — Docker Sandboxes (sbx) microVM isolation. The agent runs
+#                 inside an isolated microVM with its own Docker daemon,
+#                 filesystem, and network. Clone mode gives the sandbox a
+#                 private Git clone; the host repo is mounted read-only.
+#                 The sandbox exposes its clone as a Git remote so ACP can
+#                 fetch and diff the agent's work.
+#
+# When using docker_sbx, set executor.agent to the agent you want to run
+# inside the sandbox (e.g. "claude", "codex", "copilot"). The agent.default
+# field above is ignored for docker_sbx.
+#
+# Prerequisites for docker_sbx:
+#   - Install sbx: https://docs.docker.com/ai/sandboxes/get-started/
+#   - Run `sbx login` to authenticate
+#   - Store API keys: `sbx secret set -g anthropic`
+executor:
+  backend: worktree
+  # agent: claude              # required when backend: docker_sbx
+  # sandbox_name_prefix: acp   # sandbox name = <prefix>-<task_id>
+  # clone_mode: true           # MUST be true (ACP refuses non-clone mode)
+  # network_policy: locked_down  # open | balanced | locked_down (never open)
+  # remove_after_run: false    # true = remove sandbox after run; false = keep
+

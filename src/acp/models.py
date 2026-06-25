@@ -74,6 +74,9 @@ class EventType(str, Enum):
     NODE_FAILED = "node.failed"
     EVIDENCE_FINALIZED = "evidence.finalized"
     EVIDENCE_REPORT_BOUND = "evidence.report_bound"
+    # v0.5.13: Docker Sandboxes executor backend.
+    SANDBOX_STARTED = "sandbox.started"
+    SANDBOX_STOPPED = "sandbox.stopped"
 
 
 class RiskLevel(str, Enum):

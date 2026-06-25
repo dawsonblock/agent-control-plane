@@ -145,6 +145,74 @@ def capture_diff(
     )
 
 
+def capture_diff_from_remote(
+    repo_path: Path,
+    remote: str,
+    base_branch: str,
+    artifacts_dir: Path,
+    remote_branch: str = "main",
+) -> DiffCapture:
+    """Diff the sandbox remote's branch against ``base_branch``.
+
+    Used by the ``docker_sbx`` executor backend: after the agent finishes
+    inside the sandbox, ACP fetches the sandbox remote and captures the diff
+    between the sandbox's branch and the repo's base branch. The diff comes
+    from the sandbox's private clone, not from host worktree mutation.
+
+    Writes ``diff.patch`` and ``diff_stat.txt`` into ``artifacts_dir``.
+    """
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    repo = Repo(str(repo_path))
+
+    remote_ref = f"{remote}/{remote_branch}"
+
+    # Resolve the base commit.
+    try:
+        base_commit = repo.commit(base_branch)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"base branch not resolvable: {base_branch}") from exc
+
+    # Resolve the remote ref (the sandbox's branch tip).
+    try:
+        remote_commit = repo.commit(remote_ref)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            f"sandbox remote ref not resolvable: {remote_ref}. "
+            f"Did you fetch the remote first?"
+        ) from exc
+
+    # Diff base..remote — the complete delta the agent produced.
+    # Use hexsha strings to ensure git diff works with any ref type.
+    base_sha = base_commit.hexsha
+    remote_sha = remote_commit.hexsha
+    patch = repo.git.diff(base_sha, remote_sha, no_color=True)
+    stat = repo.git.diff(base_sha, remote_sha, stat=True, no_color=True)
+    changed_files, insertions, deletions = _parse_stat(stat)
+
+    # Detect binary files.
+    binary_files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("Binary files ") and " differ" in line:
+            parts = line.split()
+            if len(parts) >= 5:
+                b_path = parts[4]
+                if b_path.startswith("b/"):
+                    b_path = b_path[2:]
+                binary_files.append(b_path)
+
+    (artifacts_dir / "diff.patch").write_text(patch + "\n")
+    (artifacts_dir / "diff_stat.txt").write_text(stat + "\n")
+
+    return DiffCapture(
+        patch=patch,
+        stat=stat,
+        changed_files=changed_files,
+        insertions=insertions,
+        deletions=deletions,
+        binary_files=binary_files,
+    )
+
+
 def _parse_stat(stat_text: str) -> tuple[list[str], int, int]:
     """Extract changed file paths and total +/- from a ``git diff --stat`` block.
 

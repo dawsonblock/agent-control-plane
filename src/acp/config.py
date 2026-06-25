@@ -91,6 +91,49 @@ class MemorySection(BaseModel):
     promote_reports_by_default: bool = False
 
 
+class ExecutorSection(BaseModel):
+    """Sandbox / execution backend settings (v0.5.13).
+
+    - ``backend``: the execution backend. ``"worktree"`` (default) uses the
+      traditional git worktree isolation. ``"docker_sbx"`` uses Docker
+      Sandboxes (``sbx``) to run the agent inside an isolated microVM with
+      its own Docker daemon, filesystem, and network.
+
+    - ``agent``: when backend is ``docker_sbx``, the agent to run inside the
+      sandbox (e.g. ``"claude"``, ``"codex"``, ``"copilot"``). See
+      https://docs.docker.com/ai/sandboxes/get-started/agents/ for the full
+      list. Ignored for the ``worktree`` backend (use ``agent.default``
+      instead).
+
+    - ``sandbox_name_prefix``: prefix for sandbox names. The full name is
+      ``<prefix>-<task_id>``. Default: ``"acp"``.
+
+    - ``clone_mode``: when True (default), the sandbox gets a private Git
+      clone inside the microVM and the host repo is mounted read-only. The
+      sandbox exposes its clone as a ``sandbox-<name>`` remote on the host.
+      **Must be True** — disabling clone mode means the agent edits the host
+      working tree directly, which defeats the isolation boundary. ACP
+      refuses non-clone mode by default.
+
+    - ``network_policy``: the sbx network policy. ``"open"`` allows all
+      traffic. ``"balanced"`` denies by default with common dev sites
+      allowed. ``"locked_down"`` (default) blocks all traffic unless
+      explicitly allowed. ACP should default to ``locked_down`` or
+      ``balanced``, never ``open``.
+
+    - ``remove_after_run``: when True, the sandbox is removed after the run
+      completes (reclaims disk space). When False (default), the sandbox
+      persists and can be inspected or restarted.
+    """
+
+    backend: str = "worktree"
+    agent: str = ""
+    sandbox_name_prefix: str = "acp"
+    clone_mode: bool = True
+    network_policy: str = "locked_down"
+    remove_after_run: bool = False
+
+
 class EvidenceSection(BaseModel):
     """Evidence integrity settings (v0.5.6).
 
@@ -146,6 +189,7 @@ class RepoConfig(BaseModel):
     context: ContextSection = Field(default_factory=ContextSection)
     memory: MemorySection = Field(default_factory=MemorySection)
     evidence: EvidenceSection = Field(default_factory=EvidenceSection)
+    executor: ExecutorSection = Field(default_factory=ExecutorSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

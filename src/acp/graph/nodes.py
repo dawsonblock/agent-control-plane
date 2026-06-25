@@ -28,6 +28,7 @@ from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
+from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.evidence.manifest import (
     build_evidence_manifest,
     compute_artifact_content_hash,
@@ -37,8 +38,8 @@ from acp.evidence.manifest import (
     write_evidence_config,
     write_evidence_manifest,
 )
-from acp.gitops.diff import DiffCapture, capture_diff
-from acp.gitops.worktrees import create_worktree, is_clean
+from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
+from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean, remove_worktree
 from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
@@ -243,11 +244,16 @@ def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
 
 def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    cfg = state["config"]
     repo_path = state["repo_path"]
-    clean = is_clean(repo_path)
+    # For docker_sbx with clone mode, the host repo is mounted read-only.
+    # The agent works inside the sandbox's private clone, so a dirty host
+    # repo is fine — the agent can't modify it.
+    is_sbx = cfg.executor.backend == "docker_sbx"
+    clean = is_clean(repo_path) if not is_sbx else True
     ctx.events.write(
         EventType.REPO_CHECKED,
-        {"repo_path": str(repo_path), "clean": clean},
+        {"repo_path": str(repo_path), "clean": clean, "executor": cfg.executor.backend},
     )
     if not clean:
         # Set status=FAILED so the graph routes to `failed_node`, which writes
@@ -264,6 +270,59 @@ def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
+
+    # --- docker_sbx backend: skip worktree, record sandbox metadata ------- #
+    if cfg.executor.backend == "docker_sbx":
+        try:
+            executor = SbxExecutor(cfg.executor)
+            executor._validate()  # fail-closed: sbx installed, clone mode, etc.
+        except SbxNotInstalledError as exc:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "create_worktree", "reason": "sbx not installed", "detail": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "create_worktree", "reason": "sbx config invalid", "detail": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        # Record the base commit sha (current HEAD of the base branch).
+        from git import Repo
+        repo = Repo(str(state["repo_path"]))
+        base_sha = repo.heads[cfg.repo.default_branch].commit.hexsha
+        task.base_commit_sha = base_sha
+        task.status = TaskStatus.WORKTREE_CREATED
+        ctx.store.save(task)
+
+        sandbox_name = executor.sandbox_name(state["task_id"])
+        sandbox_remote = executor.sandbox_remote(state["task_id"])
+        info = executor.sandbox_info(state["task_id"])
+
+        ctx.events.write(
+            EventType.SANDBOX_STARTED,
+            {
+                "sandbox_name": sandbox_name,
+                "sandbox_remote": sandbox_remote,
+                "executor": info.to_dict(),
+            },
+        )
+        # worktree_path is set to repo_path as a placeholder — the real
+        # worktree (from the sandbox remote) is created after the agent runs.
+        return {
+            "worktree_path": state["repo_path"],
+            "sandbox_name": sandbox_name,
+            "sandbox_remote": sandbox_remote,
+            "sandbox_metadata": info.to_dict(),
+        }
+
+    # --- worktree backend (default): current behavior --------------------- #
     try:
         worktree_path, base_sha = create_worktree(
             repo_path=state["repo_path"],
@@ -312,6 +371,58 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
 def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
+
+    # --- docker_sbx backend: run agent inside sandbox, then fetch remote -- #
+    if cfg.executor.backend == "docker_sbx":
+        executor = SbxExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {"agent": f"sbx:{cfg.executor.agent}", "timeout_seconds": cfg.agent.timeout_seconds},
+        )
+        agent_result = executor.start(
+            task_id=state["task_id"],
+            prompt_path=state["prompt_path"],
+            repo_path=state["repo_path"],
+            artifact_dir=state["artifacts_dir"],
+            timeout_seconds=cfg.agent.timeout_seconds,
+        )
+        if agent_result is None:
+            raise RuntimeError(
+                "sbx executor returned None instead of an AgentResult — "
+                "this is a bug in the executor implementation"
+            )
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+        # After the agent finishes, fetch the sandbox remote and create a
+        # temporary worktree from it so the existing test runner and diff
+        # capture operate on the agent's actual changes.
+        try:
+            executor.fetch_remote(state["repo_path"])
+            sandbox_wt_path = ctx.store.worktree_path(state["task_id"])
+            create_worktree_from_ref(
+                repo_path=state["repo_path"],
+                ref=f"{state['sandbox_remote']}/main",
+                target_path=sandbox_wt_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "reason": "sandbox remote fetch/worktree failed", "detail": str(exc)},
+            )
+        return {
+            "agent_result": agent_result,
+            "worktree_path": sandbox_wt_path if sandbox_wt_path.exists() else state["repo_path"],
+        }
+
+    # --- worktree backend (default): current behavior --------------------- #
     agent = ctx.agent_factory(cfg)
     task.status = TaskStatus.EXECUTING
     ctx.store.save(task)
@@ -379,6 +490,42 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     cfg = state["config"]
     task = state["task"]
     base_sha = task.base_commit_sha or cfg.repo.default_branch
+
+    # --- docker_sbx backend: diff from sandbox remote, not worktree ------- #
+    if cfg.executor.backend == "docker_sbx":
+        sandbox_remote = state.get("sandbox_remote", "")
+        if not sandbox_remote:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "capture_diff", "reason": "no sandbox remote in state"},
+            )
+            return {"status": TaskStatus.FAILED, "error": "no sandbox remote in state"}
+        try:
+            diff: DiffCapture = capture_diff_from_remote(
+                repo_path=state["repo_path"],
+                remote=sandbox_remote,
+                base_branch=base_sha or cfg.repo.default_branch,
+                artifacts_dir=state["artifacts_dir"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "capture_diff", "reason": "sandbox remote diff failed", "detail": str(exc)},
+            )
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+        ctx.events.write(
+            EventType.DIFF_CAPTURED,
+            {
+                "files": len(diff.changed_files),
+                "insertions": diff.insertions,
+                "deletions": diff.deletions,
+                "binary_files": diff.binary_files,
+                "source": "sandbox_remote",
+            },
+        )
+        return {"diff": diff}
+
+    # --- worktree backend (default): current behavior --------------------- #
     diff: DiffCapture = capture_diff(
         worktree_path=state["worktree_path"],
         base_branch=cfg.repo.default_branch,
@@ -521,6 +668,37 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     }
 
 
+def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
+    """Stop or remove the sandbox after a run (docker_sbx backend only).
+
+    Best-effort: writes a ``sandbox.stopped`` event on success, a
+    ``node.failed`` event on failure. Never raises.
+    """
+    cfg = state.get("config")
+    if cfg is None or cfg.executor.backend != "docker_sbx":
+        return
+    sandbox_name = state.get("sandbox_name", "")
+    if not sandbox_name:
+        return
+    try:
+        executor = SbxExecutor(cfg.executor)
+        executor._sandbox_name = sandbox_name
+        executor._sandbox_remote = state.get("sandbox_remote", "")
+        executor.cleanup()
+        ctx.events.write(
+            EventType.SANDBOX_STOPPED,
+            {
+                "sandbox_name": sandbox_name,
+                "removed": cfg.executor.remove_after_run,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {"node": "sandbox_cleanup", "message": str(exc)},
+        )
+
+
 def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal success node. Writes task.completed with gate-derived validation fields."""
     task = state["task"]
@@ -536,6 +714,7 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         },
     )
     manifest_hash = _finalize_evidence(state, ctx)
+    _cleanup_sandbox(state, ctx)
     return {"status": task.status, "manifest_hash": manifest_hash}
 
 
@@ -620,6 +799,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     if report_path is not None:
         state["report_path"] = report_path
     manifest_hash = _finalize_evidence(state, ctx)
+    _cleanup_sandbox(state, ctx)
     return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path, "manifest_hash": manifest_hash}
 
 
@@ -644,11 +824,13 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
         },
     )
+    manifest_hash = _finalize_evidence(state, ctx)
+    _cleanup_sandbox(state, ctx)
     return {
         "status": TaskStatus.NEEDS_REVIEW,
         "report_path": state.get("report_path"),
         "vault_note_path": state.get("vault_note_path"),
-        "manifest_hash": _finalize_evidence(state, ctx),
+        "manifest_hash": manifest_hash,
     }
 
 

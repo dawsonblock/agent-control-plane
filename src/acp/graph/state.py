@@ -76,6 +76,11 @@ class ACPState(TypedDict, total=False):
     # Per-attempt record: {attempt, prompt_path, failures_fixed, still_failing}
     repair_history: list[dict[str, Any]]
 
+    # --- v0.5.13: Docker Sandboxes executor ----------------------------- #
+    sandbox_name: str           # acp-<task_id> when executor is docker_sbx
+    sandbox_remote: str         # sandbox-acp-<task_id> on the host
+    sandbox_metadata: dict[str, Any]  # recorded in sandbox.started event
+
 
 def initial_state(
     *,
