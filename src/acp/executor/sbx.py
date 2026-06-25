@@ -145,10 +145,15 @@ class SbxExecutor:
                 "clone mode so the agent works in an isolated private clone, "
                 "not the host working tree."
             )
-        if self.config.network_policy == "open":
+        # v0.5.15: Strict enum validation for network_policy.
+        # Only locked_down and balanced are allowed. "open" and any
+        # arbitrary string are rejected.
+        allowed_policies = ("locked_down", "balanced")
+        if self.config.network_policy not in allowed_policies:
             raise AgentConfigError(
-                "executor.network_policy='open' is not allowed. Use "
-                "'balanced' or 'locked_down' to restrict sandbox network access."
+                f"executor.network_policy='{self.config.network_policy}' is not valid. "
+                f"Allowed values: {', '.join(allowed_policies)}. "
+                f"'open' is never allowed — ACP enforces network restrictions."
             )
         if not self.config.agent:
             raise AgentConfigError(
@@ -188,10 +193,13 @@ class SbxExecutor:
         stderr_path = artifact_dir / "agent_stderr.txt"
 
         # Build the sbx command.
+        # v0.5.15: Pass the network policy to sbx so it's actually enforced
+        # at the runtime layer, not just recorded in evidence.
         cmd = [
             "sbx", "run",
             "--clone",
             "--name", self._sandbox_name,
+            "--network", self.config.network_policy,
             self.config.agent,
         ]
 

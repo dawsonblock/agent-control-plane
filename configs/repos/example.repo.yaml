@@ -88,6 +88,6 @@ executor:
   # agent: claude              # required when backend: docker_sbx
   # sandbox_name_prefix: acp   # sandbox name = <prefix>-<task_id>
   # clone_mode: true           # MUST be true (ACP refuses non-clone mode)
-  # network_policy: locked_down  # open | balanced | locked_down (never open)
+  # network_policy: locked_down  # locked_down | balanced (strict enum, never open)
   # remove_after_run: false    # true = remove sandbox after run; false = keep
 

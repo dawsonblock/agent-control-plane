@@ -305,8 +305,11 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
         sandbox_remote = executor.sandbox_remote(state["task_id"])
         info = executor.sandbox_info(state["task_id"])
 
+        # v0.5.15: Write sandbox.configured (not sandbox.started) here.
+        # sandbox.started is written only after the sbx actually launches
+        # successfully in run_agent_node. This is intention, not fact.
         ctx.events.write(
-            EventType.SANDBOX_STARTED,
+            EventType.SANDBOX_CONFIGURED,
             {
                 "sandbox_name": sandbox_name,
                 "sandbox_remote": sandbox_remote,
@@ -381,13 +384,43 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             EventType.AGENT_STARTED,
             {"agent": f"sbx:{cfg.executor.agent}", "timeout_seconds": cfg.agent.timeout_seconds},
         )
-        agent_result = executor.start(
-            task_id=state["task_id"],
-            prompt_path=state["prompt_path"],
-            repo_path=state["repo_path"],
-            artifact_dir=state["artifacts_dir"],
-            timeout_seconds=cfg.agent.timeout_seconds,
+
+        # v0.5.15: sandbox.started is written ONLY after sbx actually launches.
+        # If executor.start() fails, we write sandbox.failed instead.
+        try:
+            agent_result = executor.start(
+                task_id=state["task_id"],
+                prompt_path=state["prompt_path"],
+                repo_path=state["repo_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.SANDBOX_FAILED,
+                {
+                    "sandbox_name": state.get("sandbox_name", ""),
+                    "reason": "sbx run failed to start",
+                    "detail": str(exc),
+                },
+            )
+            ctx.events.write(
+                EventType.AGENT_FINISHED,
+                {"agent": f"sbx:{cfg.executor.agent}", "exit_code": -1, "summary": f"sbx failed: {exc}"},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        # sbx launched successfully — now write sandbox.started (fact, not intention).
+        ctx.events.write(
+            EventType.SANDBOX_STARTED,
+            {
+                "sandbox_name": state.get("sandbox_name", ""),
+                "sandbox_remote": state.get("sandbox_remote", ""),
+            },
         )
+
         if agent_result is None:
             raise RuntimeError(
                 "sbx executor returned None instead of an AgentResult — "
@@ -404,12 +437,13 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         # After the agent finishes, fetch the sandbox remote and create a
         # temporary worktree from it so the existing test runner and diff
         # capture operate on the agent's actual changes.
+        # v0.5.15: Use cfg.repo.default_branch instead of hardcoded "main".
         try:
             executor.fetch_remote(state["repo_path"])
             sandbox_wt_path = ctx.store.worktree_path(state["task_id"])
             create_worktree_from_ref(
                 repo_path=state["repo_path"],
-                ref=f"{state['sandbox_remote']}/main",
+                ref=f"{state['sandbox_remote']}/{cfg.repo.default_branch}",
                 target_path=sandbox_wt_path,
             )
         except Exception as exc:  # noqa: BLE001
@@ -506,6 +540,7 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
                 remote=sandbox_remote,
                 base_branch=base_sha or cfg.repo.default_branch,
                 artifacts_dir=state["artifacts_dir"],
+                remote_branch=cfg.repo.default_branch,
             )
         except Exception as exc:  # noqa: BLE001
             ctx.events.write(

@@ -74,8 +74,14 @@ class EventType(str, Enum):
     NODE_FAILED = "node.failed"
     EVIDENCE_FINALIZED = "evidence.finalized"
     EVIDENCE_REPORT_BOUND = "evidence.report_bound"
-    # v0.5.13: Docker Sandboxes executor backend.
+    # v0.5.13+: Docker Sandboxes executor backend.
+    # sandbox.configured = validated but not yet started (intention, not fact)
+    # sandbox.started    = sbx actually launched successfully (fact)
+    # sandbox.failed     = sbx run failed to start or crashed
+    # sandbox.stopped    = sandbox stopped/removed after cleanup
+    SANDBOX_CONFIGURED = "sandbox.configured"
     SANDBOX_STARTED = "sandbox.started"
+    SANDBOX_FAILED = "sandbox.failed"
     SANDBOX_STOPPED = "sandbox.stopped"
 
 

@@ -68,6 +68,11 @@ class DigestCache:
     Reuses cached digests when (size, mtime_ns) match. Re-hashes from disk
     only when the file has changed. Files are streamed in 1 MB chunks —
     never read entirely into memory.
+
+    v0.5.15: The cache can be persisted to disk as ``digest_cache.json``
+    so that repeated ``acp verify`` calls don't re-hash unchanged files.
+    The cache is never the trust root — ``--deep`` mode ignores it and
+    recomputes all hashes from scratch.
     """
 
     def __init__(self) -> None:
@@ -90,6 +95,51 @@ class DigestCache:
             path=key, size=stat.st_size, mtime_ns=stat.st_mtime_ns, sha256=result,
         )
         return result
+
+    # v0.5.15: Persistence — save/load the cache to/from disk.
+
+    def save_to(self, path: Path) -> None:
+        """Persist the cache to ``path`` as JSON.
+
+        The cache file is written atomically (temp file + rename) so a
+        crash mid-write doesn't corrupt it.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            str(r.path): {
+                "size": r.size,
+                "mtime_ns": r.mtime_ns,
+                "sha256": r.sha256,
+            }
+            for r in self._records.values()
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
+        tmp.rename(path)
+
+    @classmethod
+    def load_from(cls, path: Path) -> DigestCache:
+        """Load a cache from ``path``. Returns an empty cache if file missing."""
+        cache = cls()
+        path = Path(path)
+        if not path.is_file():
+            return cache
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return cache  # corrupted cache — start fresh
+        for key, rec in data.items():
+            try:
+                cache._records[key] = DigestRecord(
+                    path=key,
+                    size=rec["size"],
+                    mtime_ns=rec["mtime_ns"],
+                    sha256=rec["sha256"],
+                )
+            except (KeyError, TypeError):
+                continue  # skip malformed entries
+        return cache
 
 
 def _sha256_file(path: Path) -> str:
@@ -272,11 +322,31 @@ def build_evidence_manifest(
                 # *source* artifacts; the report references the manifest hash.
                 if rel == "artifacts/final_report.md":
                     continue
+                # v0.5.15: Apply the same ignore rules as
+                # compute_artifact_content_hash. Ignored/generated files
+                # (e.g. __pycache__, *.pyc) must not appear in the manifest
+                # at all, so fast and deep verification agree on what counts
+                # as evidence.
+                if _should_ignore_path(path, run_dir):
+                    continue
                 artifact_hashes[rel] = _sha256_file(path)
 
     events = events_writer.read_all()
     chain_valid = verify_event_chain(events)
-    chain_head = events_writer.last_hash
+
+    # v0.5.15: The event_chain_head covers only run-phase events — up to
+    # evidence.finalized. Post-run events (evidence.report_bound, lifecycle,
+    # sandbox cleanup) are NOT included in the run manifest's chain head.
+    # This keeps the run manifest immutable while post-run events are
+    # verified separately.
+    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    sandbox_types = {
+        "sandbox.configured", "sandbox.started",
+        "sandbox.failed", "sandbox.stopped",
+    }
+    post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
+    run_phase_events = [e for e in events if e.type.value not in post_run_types]
+    chain_head = run_phase_events[-1].hash if run_phase_events else events_writer.last_hash
 
     manifest: dict[str, Any] = {
         "schema_version": "1.0",
@@ -506,7 +576,16 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # covers all artifacts — individual recompute is redundant. But for
     # older runs without evidence.finalized, fast mode falls back to
     # individual hash checks (there's no content hash to rely on).
-    cache = DigestCache() if deep else None
+    # v0.5.15: Persist the DigestCache to disk so repeated verify calls
+    # don't re-hash unchanged files. In deep mode, the cache is NOT used
+    # — deep mode recomputes everything from scratch (the cache is never
+    # the trust root). In fast mode, the cache is loaded from disk, used
+    # for any individual hash checks, and saved back at the end.
+    cache_path = run_dir / "digest_cache.json"
+    if deep:
+        cache = None
+    else:
+        cache = DigestCache.load_from(cache_path)
     artifacts_dir = run_dir / "artifacts"
 
     # Peek at the event log to determine if evidence.finalized exists.
@@ -542,11 +621,14 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
 
         # Check for extra files not in the manifest (final_report.md is excluded
         # — it's a projection, not source evidence).
+        # v0.5.15: Apply the same ignore rules as build_evidence_manifest
+        # and compute_artifact_content_hash. Ignored/generated files (e.g.
+        # __pycache__, *.pyc) must not trigger a deep verification failure.
         if artifacts_dir.is_dir():
             on_disk = {
                 str(p.relative_to(run_dir))
                 for p in artifacts_dir.rglob("*")
-                if p.is_file()
+                if p.is_file() and not _should_ignore_path(p, run_dir)
             }
             on_disk.discard("artifacts/final_report.md")
             manifest_files = set(manifest.get("artifacts", {}).keys())
@@ -583,13 +665,23 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
 
     # Detect lifecycle + post-run events.
     lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
-    post_run_types = lifecycle_types | {"evidence.report_bound"}
+    # v0.5.15: Sandbox events are executor lifecycle events, not run-phase
+    # events. They happen after evidence.finalized (cleanup) or before the
+    # agent runs (configured). The run manifest's event_chain_head covers
+    # only run-phase events up to evidence.finalized. Sandbox cleanup events
+    # (sandbox.stopped, sandbox.failed) must not break the run manifest.
+    sandbox_types = {
+        "sandbox.configured", "sandbox.started",
+        "sandbox.failed", "sandbox.stopped",
+    }
+    post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
     has_lifecycle = any(e.type.value in lifecycle_types for e in events)
 
     # The manifest's event_chain_head covers the run phase only — up to
-    # evidence.finalized. Post-run events (evidence.report_bound, lifecycle)
-    # are NOT included in the run manifest's chain head. This keeps the run
-    # manifest immutable while post-run events are verified separately.
+    # evidence.finalized. Post-run events (evidence.report_bound, lifecycle,
+    # sandbox cleanup) are NOT included in the run manifest's chain head.
+    # This keeps the run manifest immutable while post-run events are
+    # verified separately.
     run_phase_events = [e for e in events if e.type.value not in post_run_types]
     if run_phase_events:
         if run_phase_events[-1].hash != manifest.get("event_chain_head"):
@@ -653,6 +745,15 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
             actual_report_hash = _sha256_file(report_path)
             if actual_report_hash != expected_report_hash:
                 return False  # report tampered with or doesn't match signed binding
+
+    # v0.5.15: Persist the digest cache for future fast-mode verifications.
+    # Only save if we actually used the cache (fast mode). Deep mode never
+    # populates the cache, so there's nothing to save.
+    if cache is not None:
+        try:
+            cache.save_to(cache_path)
+        except OSError:
+            pass  # cache persistence is best-effort, not critical
 
     return True
 

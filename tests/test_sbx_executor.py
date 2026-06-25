@@ -136,7 +136,7 @@ class TestCloneModeEnforced:
         cfg = _executor_config(network_policy="open")
         executor = SbxExecutor(cfg)
         with _mock_sbx_installed():
-            with pytest.raises(Exception, match="network_policy='open' is not allowed"):
+            with pytest.raises(Exception, match="network_policy='open'"):
                 executor._validate()
 
     def test_validate_raises_when_agent_empty(self):
