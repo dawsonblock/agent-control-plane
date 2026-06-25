@@ -96,6 +96,8 @@ def build_evidence_manifest(
     chain_head = events_writer.last_hash
 
     manifest: dict[str, Any] = {
+        "schema_version": "1.0",
+        "manifest_type": "run",
         "task_id": events_writer.task_id,
         "event_count": events_writer.count,
         "event_chain_head": chain_head,
@@ -125,6 +127,132 @@ def write_evidence_manifest(
     return manifest_path, manifest["manifest_hash"]
 
 
+# --------------------------------------------------------------------------- #
+# Lifecycle manifest — separate from the run manifest
+# --------------------------------------------------------------------------- #
+#
+# The run manifest (evidence_manifest.json) is written at finalize time and
+# covers the agent-run artifacts + event chain. After lifecycle events
+# (approve/reject), the event log grows but the run artifacts don't change.
+# Rather than treating the run manifest as mutable, we write a separate
+# lifecycle_manifest.json that covers only the lifecycle events
+# (human.approved, human.rejected, memory.promoted). This keeps the run
+# evidence immutable while still providing a verifiable record of lifecycle
+# actions.
+
+
+def build_lifecycle_manifest(
+    *,
+    run_dir: Path,
+    events_writer: EventWriter,
+) -> dict[str, Any]:
+    """Build the lifecycle manifest dict for a run with post-run lifecycle events.
+
+    Covers only lifecycle events (human.approved, human.rejected,
+    memory.promoted). The run manifest covers the agent-run evidence;
+    this covers what happened after the run.
+    """
+    run_dir = Path(run_dir)
+    all_events = events_writer.read_all()
+    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    lifecycle_events = [e for e in all_events if e.type.value in lifecycle_types]
+
+    manifest: dict[str, Any] = {
+        "schema_version": "1.0",
+        "manifest_type": "lifecycle",
+        "task_id": events_writer.task_id,
+        "lifecycle_event_count": len(lifecycle_events),
+        "lifecycle_events": [
+            {
+                "event_id": e.event_id,
+                "type": e.type.value,
+                "timestamp": e.timestamp,
+                "hash": e.hash,
+                "signed": bool(e.signature),
+            }
+            for e in lifecycle_events
+        ],
+    }
+    manifest_content = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    manifest["manifest_hash"] = hashlib.sha256(manifest_content.encode()).hexdigest()
+    return manifest
+
+
+def write_lifecycle_manifest(
+    *,
+    run_dir: Path,
+    events_writer: EventWriter,
+) -> Path | None:
+    """Write ``lifecycle_manifest.json`` into the run dir.
+
+    Returns the manifest path, or ``None`` if there are no lifecycle events
+    (nothing to record).
+    """
+    manifest = build_lifecycle_manifest(run_dir=run_dir, events_writer=events_writer)
+    if manifest["lifecycle_event_count"] == 0:
+        return None
+    manifest_path = Path(run_dir) / "lifecycle_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest_path
+
+
+def verify_lifecycle_manifest(run_dir: Path) -> bool:
+    """Verify the lifecycle manifest against the event log.
+
+    Returns ``True`` if the lifecycle manifest exists and its content matches
+    the lifecycle events in the event log, ``False`` otherwise. Returns ``True``
+    if no lifecycle manifest exists (no lifecycle events → no manifest needed).
+    """
+    run_dir = Path(run_dir)
+    manifest_path = run_dir / "lifecycle_manifest.json"
+    if not manifest_path.is_file():
+        return True  # no lifecycle manifest = no lifecycle events = OK
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    # Verify manifest_hash.
+    stored_hash = manifest.pop("manifest_hash", None)
+    recomputed = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if stored_hash != recomputed:
+        return False
+    manifest["manifest_hash"] = stored_hash
+
+    # Verify lifecycle events match the event log.
+    events_path = run_dir / "events.jsonl"
+    if not events_path.is_file():
+        return False
+    from acp.models import Event
+    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    actual_lifecycle: list[Event] = []
+    for line in events_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            evt = Event.model_validate_json(line)
+            if evt.type.value in lifecycle_types:
+                actual_lifecycle.append(evt)
+        except Exception:
+            continue
+
+    recorded = manifest.get("lifecycle_events", [])
+    if len(recorded) != len(actual_lifecycle):
+        return False
+    for rec, actual in zip(recorded, actual_lifecycle):
+        if rec.get("event_id") != actual.event_id:
+            return False
+        if rec.get("hash") != actual.hash:
+            return False
+        if rec.get("type") != actual.type.value:
+            return False
+
+    return True
+
+
 def verify_evidence_manifest(run_dir: Path) -> bool:
     """Verify that the on-disk artifacts + event log match the manifest.
 
@@ -146,6 +274,12 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, ValueError):
+        return False
+
+    # Check schema version — reject unknown major versions.
+    schema_version = manifest.get("schema_version", "0")
+    major = schema_version.split(".")[0]
+    if major not in ("0", "1"):  # 0 = pre-versioning manifests (backward compat)
         return False
 
     # Verify the manifest's own hash — recompute from content excluding
@@ -203,14 +337,17 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
     if events[-1].hash != manifest.get("event_chain_head"):
         return False
 
-    # Verify the evidence.finalized event — if present, its artifact_content_hash
-    # must match the recomputed artifact content hash. This is what binds artifacts
-    # to the signed event log. If an attacker tampers with an artifact and
-    # updates the manifest to match, the evidence.finalized event's payload
-    # still has the old hash — and that event is signed and hash-chained.
+    # Verify the evidence.finalized event — if present, its payload hashes
+    # must match the recomputed values from disk. This is what binds artifacts,
+    # the report, and task.json to the signed event log. If an attacker tampers
+    # with any of these and updates the manifest to match, the evidence.finalized
+    # event's payload still has the old hashes — and that event is signed and
+    # hash-chained.
     finalized_events = [e for e in events if e.type == EventType.EVIDENCE_FINALIZED]
     if finalized_events:
         finalized = finalized_events[-1]
+
+        # Artifact content hash.
         expected_artifact_hash = finalized.payload.get("artifact_content_hash")
         recomputed_artifact_hash = compute_artifact_content_hash(run_dir)
         if expected_artifact_hash != recomputed_artifact_hash:

@@ -95,16 +95,27 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         manifest_hash = manifest["manifest_hash"]
         artifact_count = len(manifest.get("artifacts", {}))
 
-        # 3. Write the evidence.finalized event — this binds the artifacts to
-        # the signed event log. The artifact_content_hash is stable (doesn't
+        # 3. Determine final status from the state.
+        # Note: we do NOT bind report_hash or task_json_hash because both are
+        # mutable after the run — the report is re-rendered when the manifest
+        # changes, and task.json changes when the task status is updated.
+        # The artifact_content_hash is the stable binding that proves the
+        # physical evidence hasn't been tampered with. Task identity is bound
+        # by the identity checks in acp verify (CLI == dir == manifest == events).
+        final_status = str(state.get("status", "unknown"))
+
+        # 4. Write the evidence.finalized event — this binds the artifacts
+        # to the signed event log. The artifact_content_hash is stable (doesn't
         # change when the chain head changes), so it can be verified later
         # even though the manifest is rewritten after this event.
         ctx.events.write(
             EventType.EVIDENCE_FINALIZED,
             {
+                "task_id": state["task_id"],
                 "artifact_content_hash": artifact_content_hash,
                 "artifact_count": artifact_count,
                 "event_chain_head_before_finalize": ctx.events.last_hash,
+                "final_status": final_status,
             },
         )
 
@@ -336,6 +347,7 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             "files": len(diff.changed_files),
             "insertions": diff.insertions,
             "deletions": diff.deletions,
+            "binary_files": diff.binary_files,
         },
     )
     return {"diff": diff}
@@ -351,6 +363,12 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         repo_config=cfg,
         artifacts_dir=state["artifacts_dir"],
     )
+    # Add binary file warnings as review concerns — binary changes are hard
+    # to review and should be flagged for human attention.
+    diff = state["diff"]
+    if hasattr(diff, "binary_files") and diff.binary_files:
+        for bf in diff.binary_files:
+            review.concerns.append(f"binary file changed: {bf}")
     ctx.events.write(
         EventType.REVIEW_COMPLETED,
         {
@@ -367,7 +385,7 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     review = state.get("review_result")
     agent_result = state.get("agent_result")
     command_results = state.get("command_results", [])
-    diff = state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0))
+    diff = state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0, binary_files=[]))
 
     # Evaluate gates directly — GateResult is now the single truth object.
     gate_result = evaluate_final_gates(

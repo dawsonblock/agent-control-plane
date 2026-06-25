@@ -7,11 +7,28 @@ This module is the single source of truth for that schema.
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+
+class DurableMode(str, Enum):
+    """Durable store operational mode.
+
+    - ``disabled``: No SQLite writes. The durable store path is ignored.
+    - ``best_effort``: SQLite failures are recorded as warnings but don't
+      block the run. The JSONL log is canonical; SQLite is a derived index.
+    - ``required``: SQLite failures are fatal. The run cannot succeed if
+      the durable store cannot be written to. Use this when the SQLite
+      store is a required evidence artifact, not just a query index.
+    """
+
+    DISABLED = "disabled"
+    BEST_EFFORT = "best_effort"
+    REQUIRED = "required"
 
 
 # --------------------------------------------------------------------------- #
@@ -89,6 +106,13 @@ class EvidenceSection(BaseModel):
       SQLite store (queryable index). The SQLite store uses WAL mode +
       synchronous=FULL for transactional durability.
 
+    - ``durable_mode``: controls how SQLite write failures are handled.
+      ``disabled`` (default if no durable_store): no SQLite writes.
+      ``best_effort`` (default if durable_store is set): failures are
+      recorded as warnings but don't block the run.
+      ``required``: failures are fatal — the run cannot succeed if the
+      durable store cannot be written to.
+
     - ``public_key_path``: path to a file containing a 32-byte raw Ed25519
       public key. Used by ``acp verify`` to check event signatures. Not
       required for signing (only for verification).
@@ -97,6 +121,7 @@ class EvidenceSection(BaseModel):
     signing_key_path: Path | None = None
     public_key_path: Path | None = None
     durable_store: Path | None = None
+    durable_mode: DurableMode = DurableMode.BEST_EFFORT
 
     @field_validator("signing_key_path", "public_key_path", "durable_store")
     @classmethod

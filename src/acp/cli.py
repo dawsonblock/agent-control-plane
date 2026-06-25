@@ -181,6 +181,15 @@ def _record_lifecycle_event(
     # against manifest.event_chain_head, so this must be current.
     write_evidence_manifest(run_dir=run_dir, events_writer=events)
 
+    # Write a lifecycle manifest — a separate record of post-run lifecycle
+    # events (approve/reject). This keeps the run evidence immutable while
+    # providing a verifiable record of lifecycle actions.
+    try:
+        from acp.evidence.manifest import write_lifecycle_manifest
+        write_lifecycle_manifest(run_dir=run_dir, events_writer=events)
+    except Exception:  # noqa: BLE001
+        pass  # best-effort; the event log is authoritative
+
     # Re-render the report so its event timeline + manifest hash reflect the
     # updated event log. Without this, the report shows stale evidence after
     # lifecycle events — the report claims one hash while the manifest has another.
@@ -244,6 +253,12 @@ def run(
         report_path = result.get("report_path")
         vault_note_path = result.get("vault_note_path")
 
+        # Surface durable-store warnings to the operator.
+        durable_warnings = result.get("durable_store_warnings")
+        if durable_warnings:
+            for w in durable_warnings:
+                console.print(f"[yellow]![/] durable store: {w}")
+
         # Print output that reflects the actual outcome — no green checkmarks
         # on failures or missing evidence. A failed run must look failed.
         if status == TaskStatus.PASSED:
@@ -298,6 +313,11 @@ def verify(
         "--public-key",
         help="Path to a 32-byte raw Ed25519 public key for signature verification.",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Show full Python tracebacks on errors (for developers).",
+    ),
 ) -> None:
     """Verify the evidence integrity of a completed run.
 
@@ -311,8 +331,25 @@ def verify(
       5. (Optional) Ed25519 event signatures are valid
 
     Exits 0 if all checks pass, 1 if any fail. Malformed data produces clean
-    error messages, not tracebacks.
+    error messages, not tracebacks. Use ``--debug`` to see full tracebacks.
     """
+    from acp.events import verify_event_chain, verify_event_signatures
+    from acp.evidence.manifest import verify_evidence_manifest
+    from acp.models import Event, EventType
+
+    try:
+        _verify_impl(task_id, runs_root, public_key, debug)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if debug:
+            raise
+        console.print(f"[red]✗[/] verification error: {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: bool) -> None:
+    """Internal verify implementation — separated for clean error handling."""
     from acp.events import verify_event_chain, verify_event_signatures
     from acp.evidence.manifest import verify_evidence_manifest
     from acp.models import Event, EventType
@@ -439,6 +476,26 @@ def verify(
             except Exception as exc:
                 console.print(f"[red]✗[/] signature verification error: {exc}")
                 all_ok = False
+
+    # 4. Lifecycle manifest (if lifecycle events exist).
+    from acp.evidence.manifest import verify_lifecycle_manifest
+    lifecycle_path = run_dir / "lifecycle_manifest.json"
+    if lifecycle_path.is_file():
+        if verify_lifecycle_manifest(run_dir):
+            console.print(f"[green]✓[/] lifecycle manifest valid")
+        else:
+            console.print(f"[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
+            all_ok = False
+
+    # Report final approval state if present.
+    if events:
+        from acp.models import EventType as _ET
+        approved = any(e.type == _ET.HUMAN_APPROVED for e in events)
+        rejected = any(e.type == _ET.HUMAN_REJECTED for e in events)
+        if approved:
+            console.print(f"[dim]Final approval state: approved[/]")
+        elif rejected:
+            console.print(f"[dim]Final approval state: rejected[/]")
 
     if all_ok:
         console.print(f"\n[green]✓ All evidence checks passed for task {task_id}.[/]")

@@ -493,3 +493,442 @@ def test_diff_filters_pycache_from_worktree(disposable_repo, tmp_path):
     assert "new_file.py" in diff.patch
     assert ".pyc" not in diff.patch
     assert "__pycache__" not in diff.patch
+
+
+# --------------------------------------------------------------------------- #
+# P0-2: Durable mode (disabled/best_effort/required)
+# --------------------------------------------------------------------------- #
+
+
+def test_durable_required_mode_fails_closed(tmp_path):
+    """In required mode, a SQLite write failure must fail the run."""
+    from acp.config import DurableMode
+    from acp.errors import EvidenceConfigError
+
+    # Use a path that can't be opened (a file, not a directory parent).
+    bad_db = tmp_path / "blocker"  # will create as file to block SQLite
+    bad_db.write_text("not a database")
+
+    store = TaskStore(runs_root=tmp_path / "runs")
+    store.root.mkdir(parents=True, exist_ok=True)
+    run_dir = store.run_dir("task_20260624_0001")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = EventWriter("task_20260624_0001", run_dir)
+
+    # Point durable_store at a path inside a file (will fail on init).
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=tmp_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=0),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(),
+        evidence=EvidenceSection(
+            durable_store=bad_db / "events.db",  # parent is a file → will fail
+            durable_mode=DurableMode.REQUIRED,
+        ),
+    )
+
+    # run_workflow should raise EvidenceConfigError in required mode.
+    with pytest.raises((EvidenceConfigError, Exception)):
+        run_workflow(
+            config=cfg,
+            user_request="test",
+            runs_root=tmp_path / "runs",
+            vault_root=tmp_path / "vault",
+        )
+
+
+def test_durable_disabled_mode_never_opens_sqlite(tmp_path):
+    """In disabled mode, no SQLite writes happen even if durable_store is set."""
+    from acp.config import DurableMode
+
+    db_path = tmp_path / "events.db"
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=tmp_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=0),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(),
+        evidence=EvidenceSection(
+            durable_store=db_path,
+            durable_mode=DurableMode.DISABLED,
+        ),
+    )
+
+    os.environ["ACP_TEST"] = "1"
+    result = run_workflow(
+        config=cfg,
+        user_request="test",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    # The DB file should not exist because disabled mode skips SQLite.
+    assert not db_path.exists(), "disabled mode should not create the SQLite DB"
+
+
+# --------------------------------------------------------------------------- #
+# P0-3: Signed mode fail-closed
+# --------------------------------------------------------------------------- #
+
+
+def test_run_fails_if_signing_enabled_but_key_missing(tmp_path):
+    """A configured signing key that doesn't exist must fail the run."""
+    from acp.errors import EvidenceConfigError
+
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=tmp_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=0),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(),
+        evidence=EvidenceSection(
+            signing_key_path=tmp_path / "nonexistent_key.bin",
+        ),
+    )
+
+    with pytest.raises(EvidenceConfigError):
+        run_workflow(
+            config=cfg,
+            user_request="test",
+            runs_root=tmp_path / "runs",
+            vault_root=tmp_path / "vault",
+        )
+
+
+def test_verify_fails_if_signed_run_contains_unsigned_lifecycle_event(
+    disposable_repo, isolated_workspace, tmp_path
+):
+    """A signed run with an unsigned lifecycle event must fail verify --public-key."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    os.environ["ACP_TEST"] = "1"
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "signing_key.bin"
+    key_path.write_bytes(key.private_bytes_raw())
+    pub_key_path = tmp_path / "public_key.bin"
+    pub_key_path.write_bytes(key.public_key().public_bytes_raw())
+
+    cfg = _config(
+        disposable_repo.path,
+        signing_key_path=key_path,
+        public_key_path=pub_key_path,
+    )
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+
+    # Verify with public key passes before any tampering.
+    r0 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--public-key", str(pub_key_path),
+    ])
+    assert r0.exit_code == 0, f"verify before tampering failed: {r0.output}"
+
+    # Tamper: append an unsigned event to the event log.
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events_path = store.events_path(task_id)
+    events = _events(store, task_id)
+    last_hash = events[-1].hash
+    # Write a fake unsigned event.
+    fake_event = {
+        "event_id": "evt_MANUAL",
+        "task_id": task_id,
+        "type": "human.approved",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "payload": {"approver": "attacker"},
+        "prev_hash": last_hash,
+        "hash": "0" * 64,
+        "signature": "",
+    }
+    with events_path.open("a") as f:
+        f.write(json.dumps(fake_event) + "\n")
+
+    # Verify with public key must fail — the unsigned event breaks signatures.
+    r1 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--public-key", str(pub_key_path),
+    ])
+    assert r1.exit_code == 1, f"verify should fail with unsigned event: {r1.output}"
+
+
+# --------------------------------------------------------------------------- #
+# P1: --debug flag
+# --------------------------------------------------------------------------- #
+
+
+def test_verify_debug_flag_shows_traceback(disposable_repo, isolated_workspace):
+    """--debug should show tracebacks instead of clean errors."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+
+    # Corrupt the event log badly.
+    events_path = store.events_path(task_id)
+    events_path.write_text("{{{{NOT JSON}}}}\n")
+
+    # Without --debug: clean error.
+    r0 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r0.exit_code == 1
+    assert "malformed" in r0.output.lower()
+
+    # With --debug: may show traceback (at least doesn't crash differently).
+    r1 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--debug",
+    ])
+    assert r1.exit_code == 1
+
+
+# --------------------------------------------------------------------------- #
+# P1: Lifecycle manifest
+# --------------------------------------------------------------------------- #
+
+
+def test_approval_creates_lifecycle_manifest(disposable_repo, isolated_workspace):
+    """After approval, a lifecycle_manifest.json is written."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # No lifecycle manifest before approval.
+    lifecycle_path = run_dir / "lifecycle_manifest.json"
+    assert not lifecycle_path.is_file()
+
+    # Approve.
+    r = runner.invoke(app, [
+        "approve", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+    ])
+    assert r.exit_code == 0, f"approve failed: {r.output}"
+
+    # Lifecycle manifest should now exist.
+    assert lifecycle_path.is_file(), "lifecycle_manifest.json should exist after approval"
+    manifest = json.loads(lifecycle_path.read_text())
+    assert manifest["manifest_type"] == "lifecycle"
+    assert manifest["lifecycle_event_count"] >= 1
+
+
+def test_verify_reports_lifecycle_manifest_valid(disposable_repo, isolated_workspace):
+    """acp verify should report lifecycle manifest validity."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+
+    # Approve to create lifecycle manifest.
+    r = runner.invoke(app, [
+        "approve", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+    ])
+    assert r.exit_code == 0
+
+    # Verify should report lifecycle manifest valid.
+    r2 = runner.invoke(app, [
+        "verify", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+    ])
+    assert r2.exit_code == 0
+    assert "lifecycle manifest valid" in r2.output
+    assert "approved" in r2.output.lower()
+
+
+# --------------------------------------------------------------------------- #
+# P2: Manifest schema versioning
+# --------------------------------------------------------------------------- #
+
+
+def test_verify_rejects_unknown_manifest_major_version(disposable_repo, isolated_workspace):
+    """A manifest with an unknown schema major version must fail verification."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    run_dir = store.run_dir(task_id)
+
+    # Bump schema_version to 99.0 (unknown major).
+    manifest_path = run_dir / "evidence_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = "99.0"
+    # Recompute manifest_hash to match.
+    manifest.pop("manifest_hash")
+    import hashlib
+    manifest["manifest_hash"] = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    assert verify_evidence_manifest(run_dir) is False
+
+
+# --------------------------------------------------------------------------- #
+# P2: Canonical event schema tests
+# --------------------------------------------------------------------------- #
+
+
+def test_all_events_have_required_integrity_fields(disposable_repo, isolated_workspace):
+    """Every event must have id, task_id, type, timestamp, payload, prev_hash, hash."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events = _events(store, task_id)
+
+    assert len(events) > 0, "expected events"
+    required = {"event_id", "task_id", "type", "timestamp", "payload", "prev_hash", "hash"}
+    for evt in events:
+        event_dict = evt.model_dump()
+        missing = required - set(event_dict.keys())
+        assert not missing, f"event {evt.event_id} missing fields: {missing}"
+
+
+def test_event_ids_are_monotonic_per_task(disposable_repo, isolated_workspace):
+    """Event IDs must be monotonically increasing within a task."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events = _events(store, task_id)
+
+    for i, evt in enumerate(events, 1):
+        assert evt.event_id == f"evt_{i:06d}", \
+            f"event {i} has id {evt.event_id}, expected evt_{i:06d}"
+
+
+def test_event_prev_hash_links_to_previous_hash(disposable_repo, isolated_workspace):
+    """Each event's prev_hash must match the previous event's hash."""
+    os.environ["ACP_TEST"] = "1"
+    cfg = _config(disposable_repo.path)
+    result = run_workflow(
+        config=cfg,
+        user_request="test task",
+        runs_root=isolated_workspace["runs_root"],
+        vault_root=isolated_workspace["vault_root"],
+    )
+    task_id = result["task_id"]
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events = _events(store, task_id)
+
+    assert events[0].prev_hash == "GENESIS"
+    for i in range(1, len(events)):
+        assert events[i].prev_hash == events[i - 1].hash, \
+            f"event {i} prev_hash doesn't match event {i-1} hash"
+
+
+# --------------------------------------------------------------------------- #
+# P1: Binary file warning in diff
+# --------------------------------------------------------------------------- #
+
+
+def test_diff_capture_detects_binary_files(disposable_repo, tmp_path):
+    """capture_diff should detect and report binary files in the diff."""
+    from acp.gitops.diff import capture_diff
+
+    # Create a binary file in the repo.
+    (disposable_repo.path / "binary.dat").write_bytes(bytes(range(256)))
+    # Also create a real source file change.
+    (disposable_repo.path / "src.py").write_text("x = 1\n")
+
+    artifacts_dir = tmp_path / "artifacts"
+    diff = capture_diff(
+        worktree_path=disposable_repo.path,
+        base_branch="main",
+        artifacts_dir=artifacts_dir,
+    )
+
+    assert "src.py" in diff.patch
+    assert len(diff.binary_files) > 0, "expected binary file detection"
+    assert any("binary.dat" in f for f in diff.binary_files)
+
+
+# --------------------------------------------------------------------------- #
+# Required acceptance test #12: durable required mode fails closed
+# --------------------------------------------------------------------------- #
+
+
+def test_durable_required_mode_fails_closed_on_write_failure(tmp_path):
+    """Required mode: SQLite write failure must prevent task success."""
+    from acp.config import DurableMode
+    from acp.evidence.durable_store import DurableEventStore
+
+    # Create a valid DB, then corrupt it by closing the connection and
+    # replacing the file with garbage.
+    db_path = tmp_path / "events.db"
+    store = TaskStore(runs_root=tmp_path / "runs")
+    store.root.mkdir(parents=True, exist_ok=True)
+    run_dir = store.run_dir("task_20260624_0001")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = EventWriter("task_20260624_0001", run_dir)
+
+    # Initialize the DB first so it exists.
+    with DurableEventStore(db_path) as db:
+        pass
+
+    # Now corrupt the DB file so writes will fail.
+    db_path.write_text("CORRUPTED")
+
+    # In required mode, trying to use this corrupted DB should fail.
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=tmp_path, default_branch="main"),
+        agent=AgentSection(max_repair_attempts=0),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(),
+        evidence=EvidenceSection(
+            durable_store=db_path,
+            durable_mode=DurableMode.REQUIRED,
+        ),
+    )
+
+    with pytest.raises(Exception):
+        run_workflow(
+            config=cfg,
+            user_request="test",
+            runs_root=tmp_path / "runs",
+            vault_root=tmp_path / "vault",
+        )

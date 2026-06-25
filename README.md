@@ -26,7 +26,12 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.9 alpha — Trust-layer stabilization (approval-safe evidence)
+## Current scope: v0.5.10 alpha — Evidence binding (signed artifact evidence)
+
+ACP provides a local evidence loop with hash-chained events, optional Ed25519
+signing, artifact manifests, and human approval workflow. The trust layer is
+under active hardening and should be used for controlled dogfooding, not
+production autonomous operation.
 
 This repository currently implements:
 
@@ -38,11 +43,13 @@ This repository currently implements:
 | **M3** | LangGraph state machine | Stable (default + only engine) |
 | **M4** | Repair loop — bounded retry on test failure | Stable |
 | **M5** | Review hardening — risk taxonomy, secret scanner, `GateResult` artifact | Stable |
-| **v0.5.x** | Gate consolidation, `--legacy` removed, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence, CLI honesty | Stable |
+| **v0.5.x** | Gate consolidation, hash-chained event log, evidence manifest, `acp cleanup`, CI workflow, early-failure evidence | Stable |
 | **v0.5.6** | fsync'd event writes, Ed25519 event signing, event timeline in report, SQLite durable event store | Stable |
-| **v0.5.7** | Config-driven signing + durable store, `acp verify` + `acp events` CLI commands, durable task store | Stable |
+| **v0.5.7** | Config-driven signing + durable store, `acp verify` + `acp events` CLI commands | Stable |
 | **v0.5.8** | Human approval workflow — `acp approve`, `acp reject`, `acp list`, vault note audit trail | Stable |
-| **v0.5.9** | Approval-safe evidence: lifecycle events signed + manifest-refreshed so `acp verify` survives approve/reject; fail-closed signing; task_id validation; early-failure report is a true final projection; `EvidenceLoop` quarantined out of the CLI | Current |
+| **v0.5.9** | Approval-safe evidence: lifecycle events signed + manifest-refreshed; fail-closed signing; task_id validation; `EvidenceLoop` quarantined | Stable |
+| **v0.5.10** | Evidence binding: `evidence.finalized` event binds artifacts+report+task.json to signed event log; composite durable store key; task identity binding; manifest hash recompute; lifecycle manifest; durable mode (disabled/best_effort/required); `--runs-root` on `acp run`; diff junk filtering; `--debug` on verify | Current |
+| **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.
 

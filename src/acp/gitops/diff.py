@@ -40,6 +40,11 @@ class DiffCapture:
     changed_files: list[str]
     insertions: int
     deletions: int
+    binary_files: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.binary_files is None:
+            self.binary_files = []
 
 
 def _matches_ignore_pattern(path_str: str) -> bool:
@@ -112,6 +117,21 @@ def capture_diff(
     stat = repo.git.diff(base_commit, cached=True, stat=True, no_color=True)
     changed_files, insertions, deletions = _parse_stat(stat)
 
+    # Detect binary files in the diff — git marks them as
+    # "Binary files a/path and b/path differ" or
+    # "Binary files /dev/null and b/path differ"
+    binary_files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("Binary files ") and " differ" in line:
+            # Extract the file path from "Binary files <old> and <new> differ"
+            parts = line.split()
+            if len(parts) >= 5:
+                # Use the "b/" version (the new file) — parts[4]
+                b_path = parts[4]
+                if b_path.startswith("b/"):
+                    b_path = b_path[2:]
+                binary_files.append(b_path)
+
     (artifacts_dir / "diff.patch").write_text(patch + "\n")
     (artifacts_dir / "diff_stat.txt").write_text(stat + "\n")
 
@@ -121,6 +141,7 @@ def capture_diff(
         changed_files=changed_files,
         insertions=insertions,
         deletions=deletions,
+        binary_files=binary_files,
     )
 
 

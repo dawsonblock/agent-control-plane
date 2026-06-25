@@ -291,17 +291,25 @@ def run_workflow(
     # Wire SQLite durable store if configured. The store is additive: events
     # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
     # EventWriter's write method to dual-write.
+    #
+    # Durable mode controls failure behavior:
+    #   - disabled: no SQLite writes (durable_store path is ignored)
+    #   - best_effort: failures are recorded as warnings, run continues
+    #   - required: failures are fatal — the run cannot succeed
     durable_store = None
     durable_store_failures: list[str] = []
-    if evidence_cfg and evidence_cfg.durable_store:
+    durable_mode = "best_effort"
+    if evidence_cfg:
+        durable_mode = evidence_cfg.durable_mode.value if hasattr(evidence_cfg.durable_mode, "value") else str(evidence_cfg.durable_mode)
+
+    if evidence_cfg and evidence_cfg.durable_store and durable_mode != "disabled":
         try:
             from acp.evidence.durable_store import DurableEventStore
             durable_store = DurableEventStore(evidence_cfg.durable_store)
             durable_store.init()
-            # Wrap the write method to dual-write. Failures are recorded but
-            # don't crash the run — the JSONL log is canonical. However, they
-            # are NOT silently swallowed: the failure count is surfaced after
-            # the run so the operator knows the durable index is incomplete.
+            # Wrap the write method to dual-write. In best_effort mode, failures
+            # are recorded but don't crash the run. In required mode, failures
+            # raise — the run cannot succeed without durable evidence.
             original_write = events.write
             def _dual_write(type, payload=None):
                 evt = original_write(type, payload)
@@ -311,12 +319,17 @@ def run_workflow(
                     durable_store_failures.append(
                         f"{evt.event_id} ({evt.type.value}): {exc}"
                     )
+                    if durable_mode == "required":
+                        raise  # fail closed — durable evidence is required
                 return evt
             events.write = _dual_write  # type: ignore[method-assign]
         except Exception as exc:
-            # Store initialization failed — record it but don't crash.
-            # The run can proceed with JSONL-only durability.
             durable_store_failures.append(f"init: {exc}")
+            if durable_mode == "required":
+                from acp.errors import EvidenceConfigError
+                raise EvidenceConfigError(
+                    f"durable store initialization failed (required mode): {exc}"
+                ) from exc
 
     wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
 
