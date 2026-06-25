@@ -332,7 +332,7 @@ def test_cli_reject_task(tmp_path: Path):
     # Verify task status updated.
     store = TaskStore(runs_root=runs_root)
     updated = store.load(task.task_id)
-    assert updated.status == TaskStatus.ARCHIVED
+    assert updated.status == TaskStatus.REJECTED
 
     # Verify event written.
     events = EventWriter(task.task_id, store.run_dir(task.task_id))

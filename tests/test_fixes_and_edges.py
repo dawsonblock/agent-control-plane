@@ -286,7 +286,7 @@ def test_cli_reject_failed_task(tmp_path: Path):
 
     store = TaskStore(runs_root=runs_root)
     updated = store.load(task.task_id)
-    assert updated.status == TaskStatus.ARCHIVED
+    assert updated.status == TaskStatus.REJECTED
 
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +337,7 @@ def test_cli_reject_already_archived(tmp_path: Path):
         "--vault-root", str(vault_root),
     ])
     assert r2.exit_code == 1
-    assert "already archived" in r2.output
+    assert "already rejected" in r2.output
 
 
 # --------------------------------------------------------------------------- #

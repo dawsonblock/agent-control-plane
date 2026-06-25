@@ -26,19 +26,26 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.15 alpha — Sandbox evidence semantics
+## Current scope: v0.5.16 alpha — Executor evidence binding + status semantics
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
 binds the complete evidence record — artifacts, task metadata, the
 human-facing report, and the evidence policy — to the signed event log.
-v0.5.15 hardens the Docker Sandboxes executor backend: fixes a critical
-verifier bug where sandbox cleanup events broke `acp verify`, separates
-sandbox event semantics (configured/started/failed/stopped), enforces
-network policy as a strict enum, fixes non-main branch support, makes
-artifact ignore policy consistent between fast and deep verification, and
-persists the DigestCache to disk for practical repeated verification.
-It is under active hardening and should be used for controlled dogfooding,
+v0.5.16 adds executor config verification (sandbox.configured events are
+verified for network_policy and clone_mode), separates `TaskStatus.REJECTED`
+from `TaskStatus.ARCHIVED` (rejection is a first-class human decision), and
+adds a real sbx E2E smoke test behind an opt-in marker.
+
+> **Note:** The Docker Sandboxes (`docker_sbx`) executor backend is
+> **experimental**. It has been hardened with verifier semantics, event
+> ordering, and network policy enforcement, but has not yet been validated
+> end-to-end with a real `sbx` installation. The `worktree` backend is the
+> stable, trusted execution path. Run `ACP_RUN_REAL_SBX=1 pytest
+> tests/test_sbx_real_e2e.py` to validate the sbx backend on a machine with
+> Docker Sandboxes installed.
+
+ACP is under active hardening and should be used for controlled dogfooding,
 not production autonomous operation.
 
 This repository currently implements:
@@ -61,7 +68,8 @@ This repository currently implements:
 | **v0.5.12** | Lifecycle transaction integrity: full evidence rollback (events.jsonl + final_report.md + lifecycle_manifest.json + SQLite single-transaction); `evidence_config_hash` binds evidence policy to signed event log (prevents silent durable_mode downgrade); `acp verify --check-durable` checks SQLite matches events.jsonl (auto-enabled when durable_mode=required); `DEFAULT_IGNORE_PATTERNS` applied in artifact hashing; task.json.status consistency check; CLI wording corrected | Stable |
 | **v0.5.13** | Docker Sandboxes executor backend: `SbxExecutor` runs the coding agent inside an isolated microVM via `sbx run --clone`; clone mode enforced (ACP refuses non-clone); network policy recorded (locked_down/balanced, never open); `sandbox.started`/`sandbox.stopped` events bind executor metadata to signed event log; `capture_diff_from_remote` fetches sandbox remote and diffs agent's private clone; sandbox cleanup (stop/remove) on run completion; `ExecutorSection` in repo config | Stable |
 | **v0.5.14** | Pure-projection vault notes: `rerender_vault_note` rebuilds the note from scratch from the event log (no more in-place frontmatter editing or 3-way transactional rollback); TruffleHog integration: `scan_diff` uses TruffleHog for verified secret detection when installed (checks if keys are live before flagging), falls back to regex scanner; `use_trufflehog` config in `ReviewSection`; `review_diff` accepts `worktree_path` for TruffleHog scanning | Stable |
-| **v0.5.15** | Sandbox evidence semantics: verifier classifies sandbox events as post-run (fixes critical `acp verify` failure on `sandbox.stopped`); `sandbox.configured` at validation, `sandbox.started` after actual launch, `sandbox.failed` on runtime failure (intention vs fact); network policy strict enum (`locked_down`\|`balanced`, rejects arbitrary strings); `--network` flag passed to `sbx` command; non-main branch support (`cfg.repo.default_branch`); artifact ignore policy consistent (fast and deep verify agree on `__pycache__`/`*.pyc`); persisted `DigestCache` (`digest_cache.json`, deep mode ignores cache) | Current |
+| **v0.5.15** | Sandbox evidence semantics: verifier classifies sandbox events as post-run (fixes critical `acp verify` failure on `sandbox.stopped`); `sandbox.configured` at validation, `sandbox.started` after actual launch, `sandbox.failed` on runtime failure (intention vs fact); network policy strict enum (`locked_down`\|`balanced`, rejects arbitrary strings); `--network` flag passed to `sbx` command; non-main branch support (`cfg.repo.default_branch`); artifact ignore policy consistent (fast and deep verify agree on `__pycache__`/`*.pyc`); persisted `DigestCache` (`digest_cache.json`, deep mode ignores cache) | Stable |
+| **v0.5.16** | Executor evidence binding + status semantics: verifier checks `sandbox.configured` event payload for network_policy (not open) and clone_mode (True); `TaskStatus.REJECTED` separated from `TaskStatus.ARCHIVED` (rejection is a first-class human decision, not a cleanup state); `derive_status_from_events` returns "rejected" not "archived"; real sbx E2E smoke test behind `ACP_RUN_REAL_SBX=1` opt-in marker; Docker Sandboxes marked experimental in README | Current |
 | **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.

@@ -872,13 +872,13 @@ def test_derive_status_from_events_unit():
     ]
     assert derive_status_from_events(events) == "approved"
 
-    # human.rejected overrides everything → archived.
+    # human.rejected overrides everything → rejected.
     events = [
         Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
         Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
         Event(event_id="evt_000003", task_id="t1", type=EventType.HUMAN_REJECTED, prev_hash="h2", hash="h3"),
     ]
-    assert derive_status_from_events(events) == "archived"
+    assert derive_status_from_events(events) == "rejected"
 
     # task.failed → failed.
     events = [

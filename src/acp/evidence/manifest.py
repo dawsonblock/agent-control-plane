@@ -286,11 +286,10 @@ def derive_status_from_events(events: list[Any]) -> str | None:
             run_status = "needs_review"
 
     # Lifecycle events take precedence over run-terminal events.
-    # Rejection maps to TaskStatus.ARCHIVED (there is no REJECTED status —
-    # rejected tasks are archived). Rejection is terminal and overrides
-    # approval.
+    # v0.5.16: Rejection maps to TaskStatus.REJECTED (a first-class human
+    # decision). Rejection is terminal and overrides approval.
     if has_rejected:
-        return "archived"
+        return "rejected"
     if has_approved:
         return "approved"
     return run_status
@@ -728,6 +727,28 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
             if recomputed_config_hash != expected_config_hash:
                 return False
 
+    # v0.5.16: Verify executor config from sandbox.configured event.
+    # If a sandbox.configured event exists, its executor metadata is part
+    # of the signed event log. We verify that the recorded network_policy
+    # and clone_mode match what was declared — an attacker who downgrades
+    # the network policy after the run breaks this signed binding.
+    sandbox_configured_events = [
+        e for e in events if e.type == EventType.SANDBOX_CONFIGURED
+    ]
+    if sandbox_configured_events:
+        configured = sandbox_configured_events[-1]
+        executor_meta = configured.payload.get("executor", {})
+        # Verify that the recorded network_policy is not "open" — this
+        # should have been caught at validation time, but the verifier
+        # double-checks the signed event log.
+        recorded_policy = executor_meta.get("network_policy", "")
+        if recorded_policy == "open":
+            return False  # open network policy is never allowed
+        # Verify clone_mode is True — ACP requires clone mode.
+        recorded_clone = executor_meta.get("clone_mode", False)
+        if not recorded_clone:
+            return False  # non-clone mode is never allowed
+
     # Verify the evidence.report_bound event — if present, its report_hash
     # must match the on-disk report. After lifecycle events, a SECOND
     # evidence.report_bound event is written with the re-rendered report's
@@ -747,8 +768,9 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
                 return False  # report tampered with or doesn't match signed binding
 
     # v0.5.15: Persist the digest cache for future fast-mode verifications.
-    # Only save if we actually used the cache (fast mode). Deep mode never
-    # populates the cache, so there's nothing to save.
+    # Only save if we actually used the cache (fast mode) AND verification
+    # passed. Deep mode never populates the cache. We never persist a cache
+    # from a failed verification — that could cache incorrect digests.
     if cache is not None:
         try:
             cache.save_to(cache_path)

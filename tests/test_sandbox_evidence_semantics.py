@@ -142,7 +142,16 @@ class TestSandboxEventVerifierClassification:
 
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
-        events.write(EventType.SANDBOX_CONFIGURED, {"sandbox_name": "acp-test"})
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "sandbox_remote": "sandbox-acp-test",
+            "executor": {
+                "backend": "docker_sbx",
+                "network_policy": "locked_down",
+                "clone_mode": True,
+                "agent": "claude",
+            },
+        })
         real_hash = compute_artifact_content_hash(run_dir)
         events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
         report_path = run_dir / "artifacts" / "final_report.md"
@@ -641,3 +650,136 @@ class TestPersistedDigestCache:
         result = verify_evidence_manifest(run_dir, deep=True)
         assert result is True
         assert not cache_path.exists(), "deep-mode verify should not write digest cache"
+
+
+# --------------------------------------------------------------------------- #
+# 8. Executor config verification
+# --------------------------------------------------------------------------- #
+
+
+class TestExecutorConfigVerification:
+    """Verifier checks executor metadata from sandbox.configured events."""
+
+    def test_open_network_policy_in_event_fails_verify(self, tmp_path):
+        """A sandbox.configured event with network_policy='open' fails verify."""
+        from acp.events import EventWriter
+        from acp.evidence.manifest import (
+            build_evidence_manifest,
+            compute_artifact_content_hash,
+            verify_evidence_manifest,
+            _sha256_file,
+        )
+        from acp.models import EventType
+
+        run_dir = tmp_path / "run"
+        artifacts_dir = run_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "diff.patch").write_text("diff content")
+        (artifacts_dir / "final_report.md").write_text("# Report\n")
+
+        events = EventWriter("task_20260101_0001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
+        # Write a sandbox.configured event with network_policy='open'.
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "sandbox_remote": "sandbox-acp-test",
+            "executor": {
+                "backend": "docker_sbx",
+                "network_policy": "open",  # should never be allowed
+                "clone_mode": True,
+                "agent": "claude",
+            },
+        })
+        real_hash = compute_artifact_content_hash(run_dir)
+        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        report_hash = _sha256_file(artifacts_dir / "final_report.md")
+        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+
+        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest_path = run_dir / "evidence_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = verify_evidence_manifest(run_dir, deep=False)
+        assert result is False, "open network_policy in event should fail verify"
+
+    def test_non_clone_mode_in_event_fails_verify(self, tmp_path):
+        """A sandbox.configured event with clone_mode=False fails verify."""
+        from acp.events import EventWriter
+        from acp.evidence.manifest import (
+            build_evidence_manifest,
+            compute_artifact_content_hash,
+            verify_evidence_manifest,
+            _sha256_file,
+        )
+        from acp.models import EventType
+
+        run_dir = tmp_path / "run"
+        artifacts_dir = run_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "diff.patch").write_text("diff content")
+        (artifacts_dir / "final_report.md").write_text("# Report\n")
+
+        events = EventWriter("task_20260101_0001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "sandbox_remote": "sandbox-acp-test",
+            "executor": {
+                "backend": "docker_sbx",
+                "network_policy": "locked_down",
+                "clone_mode": False,  # should never be allowed
+                "agent": "claude",
+            },
+        })
+        real_hash = compute_artifact_content_hash(run_dir)
+        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        report_hash = _sha256_file(artifacts_dir / "final_report.md")
+        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+
+        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest_path = run_dir / "evidence_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = verify_evidence_manifest(run_dir, deep=False)
+        assert result is False, "clone_mode=False in event should fail verify"
+
+    def test_valid_executor_config_passes_verify(self, tmp_path):
+        """A sandbox.configured event with valid config passes verify."""
+        from acp.events import EventWriter
+        from acp.evidence.manifest import (
+            build_evidence_manifest,
+            compute_artifact_content_hash,
+            verify_evidence_manifest,
+            _sha256_file,
+        )
+        from acp.models import EventType
+
+        run_dir = tmp_path / "run"
+        artifacts_dir = run_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "diff.patch").write_text("diff content")
+        (artifacts_dir / "final_report.md").write_text("# Report\n")
+
+        events = EventWriter("task_20260101_0001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "sandbox_remote": "sandbox-acp-test",
+            "executor": {
+                "backend": "docker_sbx",
+                "network_policy": "locked_down",
+                "clone_mode": True,
+                "agent": "claude",
+            },
+        })
+        real_hash = compute_artifact_content_hash(run_dir)
+        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        report_hash = _sha256_file(artifacts_dir / "final_report.md")
+        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+
+        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest_path = run_dir / "evidence_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = verify_evidence_manifest(run_dir, deep=False)
+        assert result is True

@@ -41,6 +41,11 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     NEEDS_REVIEW = "needs_review"
     APPROVED = "approved"
+    # v0.5.16: REJECTED is a first-class human decision, distinct from
+    # ARCHIVED (which is a later cleanup state). A rejected task is
+    # explicitly not approved; an archived task may be a cleanup of
+    # any terminal state.
+    REJECTED = "rejected"
     ARCHIVED = "archived"
 
 

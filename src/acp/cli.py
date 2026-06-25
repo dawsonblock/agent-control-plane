@@ -1048,10 +1048,15 @@ def reject(
         console.print(f"[red]✗[/] cannot load task.json: {exc}")
         raise typer.Exit(code=1)
 
-    # Cannot reject an already-approved or already-archived task.
+    # Cannot reject an already-approved, already-rejected, or archived task.
     if task.status == TaskStatus.APPROVED:
         console.print(
             f"[red]✗[/] task is already approved — cannot reject after approval."
+        )
+        raise typer.Exit(code=1)
+    if task.status == TaskStatus.REJECTED:
+        console.print(
+            f"[red]✗[/] task is already rejected — cannot reject again."
         )
         raise typer.Exit(code=1)
     if task.status == TaskStatus.ARCHIVED:
@@ -1088,7 +1093,7 @@ def reject(
     if durable_warning:
         console.print(f"[yellow]![/] {durable_warning}")
 
-    task.status = TaskStatus.ARCHIVED
+    task.status = TaskStatus.REJECTED
     store.save(task)
 
     # Re-render the vault note from scratch as a pure projection.
