@@ -301,22 +301,24 @@ def test_durable_mode_none_when_not_configured(disposable_repo, isolated_workspa
 
 def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspace, tmp_path):
     """When durable_mode=required, approval must fail if the SQLite store
-    is unavailable — not just warn."""
-    # Use a path that will be unreadable after the run.
+    is unavailable — not just warn. And the human.approved event must be
+    rolled back from events.jsonl so the run is not left half-approved."""
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
         disposable_repo, isolated_workspace,
         durable_store=db_path, durable_mode=DurableMode.REQUIRED,
     )
 
+    # Count events before the failed approval.
+    events_before = _events(store, task_id)
+    count_before = len(events_before)
+
     # Make the durable store path unusable — point the config to a path
     # inside a file (not a directory) so SQLite can't open it.
     ev_cfg_path = run_dir / "evidence_config.json"
     ev_cfg = json.loads(ev_cfg_path.read_text())
-    # Point to /dev/null/cannot_exist — a path that can't be a SQLite DB.
     ev_cfg["durable_store"] = str(tmp_path / "blocker_file" / "events.db")
     ev_cfg_path.write_text(json.dumps(ev_cfg, indent=2) + "\n")
-    # Create the blocker file so the parent can't be a directory.
     (tmp_path / "blocker_file").write_text("blocker")
 
     # Approve must fail (not just warn).
@@ -327,8 +329,29 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
         "--approver", "test@example.com",
     ])
     assert r.exit_code == 1, f"approve should have failed closed: {r.output}"
-    assert "durable store write failed" in r.output
-    assert "required" in r.output
+    assert "rolled back" in r.output
+
+    # CRITICAL: the human.approved event must NOT be in the event log.
+    # The rollback must have restored the log to its pre-approval state.
+    events_after = _events(store, task_id)
+    assert len(events_after) == count_before, (
+        f"event log was not rolled back: {count_before} events before, "
+        f"{len(events_after)} after. The half-approved bug is present."
+    )
+    assert not any(e.type == EventType.HUMAN_APPROVED for e in events_after), (
+        "human.approved event survived the rollback — half-approved state!"
+    )
+
+    # The event chain must still be valid (rollback restored prev_hash).
+    from acp.events import verify_event_chain
+    assert verify_event_chain(events_after) is True, (
+        "event chain broken after rollback"
+    )
+
+    # Verify must still pass (the run is in its pre-approval state).
+    r2 = runner.invoke(app, ["verify", "--task", task_id,
+                             "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r2.exit_code == 0, f"verify should pass after rollback: {r2.output}"
 
 
 # --------------------------------------------------------------------------- #
@@ -594,3 +617,131 @@ def test_default_ignore_patterns_defined():
     assert "node_modules" in DEFAULT_IGNORE_PATTERNS
     assert ".venv" in DEFAULT_IGNORE_PATTERNS
     assert ".git" in DEFAULT_IGNORE_PATTERNS
+
+
+# --------------------------------------------------------------------------- #
+# task.json.status consistency — event log is truth, task.json is projection
+# --------------------------------------------------------------------------- #
+
+
+def test_status_consistency_passed(disposable_repo, isolated_workspace):
+    """task.json.status='passed' must match event log with task.completed."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 0
+    assert "status inconsistent" not in r.output
+
+
+def test_status_consistency_approved(disposable_repo, isolated_workspace):
+    """After approval, task.json.status='approved' must match event log."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+
+    r = runner.invoke(app, [
+        "approve", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+        "--approver", "test@example.com",
+    ])
+    assert r.exit_code == 0
+
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 0
+    assert "status inconsistent" not in r.output
+
+
+def test_status_consistency_rejected(disposable_repo, isolated_workspace):
+    """After rejection, task.json.status='archived' must match event log."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+
+    r = runner.invoke(app, [
+        "reject", "--task", task_id,
+        "--runs-root", str(isolated_workspace["runs_root"]),
+        "--vault-root", str(isolated_workspace["vault_root"]),
+        "--rejecter", "test@example.com",
+    ])
+    assert r.exit_code == 0
+
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 0
+    assert "status inconsistent" not in r.output
+
+
+def test_status_inconsistency_detected(disposable_repo, isolated_workspace):
+    """If task.json.status lies (doesn't match event log), verify must fail."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+
+    # The run passed (task.completed in event log, status='passed').
+    # Tamper with task.json to claim a different status.
+    task_json_path = run_dir / "task.json"
+    data = json.loads(task_json_path.read_text())
+    data["status"] = "needs_review"  # lie — event log says passed
+    task_json_path.write_text(json.dumps(data, indent=2) + "\n")
+
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 1
+    assert "status inconsistent" in r.output
+    assert "event log='passed'" in r.output
+
+
+def test_status_inconsistency_approved_lie(disposable_repo, isolated_workspace):
+    """If task.json claims 'approved' but event log has no human.approved,
+    verify must fail."""
+    task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
+
+    # The run passed but was NOT approved. Tamper with task.json.
+    task_json_path = run_dir / "task.json"
+    data = json.loads(task_json_path.read_text())
+    data["status"] = "approved"  # lie — no human.approved in event log
+    task_json_path.write_text(json.dumps(data, indent=2) + "\n")
+
+    r = runner.invoke(app, ["verify", "--task", task_id,
+                            "--runs-root", str(isolated_workspace["runs_root"])])
+    assert r.exit_code == 1
+    assert "status inconsistent" in r.output
+
+
+def test_derive_status_from_events_unit():
+    """Unit test for derive_status_from_events."""
+    from acp.evidence.manifest import derive_status_from_events
+    from acp.models import Event, EventType
+
+    # No terminal events → None.
+    events = [
+        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+    ]
+    assert derive_status_from_events(events) is None
+
+    # task.completed → passed.
+    events = [
+        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
+    ]
+    assert derive_status_from_events(events) == "passed"
+
+    # human.approved overrides task.completed → approved.
+    events = [
+        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
+        Event(event_id="evt_000003", task_id="t1", type=EventType.HUMAN_APPROVED, prev_hash="h2", hash="h3"),
+    ]
+    assert derive_status_from_events(events) == "approved"
+
+    # human.rejected overrides everything → archived.
+    events = [
+        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
+        Event(event_id="evt_000003", task_id="t1", type=EventType.HUMAN_REJECTED, prev_hash="h2", hash="h3"),
+    ]
+    assert derive_status_from_events(events) == "archived"
+
+    # task.failed → failed.
+    events = [
+        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_FAILED, prev_hash="h1", hash="h2"),
+    ]
+    assert derive_status_from_events(events) == "failed"

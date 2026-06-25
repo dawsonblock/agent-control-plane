@@ -175,6 +175,55 @@ def compute_report_hash(run_dir: Path) -> str | None:
     return _sha256_file(report_path)
 
 
+def derive_status_from_events(events: list[Any]) -> str | None:
+    """Derive the expected task status from the event log.
+
+    The event log is the source of truth; task.json is only a projection.
+    This function scans the event log for terminal + lifecycle events and
+    returns the status that task.json *should* have:
+
+      * human.approved → "approved"
+      * human.rejected → "rejected" (terminal — rejection overrides run status)
+      * task.completed → "passed"
+      * task.failed → "failed"
+      * task.needs_review → "needs_review"
+      * none of the above → None (can't determine)
+
+    Lifecycle events take precedence over run-terminal events: if both
+    task.completed and human.approved exist, the status is "approved".
+    human.rejected is terminal — once rejected, the status stays "rejected"
+    even if a later human.approved exists (which shouldn't happen, but we
+    guard against it).
+    """
+    from acp.models import EventType
+
+    has_approved = False
+    has_rejected = False
+    run_status: str | None = None
+
+    for evt in events:
+        if evt.type == EventType.HUMAN_APPROVED:
+            has_approved = True
+        elif evt.type == EventType.HUMAN_REJECTED:
+            has_rejected = True
+        elif evt.type == EventType.TASK_COMPLETED:
+            run_status = "passed"
+        elif evt.type == EventType.TASK_FAILED:
+            run_status = "failed"
+        elif evt.type == EventType.TASK_NEEDS_REVIEW:
+            run_status = "needs_review"
+
+    # Lifecycle events take precedence over run-terminal events.
+    # Rejection maps to TaskStatus.ARCHIVED (there is no REJECTED status —
+    # rejected tasks are archived). Rejection is terminal and overrides
+    # approval.
+    if has_rejected:
+        return "archived"
+    if has_approved:
+        return "approved"
+    return run_status
+
+
 def build_evidence_manifest(
     *,
     run_dir: Path,

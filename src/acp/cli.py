@@ -167,89 +167,90 @@ def _record_lifecycle_event(
                 "lifecycle event. Install with: uv sync --extra crypto"
             ) from exc
 
-    evt = events.write(event_type, payload)
-
-    # Dual-write to the run's durable store if it had one. The SQLite store
-    # is a derived index, but failures must be visible — not silently swallowed.
-    # In ``required`` durable mode, a write failure is fatal: the lifecycle
-    # action must not succeed if the durable store is unavailable.
+    # --- Transactional lifecycle write ------------------------------------- #
+    # The lifecycle event + its durable-store dual-write + the report_bound
+    # event + its durable-store dual-write form one transaction. If ANY step
+    # fails in a way that makes the state inconsistent (required-mode durable
+    # failure), we roll back ALL events written in this transaction —
+    # truncating events.jsonl to the checkpoint and restoring the hash chain.
+    # This prevents the half-approved bug: a human.approved event in the log
+    # with no corresponding durable-store entry or lifecycle manifest.
+    checkpoint = events.checkpoint()
     durable_store_path = ev_cfg["durable_store"]
     durable_mode = ev_cfg.get("durable_mode")
     durable_warning = None
-    if durable_store_path is not None:
-        try:
-            from acp.evidence.durable_store import DurableEventStore
-            with DurableEventStore(durable_store_path) as db:
-                db.append(evt)
-        except Exception as exc:  # noqa: BLE001
-            if durable_mode == "required":
-                # Fail closed — the durable store is required evidence, not
-                # just a query index. The lifecycle event was already written
-                # to the JSONL log, but the action must not succeed.
-                raise ACPError(
-                    f"durable store write failed (mode=required): {exc}",
-                    exit_code=1,
-                ) from exc
-            durable_warning = f"durable store write failed: {exc}"
 
-    # The run evidence manifest is immutable — it covers the run phase (up to
-    # evidence.finalized) and is never rewritten after lifecycle events. The
-    # lifecycle manifest (written below) covers post-run events. This keeps
-    # the run evidence tamper-evident without a mutable manifest.
-
-    # Re-render the report so its event timeline + manifest hash reflect the
-    # updated event log. Without this, the report shows stale evidence after
-    # lifecycle events — the report claims one hash while the manifest has another.
     try:
-        from acp.reports.writer import rerender_report_from_run
-        rerender_report_from_run(run_dir)
-    except Exception:  # noqa: BLE001
-        pass  # report re-render is best-effort; the manifest is authoritative
+        evt = events.write(event_type, payload)
 
-    # Write a second evidence.report_bound event binding the re-rendered report
-    # to the signed event log. This is the key security property: the post-
-    # lifecycle report is bound to a SIGNED, hash-chained event — not just to
-    # the unsigned lifecycle manifest. An attacker who tampers with the report
-    # after lifecycle events breaks this signed binding.
-    report_hash = compute_report_hash(run_dir)
-    report_bound_evt = None
-    if report_hash is not None:
-        report_bound_evt = events.write(
-            EventType.EVIDENCE_REPORT_BOUND,
-            {
-                "task_id": task_id,
-                "report_hash": report_hash,
-                "lifecycle_event": event_type.value,
-                "event_chain_head_before_report_bound": events.last_hash,
-            },
-        )
+        # Dual-write the lifecycle event to the durable store.
+        if durable_store_path is not None:
+            try:
+                from acp.evidence.durable_store import DurableEventStore
+                with DurableEventStore(durable_store_path) as db:
+                    db.append(evt)
+            except Exception as exc:  # noqa: BLE001
+                if durable_mode == "required":
+                    raise  # triggers rollback below
+                durable_warning = f"durable store write failed: {exc}"
 
-    # Dual-write the report_bound event to the durable store (same mode
-    # semantics as the lifecycle event above).
-    if report_bound_evt is not None and durable_store_path is not None:
+        # Re-render the report so its event timeline + manifest hash reflect
+        # the updated event log.
         try:
-            from acp.evidence.durable_store import DurableEventStore
-            with DurableEventStore(durable_store_path) as db:
-                db.append(report_bound_evt)
-        except Exception as exc:  # noqa: BLE001
-            if durable_mode == "required":
-                raise ACPError(
-                    f"durable store write failed (mode=required): {exc}",
-                    exit_code=1,
-                ) from exc
-            durable_warning = f"durable store write failed: {exc}"
+            from acp.reports.writer import rerender_report_from_run
+            rerender_report_from_run(run_dir)
+        except Exception:  # noqa: BLE001
+            pass  # report re-render is best-effort
 
-    # Write a lifecycle manifest — a separate record of post-run lifecycle
-    # events (approve/reject). This keeps the run evidence immutable while
-    # providing a verifiable record of lifecycle actions. The report_hash
-    # is included for human readability, but the authoritative binding is
-    # the signed evidence.report_bound event above.
-    try:
-        write_lifecycle_manifest(
-            run_dir=run_dir, events_writer=events, report_hash=report_hash
-        )
-    except Exception:  # noqa: BLE001
-        pass  # best-effort; the event log is authoritative
+        # Write a second evidence.report_bound event binding the re-rendered
+        # report to the signed event log. This is the key security property:
+        # the post-lifecycle report is bound to a SIGNED, hash-chained event.
+        report_hash = compute_report_hash(run_dir)
+        report_bound_evt = None
+        if report_hash is not None:
+            report_bound_evt = events.write(
+                EventType.EVIDENCE_REPORT_BOUND,
+                {
+                    "task_id": task_id,
+                    "report_hash": report_hash,
+                    "lifecycle_event": event_type.value,
+                    "event_chain_head_before_report_bound": events.last_hash,
+                },
+            )
+
+        # Dual-write the report_bound event to the durable store.
+        if report_bound_evt is not None and durable_store_path is not None:
+            try:
+                from acp.evidence.durable_store import DurableEventStore
+                with DurableEventStore(durable_store_path) as db:
+                    db.append(report_bound_evt)
+            except Exception as exc:  # noqa: BLE001
+                if durable_mode == "required":
+                    raise  # triggers rollback below
+                durable_warning = f"durable store write failed: {exc}"
+
+        # Write a lifecycle manifest — a separate record of post-run lifecycle
+        # events. Best-effort; the signed event log is authoritative.
+        try:
+            write_lifecycle_manifest(
+                run_dir=run_dir, events_writer=events, report_hash=report_hash
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    except Exception:
+        # Rollback: truncate events.jsonl to the checkpoint and restore the
+        # hash chain. This removes the lifecycle event AND the report_bound
+        # event, leaving the log as if the lifecycle command never ran.
+        events.rollback(checkpoint)
+        if durable_mode == "required":
+            raise ACPError(
+                f"lifecycle event rolled back — durable store write failed "
+                f"(mode=required). The event log has been restored to its "
+                f"pre-lifecycle state.",
+                exit_code=1,
+            )
+        raise
 
     return durable_warning
 
@@ -500,6 +501,26 @@ def _verify_impl(
     lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
     has_lifecycle = any(e.type.value in lifecycle_types for e in events)
     has_evidence_finalized = any(e.type == EventType.EVIDENCE_FINALIZED for e in events)
+
+    # 1b. task.json.status consistency — the event log is truth; task.json
+    # is only a projection. If task.json.status doesn't match the status
+    # derived from the event log, the projection is stale or tampered.
+    if events and task_json_path.is_file():
+        from acp.evidence.manifest import derive_status_from_events
+        try:
+            import json as _json_status
+            task_data = _json_status.loads(task_json_path.read_text())
+            task_json_status = task_data.get("status")
+            expected_status = derive_status_from_events(events)
+            if expected_status is not None and task_json_status != expected_status:
+                console.print(
+                    f"[red]✗[/] task.json status inconsistent: task.json='{task_json_status}' "
+                    f"vs event log='{expected_status}'. The event log is truth; "
+                    f"task.json is a projection and must match."
+                )
+                all_ok = False
+        except Exception:
+            pass  # malformed task.json already reported above
 
     # 2. Evidence manifest — required for v0.5.10+ runs (those with
     # evidence.finalized). Missing manifest is fatal, not a warning.

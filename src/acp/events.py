@@ -269,6 +269,41 @@ class EventWriter:
         """The hash of the most recently written event (or GENESIS)."""
         return self._prev_hash
 
+    def checkpoint(self) -> tuple[int, int, str]:
+        """Capture the writer's current state for potential rollback.
+
+        Returns ``(file_size, count, prev_hash)``. Pass this to
+        :meth:`rollback` to undo events written after the checkpoint.
+
+        Used by lifecycle commands (approve/reject) to implement atomicity:
+        if a durable store write fails after the lifecycle event has been
+        appended to the JSONL log, the caller can rollback to remove the
+        event and restore the log to its pre-lifecycle state.
+        """
+        file_size = self.path.stat().st_size if self.path.exists() else 0
+        return (file_size, self._count, self._prev_hash)
+
+    def rollback(self, checkpoint: tuple[int, int, str]) -> None:
+        """Undo events written after the given checkpoint.
+
+        Truncates the JSONL log to the checkpoint's file size and restores
+        the internal count + prev_hash. This is the only situation where
+        the append-only log is truncated: a failed transactional write that
+        must not leave a partial event behind.
+
+        After rollback, the log is in the same state it was before the
+        events that were rolled back — the hash chain is intact because
+        ``prev_hash`` is restored to the checkpoint's value.
+        """
+        file_size, count, prev_hash = checkpoint
+        # Truncate the file to the checkpoint size.
+        with self.path.open("ab") as f:
+            f.truncate(file_size)
+            f.flush()
+            os.fsync(f.fileno())
+        self._count = count
+        self._prev_hash = prev_hash
+
 
 def _utcnow_iso() -> str:
     """ISO-8601 UTC timestamp with a trailing Z."""
