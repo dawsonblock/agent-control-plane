@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -73,7 +72,10 @@ class TestRealSbxE2E:
 
         # Create a minimal prompt.
         prompt_path = tmp_path / "prompt.md"
-        prompt_path.write_text("Create a file called hello.txt with 'hello world' in it.")
+        prompt_path.write_text(
+            "Create a file called hello.txt "
+            "with 'hello world' in it."
+        )
 
         artifact_dir = tmp_path / "artifacts"
         artifact_dir.mkdir()
@@ -107,10 +109,7 @@ class TestRealSbxE2E:
         assert removed is True
 
     def test_sbx_event_sequence(self, sbx_available, tmp_path):
-        """The event log records configured → started → stopped in order."""
-        from acp.config import ExecutorSection, RepoSection, CommandsSection
-        from acp.events import EventWriter
-        from acp.executor.sbx import SbxExecutor
+        """The event log records configured → started → stopped."""
         from acp.models import EventType
 
         # This test verifies that a real sbx run produces the correct

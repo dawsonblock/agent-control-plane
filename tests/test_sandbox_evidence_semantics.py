@@ -16,9 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +23,7 @@ import pytest
 
 from acp.config import ExecutorSection
 from acp.errors import AgentConfigError
-from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
+from acp.executor.sbx import SbxExecutor
 
 
 def _executor_config(**kwargs) -> ExecutorSection:
@@ -43,7 +40,10 @@ def _executor_config(**kwargs) -> ExecutorSection:
 
 
 def _mock_sbx_installed():
-    return patch("acp.executor.sbx.SbxExecutor.check_installed", return_value=True)
+    return patch(
+        "acp.executor.sbx.SbxExecutor.check_installed",
+        return_value=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -55,7 +55,7 @@ class TestSandboxEventVerifierClassification:
     """sandbox.stopped/started/configured/failed are post-run events."""
 
     def test_sandbox_stopped_does_not_break_verify(self, tmp_path):
-        """A sandbox.stopped event after evidence.finalized must not break verify."""
+        """sandbox.stopped after evidence.finalized must not break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
             build_evidence_manifest,
@@ -73,26 +73,33 @@ class TestSandboxEventVerifierClassification:
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
         events.write(EventType.AGENT_STARTED, {"agent": "test"})
-        events.write(EventType.AGENT_FINISHED, {"agent": "test", "exit_code": 0})
+        events.write(EventType.AGENT_FINISHED, {
+                     "agent": "test", "exit_code": 0})
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_path = run_dir / "artifacts" / "final_report.md"
         from acp.evidence.manifest import _sha256_file
         report_hash = _sha256_file(report_path)
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
         # sandbox.stopped AFTER finalization — this used to break verify.
         events.write(EventType.SANDBOX_STOPPED, {"sandbox_name": "acp-test"})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
         # This should NOT fail because sandbox.stopped is a post-run event.
         result = verify_evidence_manifest(run_dir, deep=False)
-        assert result is True, "sandbox.stopped after finalization should not break verify"
+        assert result is True, (
+            "sandbox.stopped after finalization "
+            "should not break verify"
+        )
 
     def test_sandbox_started_does_not_break_verify(self, tmp_path):
-        """A sandbox.started event after evidence.finalized must not break verify."""
+        """sandbox.started after evidence.finalized must not break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
             build_evidence_manifest,
@@ -110,14 +117,17 @@ class TestSandboxEventVerifierClassification:
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_path = run_dir / "artifacts" / "final_report.md"
         from acp.evidence.manifest import _sha256_file
         report_hash = _sha256_file(report_path)
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
         events.write(EventType.SANDBOX_STARTED, {"sandbox_name": "acp-test"})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -153,13 +163,16 @@ class TestSandboxEventVerifierClassification:
             },
         })
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_path = run_dir / "artifacts" / "final_report.md"
         from acp.evidence.manifest import _sha256_file
         report_hash = _sha256_file(report_path)
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -186,7 +199,10 @@ class TestNetworkPolicyEnum:
         cfg = _executor_config(network_policy="open")
         executor = SbxExecutor(cfg)
         with _mock_sbx_installed():
-            with pytest.raises(AgentConfigError, match="network_policy='open'"):
+            with pytest.raises(
+                AgentConfigError,
+                match="network_policy='open'",
+            ):
                 executor._validate()
 
     def test_accepts_locked_down(self):
@@ -194,7 +210,10 @@ class TestNetworkPolicyEnum:
         cfg = _executor_config(network_policy="locked_down")
         executor = SbxExecutor(cfg)
         with _mock_sbx_installed():
-            with patch("acp.executor.sbx.SbxExecutor.get_version", return_value="1.0"):
+            with patch(
+                "acp.executor.sbx.SbxExecutor.get_version",
+                return_value="1.0",
+            ):
                 executor._validate()
 
     def test_accepts_balanced(self):
@@ -202,7 +221,10 @@ class TestNetworkPolicyEnum:
         cfg = _executor_config(network_policy="balanced")
         executor = SbxExecutor(cfg)
         with _mock_sbx_installed():
-            with patch("acp.executor.sbx.SbxExecutor.get_version", return_value="1.0"):
+            with patch(
+                "acp.executor.sbx.SbxExecutor.get_version",
+                return_value="1.0",
+            ):
                 executor._validate()
 
 
@@ -230,8 +252,14 @@ class TestNetworkPolicyPassedToSbx:
             return mock_proc
 
         with _mock_sbx_installed():
-            with patch("acp.executor.sbx.SbxExecutor.get_version", return_value="1.0"):
-                with patch("acp.executor.sbx.subprocess.run", side_effect=fake_run):
+            with patch(
+                "acp.executor.sbx.SbxExecutor.get_version",
+                return_value="1.0",
+            ):
+                with patch(
+                    "acp.executor.sbx.subprocess.run",
+                    side_effect=fake_run,
+                ):
                     executor.start(
                         task_id="task_20260101_0001",
                         prompt_path=prompt_path,
@@ -262,8 +290,14 @@ class TestNetworkPolicyPassedToSbx:
             return mock_proc
 
         with _mock_sbx_installed():
-            with patch("acp.executor.sbx.SbxExecutor.get_version", return_value="1.0"):
-                with patch("acp.executor.sbx.subprocess.run", side_effect=fake_run):
+            with patch(
+                "acp.executor.sbx.SbxExecutor.get_version",
+                return_value="1.0",
+            ):
+                with patch(
+                    "acp.executor.sbx.subprocess.run",
+                    side_effect=fake_run,
+                ):
                     executor.start(
                         task_id="task_20260101_0001",
                         prompt_path=prompt_path,
@@ -286,7 +320,7 @@ class TestFakeSbxIntegration:
     """Integration test with a fake sbx binary that records argv."""
 
     def _create_fake_sbx(self, tmp_path: Path) -> Path:
-        """Create a fake sbx executable that records calls and simulates success."""
+        """Create fake sbx executable that records calls."""
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         sbx_path = bin_dir / "sbx"
@@ -337,7 +371,10 @@ exit 0
         env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
         with patch.dict(os.environ, env):
-            with patch("acp.executor.sbx.SbxExecutor.get_version", return_value="1.0.0-fake"):
+            with patch(
+                "acp.executor.sbx.SbxExecutor.get_version",
+                return_value="1.0.0-fake",
+            ):
                 result = executor.start(
                     task_id="task_20260101_0001",
                     prompt_path=prompt_path,
@@ -351,7 +388,7 @@ exit 0
         # Read the recorded calls.
         log_path = tmp_path / "sbx_calls.log"
         calls = log_path.read_text().strip().split("\n")
-        # The run call should be: run --clone --name acp-task-20260101-0001 --network locked_down claude
+        # run --clone --name <name> --network <policy> <agent>
         run_call = [c for c in calls if c.startswith("run ")][0]
         parts = run_call.split()
         assert parts[0] == "run"
@@ -416,7 +453,7 @@ class TestArtifactIgnoreConsistency:
     """Fast and deep verification agree on ignored files."""
 
     def test_pycache_not_in_manifest(self, tmp_path):
-        """__pycache__/*.pyc files are not included in the evidence manifest."""
+        """__pycache__/*.pyc not included in the manifest."""
         from acp.events import EventWriter
         from acp.evidence.manifest import build_evidence_manifest
         from acp.models import EventType
@@ -434,7 +471,8 @@ class TestArtifactIgnoreConsistency:
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         artifact_keys = set(manifest.get("artifacts", {}).keys())
 
         # diff.patch should be in the manifest.
@@ -470,7 +508,8 @@ class TestArtifactIgnoreConsistency:
             "artifact_content_hash": real_hash,
         })
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -509,7 +548,7 @@ class TestNonMainBranchSupport:
         repo.git.branch("-M", "master")  # Use master, not main.
 
         remote_path = tmp_path / "sandbox-remote"
-        remote_repo = Repo.init(str(remote_path), bare=True)
+        Repo.init(str(remote_path), bare=True)
         repo.create_remote("sandbox-acp-test", str(remote_path))
 
         repo.git.checkout("-b", "sandbox-work")
@@ -603,11 +642,14 @@ class TestPersistedDigestCache:
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_hash = _sha256_file(artifacts_dir / "final_report.md")
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -616,7 +658,9 @@ class TestPersistedDigestCache:
 
         result = verify_evidence_manifest(run_dir, deep=False)
         assert result is True
-        assert cache_path.exists(), "fast-mode verify should persist digest cache"
+        assert cache_path.exists(), (
+            "fast-mode verify should persist digest cache"
+        )
 
     def test_deep_mode_ignores_cache(self, tmp_path):
         """Deep-mode verify does not use or write the digest cache."""
@@ -638,18 +682,23 @@ class TestPersistedDigestCache:
         events = EventWriter("task_20260101_0001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_20260101_0001"})
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_hash = _sha256_file(artifacts_dir / "final_report.md")
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
         cache_path = run_dir / "digest_cache.json"
         result = verify_evidence_manifest(run_dir, deep=True)
         assert result is True
-        assert not cache_path.exists(), "deep-mode verify should not write digest cache"
+        assert not cache_path.exists(), (
+            "deep-mode verify should not write digest cache"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -661,7 +710,7 @@ class TestExecutorConfigVerification:
     """Verifier checks executor metadata from sandbox.configured events."""
 
     def test_open_network_policy_in_event_fails_verify(self, tmp_path):
-        """A sandbox.configured event with network_policy='open' fails verify."""
+        """sandbox.configured with network_policy='open' fails verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
             build_evidence_manifest,
@@ -691,16 +740,22 @@ class TestExecutorConfigVerification:
             },
         })
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_hash = _sha256_file(artifacts_dir / "final_report.md")
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
         result = verify_evidence_manifest(run_dir, deep=False)
-        assert result is False, "open network_policy in event should fail verify"
+        assert result is False, (
+            "open network_policy in event "
+            "should fail verify"
+        )
 
     def test_non_clone_mode_in_event_fails_verify(self, tmp_path):
         """A sandbox.configured event with clone_mode=False fails verify."""
@@ -732,11 +787,14 @@ class TestExecutorConfigVerification:
             },
         })
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_hash = _sha256_file(artifacts_dir / "final_report.md")
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -773,11 +831,14 @@ class TestExecutorConfigVerification:
             },
         })
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {"artifact_content_hash": real_hash})
+        events.write(EventType.EVIDENCE_FINALIZED, {
+                     "artifact_content_hash": real_hash})
         report_hash = _sha256_file(artifacts_dir / "final_report.md")
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {"report_hash": report_hash})
+        events.write(EventType.EVIDENCE_REPORT_BOUND,
+                     {"report_hash": report_hash})
 
-        manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events)
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
