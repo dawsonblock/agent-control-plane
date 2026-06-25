@@ -192,7 +192,7 @@ class TestNetworkPolicyEnum:
         executor = SbxExecutor(cfg)
         with _mock_sbx_installed():
             with pytest.raises(AgentConfigError, match="not valid"):
-                executor._validate()
+                executor._validate()  # pylint: disable=protected-access
 
     def test_rejects_open(self):
         """network_policy='open' is rejected."""
@@ -203,7 +203,7 @@ class TestNetworkPolicyEnum:
                 AgentConfigError,
                 match="network_policy='open'",
             ):
-                executor._validate()
+                executor._validate()  # pylint: disable=protected-access
 
     def test_accepts_locked_down(self):
         """network_policy='locked_down' is accepted."""
@@ -214,7 +214,7 @@ class TestNetworkPolicyEnum:
                 "acp.executor.sbx.SbxExecutor.get_version",
                 return_value="1.0",
             ):
-                executor._validate()
+                executor._validate()  # pylint: disable=protected-access
 
     def test_accepts_balanced(self):
         """network_policy='balanced' is accepted."""
@@ -225,7 +225,7 @@ class TestNetworkPolicyEnum:
                 "acp.executor.sbx.SbxExecutor.get_version",
                 return_value="1.0",
             ):
-                executor._validate()
+                executor._validate()  # pylint: disable=protected-access
 
 
 # --------------------------------------------------------------------------- #

@@ -42,19 +42,29 @@ def sbx_available():
 class TestRealSbxE2E:
     """End-to-end test with a real Docker Sandboxes installation."""
 
-    def test_sbx_version(self, sbx_available):
+    def test_sbx_version(
+        self,
+        sbx_available,  # pylint: disable=redefined-outer-name
+    ):
         """sbx --version returns a version string."""
         from acp.executor.sbx import SbxExecutor
         version = SbxExecutor.get_version()
         assert version, "sbx --version returned empty string"
         assert len(version) > 0
 
-    def test_sbx_check_installed(self, sbx_available):
+    def test_sbx_check_installed(
+        self,
+        sbx_available,  # pylint: disable=redefined-outer-name
+    ):
         """SbxExecutor.check_installed() returns True when sbx is on PATH."""
         from acp.executor.sbx import SbxExecutor
         assert SbxExecutor.check_installed() is True
 
-    def test_sbx_run_and_cleanup(self, sbx_available, tmp_path):
+    def test_sbx_run_and_cleanup(
+        self,
+        sbx_available,  # pylint: disable=redefined-outer-name
+        tmp_path,
+    ):
         """Full sbx lifecycle: start, fetch, stop, remove."""
         from acp.config import ExecutorSection
         from acp.executor.sbx import SbxExecutor
@@ -108,7 +118,11 @@ class TestRealSbxE2E:
         removed = executor.remove()
         assert removed is True
 
-    def test_sbx_event_sequence(self, sbx_available, tmp_path):
+    def test_sbx_event_sequence(
+        self,
+        sbx_available,  # pylint: disable=redefined-outer-name
+        tmp_path,
+    ):
         """The event log records configured → started → stopped."""
         from acp.models import EventType
 
