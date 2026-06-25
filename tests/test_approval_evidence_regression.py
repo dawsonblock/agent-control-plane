@@ -99,7 +99,11 @@ def test_approve_then_verify_passes(disposable_repo, isolated_workspace):
     assert verify_evidence_manifest(store.run_dir(task_id)) is True
     events = _events(store, task_id)
     assert verify_event_chain(events) is True
-    assert events[-1].type == EventType.HUMAN_APPROVED
+    # The last event is evidence.report_bound (written after the lifecycle
+    # event to bind the re-rendered report). The human.approved event is
+    # the second-to-last.
+    assert EventType.HUMAN_APPROVED in [e.type for e in events]
+    assert events[-1].type == EventType.EVIDENCE_REPORT_BOUND
     assert events[-1].hash != ""
 
 
@@ -138,7 +142,10 @@ def test_signed_run_approve_then_verify_with_public_key(disposable_repo, isolate
     store = TaskStore(runs_root=isolated_workspace["runs_root"])
     events = _events(store, task_id)
     assert all(e.signature for e in events), "lifecycle event was not signed"
-    assert events[-1].type == EventType.HUMAN_APPROVED
+    # The last event is evidence.report_bound (written after the lifecycle
+    # event to bind the re-rendered report). Both are signed.
+    assert EventType.HUMAN_APPROVED in [e.type for e in events]
+    assert events[-1].type == EventType.EVIDENCE_REPORT_BOUND
     assert verify_event_signatures(events, public_key.public_bytes_raw()) is True
 
     # acp verify --public-key passes end to end.
@@ -182,7 +189,10 @@ def test_reject_then_verify_passes(disposable_repo, isolated_workspace):
 
     store = TaskStore(runs_root=isolated_workspace["runs_root"])
     events = _events(store, task_id)
-    assert events[-1].type == EventType.HUMAN_REJECTED
+    # The last event is evidence.report_bound (written after the lifecycle
+    # event to bind the re-rendered report).
+    assert EventType.HUMAN_REJECTED in [e.type for e in events]
+    assert events[-1].type == EventType.EVIDENCE_REPORT_BOUND
     assert verify_evidence_manifest(store.run_dir(task_id)) is True
 
 
@@ -323,14 +333,15 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposab
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)
 
-    # The event log includes task.failed, and evidence.finalized is the last
-    # event (it's written after the terminal event to bind artifacts to the
-    # signed event log).
+    # The event log includes task.failed, and evidence.report_bound is the last
+    # event (it's written after evidence.finalized + the report re-render to
+    # bind the human-facing report to the signed event log).
     log_events = [json.loads(l) for l in store.events_path(task_id).read_text().splitlines() if l.strip()]
     event_types = [e["type"] for e in log_events]
     assert EventType.TASK_FAILED.value in event_types, "missing task.failed event"
-    assert log_events[-1]["type"] == EventType.EVIDENCE_FINALIZED.value, \
-        "evidence.finalized should be the last event"
+    assert EventType.EVIDENCE_FINALIZED.value in event_types, "missing evidence.finalized event"
+    assert log_events[-1]["type"] == EventType.EVIDENCE_REPORT_BOUND.value, \
+        "evidence.report_bound should be the last event"
 
     # The report must show the FULL timeline (including task.failed), not the
     # stale pre-terminal snapshot, and must include the manifest hash.

@@ -28,7 +28,14 @@ from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
-from acp.evidence.manifest import build_evidence_manifest, compute_artifact_content_hash, write_evidence_config, write_evidence_manifest
+from acp.evidence.manifest import (
+    build_evidence_manifest,
+    compute_artifact_content_hash,
+    compute_report_hash,
+    compute_task_json_hash,
+    write_evidence_config,
+    write_evidence_manifest,
+)
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean
 from acp.models import EventType, TaskStatus
@@ -66,29 +73,37 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
 
     Called by terminal nodes AFTER the terminal event is written. The sequence:
 
-    1. Write ``evidence_manifest.json`` (artifact hashes + event chain head).
-    2. Write an ``evidence.finalized`` event containing the manifest hash +
-       artifact count. This event is part of the hash-chained, optionally
-       signed event log — so the artifact manifest is cryptographically bound
-       to the signed evidence. Tampering with any artifact changes the
-       manifest hash, which breaks the signed ``evidence.finalized`` event.
-    3. Rewrite the manifest so its chain head includes the finalized event.
-    4. Re-render the report with the final manifest hash + event timeline.
+    1. Compute artifact_content_hash + task_json_hash (stable across manifest
+       rewrites — they don't depend on the event chain).
+    2. Write ``evidence_manifest.json`` (artifact hashes + event chain head).
+    3. Write an ``evidence.finalized`` event containing artifact_content_hash,
+       task_json_hash, artifact count, and final status. This event is part
+       of the hash-chained, optionally signed event log — so the artifact
+       manifest + task metadata are cryptographically bound to the signed
+       evidence. Tampering with any artifact or task.json field (other than
+       status during a lifecycle transition) breaks the signed event.
+    4. Rewrite the manifest so its chain head includes the finalized event.
+    5. Re-render the report with the final manifest hash + event timeline
+       (which now includes evidence.finalized).
+    6. Write an ``evidence.report_bound`` event containing the report_hash.
+       This binds the human-facing report to the signed event log. Tampering
+       with or deleting the report breaks this signed event.
+    7. Rewrite the manifest so its chain head includes the report_bound event.
 
     For early failures (no diff/review), the minimal failure report is
     re-rendered with the final event timeline + manifest hash.
 
     Also persists the run's evidence config as a sidecar so post-run lifecycle
-    commands can recover the same signing key + durable store.
+    commands can recover the same signing key + durable store + durable mode.
     """
     try:
         run_dir = ctx.store.run_dir(state["task_id"])
 
-        # 1. Compute the artifact content hash — this is stable across manifest
-        # rewrites (it only covers artifact files, not the event chain). It's
-        # what we put in the evidence.finalized event to bind artifacts to the
-        # signed event log.
+        # 1. Compute stable hashes — these don't change when the event chain
+        # grows, so they can be verified later even though the manifest is
+        # rewritten after the finalize event.
         artifact_content_hash = compute_artifact_content_hash(run_dir)
+        task_json_hash = compute_task_json_hash(run_dir)
 
         # 2. Write the initial manifest (artifact hashes + current chain head).
         manifest = build_evidence_manifest(run_dir=run_dir, events_writer=ctx.events)
@@ -96,36 +111,31 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         artifact_count = len(manifest.get("artifacts", {}))
 
         # 3. Determine final status from the state.
-        # Note: we do NOT bind report_hash or task_json_hash because both are
-        # mutable after the run — the report is re-rendered when the manifest
-        # changes, and task.json changes when the task status is updated.
-        # The artifact_content_hash is the stable binding that proves the
-        # physical evidence hasn't been tampered with. Task identity is bound
-        # by the identity checks in acp verify (CLI == dir == manifest == events).
         final_status = str(state.get("status", "unknown"))
 
         # 4. Write the evidence.finalized event — this binds the artifacts
-        # to the signed event log. The artifact_content_hash is stable (doesn't
-        # change when the chain head changes), so it can be verified later
+        # AND task.json to the signed event log. The hashes are stable (don't
+        # change when the chain head changes), so they can be verified later
         # even though the manifest is rewritten after this event.
-        ctx.events.write(
-            EventType.EVIDENCE_FINALIZED,
-            {
-                "task_id": state["task_id"],
-                "artifact_content_hash": artifact_content_hash,
-                "artifact_count": artifact_count,
-                "event_chain_head_before_finalize": ctx.events.last_hash,
-                "final_status": final_status,
-            },
-        )
+        finalize_payload: dict[str, Any] = {
+            "task_id": state["task_id"],
+            "run_schema_version": "1.0",
+            "artifact_content_hash": artifact_content_hash,
+            "artifact_count": artifact_count,
+            "event_chain_head_before_finalize": ctx.events.last_hash,
+            "final_status": final_status,
+        }
+        if task_json_hash is not None:
+            finalize_payload["task_json_hash"] = task_json_hash
+        ctx.events.write(EventType.EVIDENCE_FINALIZED, finalize_payload)
 
-        # 4. Rewrite the manifest so its chain head includes evidence.finalized.
+        # 5. Rewrite the manifest so its chain head includes evidence.finalized.
         _, manifest_hash = write_evidence_manifest(
             run_dir=run_dir,
             events_writer=ctx.events,
         )
 
-        # Persist the evidence config sidecar.
+        # Persist the evidence config sidecar (including durable_mode).
         cfg = state.get("config")
         evidence_cfg = getattr(cfg, "evidence", None)
         if evidence_cfg is not None:
@@ -134,9 +144,11 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 signing_key_path=evidence_cfg.signing_key_path,
                 durable_store=evidence_cfg.durable_store,
                 public_key_path=evidence_cfg.public_key_path,
+                durable_mode=getattr(evidence_cfg, "durable_mode", None),
             )
 
-        # 4. Re-render the report with the final manifest hash + event timeline.
+        # 6. Re-render the report with the final manifest hash + event timeline.
+        # The timeline now includes evidence.finalized.
         report_path = state.get("report_path")
         review = state.get("review_result")
         events = ctx.events.read_all()
@@ -165,6 +177,30 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
                 manifest_hash=manifest_hash,
                 events=events,
             )
+
+        # 7. Write the evidence.report_bound event — this binds the report
+        # (the human-facing truth surface) to the signed event log. The
+        # report_hash is computed AFTER the report is rendered, so it covers
+        # the exact bytes the human will read. Tampering with or deleting
+        # the report breaks this signed event.
+        #
+        # Note: we do NOT rewrite the manifest after this event. The run
+        # manifest is immutable — it covers the run phase (up to
+        # evidence.finalized). evidence.report_bound is a post-run event,
+        # verified separately. This avoids a circular dependency between
+        # the report's manifest hash and the manifest's chain head.
+        report_hash = compute_report_hash(run_dir)
+        if report_hash is not None:
+            ctx.events.write(
+                EventType.EVIDENCE_REPORT_BOUND,
+                {
+                    "task_id": state["task_id"],
+                    "report_hash": report_hash,
+                    "manifest_hash": manifest_hash,
+                    "event_chain_head_before_report_bound": ctx.events.last_hash,
+                },
+            )
+
         return manifest_hash
     except Exception as exc:  # noqa: BLE001
         ctx.events.write(

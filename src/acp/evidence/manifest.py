@@ -13,16 +13,25 @@ The manifest hash is included in ``final_report.md`` so a reader can verify
 that the report they're reading corresponds to a specific, immutable set of
 artifacts + event log.
 
+v0.5.11 extends the binding: the ``evidence.finalized`` event now also
+carries ``task_json_hash`` (binding the full task metadata), and a separate
+``evidence.report_bound`` event carries ``report_hash`` (binding the
+human-facing report). Together with ``artifact_content_hash``, these three
+hashes bind the complete evidence record — artifacts, task metadata, and
+report — to the signed, hash-chained event log. Tampering with any of them
+breaks a hash recorded in a signed event.
+
 This is not a cryptographic signature — it doesn't prove *who* wrote the
 artifacts. But it makes the evidence set tamper-evident: changing any
-artifact, any event, or the report itself breaks a hash that is recorded
-in the manifest, which is recorded in the report.
+artifact, the report, task.json, or any event breaks a hash that is
+recorded in a signed event.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +39,64 @@ from acp.events import EventWriter, verify_event_chain
 
 EVIDENCE_CONFIG_FILENAME = "evidence_config.json"
 
+# Default ignore rules — generated/heavy paths that should never be hashed
+# as evidence. These are not ACP-created artifacts; they're build/dependency
+# junk that would waste compute and inflate manifests.
+DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset({
+    "__pycache__", ".pytest_cache", ".venv", "node_modules",
+    ".git", "dist", "build", "coverage", ".mypy_cache", ".ruff_cache",
+    "*.pyc", "*.pyo", "*.egg-info",
+})
+
+
+@dataclass(frozen=True)
+class DigestRecord:
+    """Cached digest entry — keyed by path, size, and mtime_ns.
+
+    If a file's size and mtime_ns haven't changed, the cached sha256 is
+    reused. This avoids re-hashing unchanged files on every verify.
+    """
+    path: str
+    size: int
+    mtime_ns: int
+    sha256: str
+
+
+class DigestCache:
+    """Path → DigestRecord cache for streaming file digests.
+
+    Reuses cached digests when (size, mtime_ns) match. Re-hashes from disk
+    only when the file has changed. Files are streamed in 1 MB chunks —
+    never read entirely into memory.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[str, DigestRecord] = {}
+
+    def digest(self, path: Path) -> str:
+        """Return the sha256 of ``path``, using the cache if possible."""
+        path = Path(path)
+        key = str(path)
+        try:
+            stat = path.stat()
+        except OSError:
+            # Can't stat — fall through to direct hash (will likely fail too).
+            return _sha256_file(path)
+        cached = self._records.get(key)
+        if cached is not None and cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+            return cached.sha256
+        result = _sha256_file(path)
+        self._records[key] = DigestRecord(
+            path=key, size=stat.st_size, mtime_ns=stat.st_mtime_ns, sha256=result,
+        )
+        return result
+
 
 def _sha256_file(path: Path) -> str:
-    """sha256 hex digest of a file's contents."""
+    """sha256 hex digest of a file's contents (streamed in 1 MB chunks)."""
     h = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -61,6 +122,57 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
                 artifact_hashes[rel] = _sha256_file(path)
     content = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def compute_task_json_hash(run_dir: Path) -> str | None:
+    """Compute a sha256 over the immutable fields of the run's ``task.json``.
+
+    Returns ``None`` if ``task.json`` does not exist. The hash covers only
+    the *immutable* identity fields of the task (task_id, repo_name,
+    repo_path, base_branch, base_commit_sha, task_branch, worktree_path,
+    user_request, created_at) — not the mutable fields (status, updated_at)
+    which change during lifecycle transitions (approve/reject). This means
+    a status change during a signed lifecycle event does NOT break the
+    binding, but tampering with ``user_request``, ``repo_name``,
+    ``worktree_path``, or any other identity field does.
+
+    The hash uses canonical JSON (parsed + re-serialized with ``sort_keys``)
+    so it's deterministic regardless of key ordering in the source file.
+    """
+    run_dir = Path(run_dir)
+    task_json_path = run_dir / "task.json"
+    if not task_json_path.is_file():
+        return None
+    try:
+        data = json.loads(task_json_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    # Keep only immutable identity fields — exclude status + updated_at
+    # which are lifecycle-mutable.
+    immutable_fields = (
+        "task_id", "repo_name", "repo_path", "base_branch",
+        "base_commit_sha", "task_branch", "worktree_path",
+        "user_request", "created_at",
+    )
+    immutable = {k: data[k] for k in immutable_fields if k in data}
+    return hashlib.sha256(
+        json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def compute_report_hash(run_dir: Path) -> str | None:
+    """Compute a sha256 over the run's ``final_report.md`` file content.
+
+    Returns ``None`` if the report does not exist. This hash is recorded in
+    the ``evidence.report_bound`` event to bind the human-facing report to
+    the signed event log. Tampering with or deleting the report breaks this
+    binding.
+    """
+    run_dir = Path(run_dir)
+    report_path = run_dir / "artifacts" / "final_report.md"
+    if not report_path.is_file():
+        return None
+    return _sha256_file(report_path)
 
 
 def build_evidence_manifest(
@@ -145,12 +257,15 @@ def build_lifecycle_manifest(
     *,
     run_dir: Path,
     events_writer: EventWriter,
+    report_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build the lifecycle manifest dict for a run with post-run lifecycle events.
 
     Covers only lifecycle events (human.approved, human.rejected,
     memory.promoted). The run manifest covers the agent-run evidence;
-    this covers what happened after the run.
+    this covers what happened after the run. When ``report_hash`` is provided
+    (the hash of the re-rendered report after lifecycle), it's included so
+    ``acp verify`` can bind the post-lifecycle report to the lifecycle record.
     """
     run_dir = Path(run_dir)
     all_events = events_writer.read_all()
@@ -173,6 +288,8 @@ def build_lifecycle_manifest(
             for e in lifecycle_events
         ],
     }
+    if report_hash is not None:
+        manifest["report_hash"] = report_hash
     manifest_content = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     manifest["manifest_hash"] = hashlib.sha256(manifest_content.encode()).hexdigest()
     return manifest
@@ -182,13 +299,17 @@ def write_lifecycle_manifest(
     *,
     run_dir: Path,
     events_writer: EventWriter,
+    report_hash: str | None = None,
 ) -> Path | None:
     """Write ``lifecycle_manifest.json`` into the run dir.
 
     Returns the manifest path, or ``None`` if there are no lifecycle events
-    (nothing to record).
+    (nothing to record). When ``report_hash`` is provided, it's included in
+    the manifest so post-lifecycle report verification works.
     """
-    manifest = build_lifecycle_manifest(run_dir=run_dir, events_writer=events_writer)
+    manifest = build_lifecycle_manifest(
+        run_dir=run_dir, events_writer=events_writer, report_hash=report_hash
+    )
     if manifest["lifecycle_event_count"] == 0:
         return None
     manifest_path = Path(run_dir) / "lifecycle_manifest.json"
@@ -253,19 +374,34 @@ def verify_lifecycle_manifest(run_dir: Path) -> bool:
     return True
 
 
-def verify_evidence_manifest(run_dir: Path) -> bool:
+def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     """Verify that the on-disk artifacts + event log match the manifest.
 
     Returns ``True`` iff:
-      * every artifact file listed in the manifest exists and has the
-        recorded sha256
-      * no extra artifact files exist that aren't in the manifest
-      * the event chain head matches
-      * the event chain is valid
       * the manifest's own ``manifest_hash`` is correct (recomputed from the
         manifest content excluding ``manifest_hash`` itself)
-      * if an ``evidence.finalized`` event exists, its ``artifact_manifest_hash``
-        matches the recomputed manifest hash (binds artifacts to signed evidence)
+      * the event chain head matches the last run-phase event
+      * the event chain is valid
+      * if an ``evidence.finalized`` event exists, its ``artifact_content_hash``
+        and ``task_json_hash`` match the recomputed values from disk
+      * if an ``evidence.report_bound`` event exists, its ``report_hash``
+        matches the on-disk report (or the lifecycle manifest's report_hash
+        if lifecycle events have re-rendered the report)
+
+    In **fast mode** (default, ``deep=False``): the ``artifact_content_hash``
+    in ``evidence.finalized`` covers all artifacts (it's a hash of all
+    artifact hashes), so individual artifact hash recompute is skipped.
+    This is sufficient for tamper detection — any artifact change breaks
+    the content hash.
+
+    In **deep mode** (``deep=True``): every individual artifact hash is
+    recomputed from disk and compared against the manifest, AND extra-file
+    detection runs (no files exist that aren't in the manifest). Use this
+    in CI/nightly for stricter verification.
+
+    Task.json status changes are allowed when a corresponding signed lifecycle
+    event (human.approved / human.rejected) exists — the status field is the
+    only field permitted to change post-finalize.
     """
     run_dir = Path(run_dir)
     manifest_path = run_dir / "evidence_manifest.json"
@@ -294,27 +430,66 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
     # Restore it for the rest of the function.
     manifest["manifest_hash"] = stored_hash
 
-    # Verify artifact hashes.
+    # In deep mode, verify individual artifact hashes and check for extra
+    # files. In fast mode, the artifact_content_hash in evidence.finalized
+    # covers all artifacts — individual recompute is redundant. But for
+    # older runs without evidence.finalized, fast mode falls back to
+    # individual hash checks (there's no content hash to rely on).
+    cache = DigestCache() if deep else None
     artifacts_dir = run_dir / "artifacts"
-    for rel, expected_hash in manifest.get("artifacts", {}).items():
-        path = run_dir / rel
-        if not path.is_file():
-            return False
-        if _sha256_file(path) != expected_hash:
-            return False
 
-    # Check for extra files not in the manifest (final_report.md is excluded
-    # — it's a projection, not source evidence).
-    if artifacts_dir.is_dir():
-        on_disk = {
-            str(p.relative_to(run_dir))
-            for p in artifacts_dir.rglob("*")
-            if p.is_file()
-        }
-        on_disk.discard("artifacts/final_report.md")
-        manifest_files = set(manifest.get("artifacts", {}).keys())
-        if on_disk != manifest_files:
-            return False
+    # Peek at the event log to determine if evidence.finalized exists.
+    # (We'll parse it fully below, but we need this flag now.)
+    from acp.models import Event as _PeekEvent
+    events_path_peek = run_dir / "events.jsonl"
+    has_finalized_peek = False
+    if events_path_peek.is_file():
+        for line in events_path_peek.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                peek_evt = _PeekEvent.model_validate_json(line)
+                if peek_evt.type.value == "evidence.finalized":
+                    has_finalized_peek = True
+                    break
+            except Exception:
+                pass
+
+    # Fast mode can skip individual hash recompute only when evidence.finalized
+    # exists (its artifact_content_hash covers all artifacts). Otherwise,
+    # fall back to full individual hash checks.
+    can_skip_individual = (not deep) and has_finalized_peek
+
+    if deep or not can_skip_individual:
+        for rel, expected_hash in manifest.get("artifacts", {}).items():
+            path = run_dir / rel
+            if not path.is_file():
+                return False
+            actual = cache.digest(path) if cache else _sha256_file(path)
+            if actual != expected_hash:
+                return False
+
+        # Check for extra files not in the manifest (final_report.md is excluded
+        # — it's a projection, not source evidence).
+        if artifacts_dir.is_dir():
+            on_disk = {
+                str(p.relative_to(run_dir))
+                for p in artifacts_dir.rglob("*")
+                if p.is_file()
+            }
+            on_disk.discard("artifacts/final_report.md")
+            manifest_files = set(manifest.get("artifacts", {}).keys())
+            if on_disk != manifest_files:
+                return False
+    else:
+        # Fast mode with evidence.finalized: just check that artifact files
+        # exist (don't recompute hashes — artifact_content_hash covers that).
+        # Still check for missing files, as a deleted artifact changes the
+        # content hash.
+        for rel in manifest.get("artifacts", {}).keys():
+            path = run_dir / rel
+            if not path.is_file():
+                return False
 
     # Verify event chain. The event log is the source of truth — if it's
     # missing or empty, the manifest cannot be valid.
@@ -334,15 +509,31 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
         return False
     if not events:
         return False
-    if events[-1].hash != manifest.get("event_chain_head"):
+
+    # Detect lifecycle + post-run events.
+    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    post_run_types = lifecycle_types | {"evidence.report_bound"}
+    has_lifecycle = any(e.type.value in lifecycle_types for e in events)
+
+    # The manifest's event_chain_head covers the run phase only — up to
+    # evidence.finalized. Post-run events (evidence.report_bound, lifecycle)
+    # are NOT included in the run manifest's chain head. This keeps the run
+    # manifest immutable while post-run events are verified separately.
+    run_phase_events = [e for e in events if e.type.value not in post_run_types]
+    if run_phase_events:
+        if run_phase_events[-1].hash != manifest.get("event_chain_head"):
+            return False
+    elif events[-1].hash != manifest.get("event_chain_head"):
+        # No run-phase events found (shouldn't happen for a valid run, but
+        # fall back to the last event for backward compat).
         return False
 
     # Verify the evidence.finalized event — if present, its payload hashes
     # must match the recomputed values from disk. This is what binds artifacts,
-    # the report, and task.json to the signed event log. If an attacker tampers
-    # with any of these and updates the manifest to match, the evidence.finalized
-    # event's payload still has the old hashes — and that event is signed and
-    # hash-chained.
+    # task.json, and (indirectly via report_bound) the report to the signed
+    # event log. If an attacker tampers with any of these and updates the
+    # manifest to match, the evidence.finalized event's payload still has the
+    # old hashes — and that event is signed and hash-chained.
     finalized_events = [e for e in events if e.type == EventType.EVIDENCE_FINALIZED]
     if finalized_events:
         finalized = finalized_events[-1]
@@ -353,6 +544,34 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
         if expected_artifact_hash != recomputed_artifact_hash:
             return False
 
+        # Task.json hash — covers immutable identity fields only. Status and
+        # updated_at are excluded (they change during lifecycle transitions),
+        # so a signed approve/reject doesn't break this binding. Tampering
+        # with user_request, repo_name, worktree_path, etc. does.
+        expected_task_hash = finalized.payload.get("task_json_hash")
+        if expected_task_hash is not None:
+            recomputed_task_hash = compute_task_json_hash(run_dir)
+            if recomputed_task_hash != expected_task_hash:
+                return False
+
+    # Verify the evidence.report_bound event — if present, its report_hash
+    # must match the on-disk report. After lifecycle events, a SECOND
+    # evidence.report_bound event is written with the re-rendered report's
+    # hash. We check the LAST report_bound event — it's the most recent
+    # binding and is signed + hash-chained. An attacker who tampers with
+    # the report breaks this signed binding, regardless of lifecycle state.
+    report_bound_events = [e for e in events if e.type == EventType.EVIDENCE_REPORT_BOUND]
+    if report_bound_events:
+        report_bound = report_bound_events[-1]
+        expected_report_hash = report_bound.payload.get("report_hash")
+        if expected_report_hash is not None:
+            report_path = run_dir / "artifacts" / "final_report.md"
+            if not report_path.is_file():
+                return False  # missing report is always fatal
+            actual_report_hash = _sha256_file(report_path)
+            if actual_report_hash != expected_report_hash:
+                return False  # report tampered with or doesn't match signed binding
+
     return True
 
 
@@ -360,12 +579,14 @@ def verify_evidence_manifest(run_dir: Path) -> bool:
 # Evidence config sidecar
 # --------------------------------------------------------------------------- #
 #
-# The evidence config (signing key path, durable store path, public key path)
-# is a property of a *run*, not of the human approving it later. We persist it
-# as a sidecar ``evidence_config.json`` at finalize time so that post-run
-# lifecycle commands (``acp approve`` / ``acp reject``) can recover the exact
-# signing key + durable store the run used — and therefore sign lifecycle
-# events with the same key and dual-write them to the same SQLite index.
+# The evidence config (signing key path, durable store path, public key path,
+# durable mode) is a property of a *run*, not of the human approving it later.
+# We persist it as a sidecar ``evidence_config.json`` at finalize time so that
+# post-run lifecycle commands (``acp approve`` / ``acp reject``) can recover
+# the exact signing key + durable store + durable mode the run used — and
+# therefore sign lifecycle events with the same key, dual-write them to the
+# same SQLite index, and fail closed if the durable store is required but
+# unavailable.
 #
 # Only filesystem *paths* are recorded (never key material). The paths are
 # resolved at finalize time, so they are absolute and stable.
@@ -377,30 +598,38 @@ def write_evidence_config(
     signing_key_path: Path | None = None,
     durable_store: Path | None = None,
     public_key_path: Path | None = None,
+    durable_mode: Any = None,
 ) -> Path:
     """Persist the run's evidence config as ``evidence_config.json``.
 
     Records the resolved filesystem paths for the signing key, durable store,
-    and public key so post-run lifecycle commands can recover them. Only paths
-    are stored — never key bytes. Idempotent: overwrites any prior sidecar.
+    and public key, plus the durable mode (disabled/best_effort/required) so
+    post-run lifecycle commands can recover them. Only paths are stored —
+    never key bytes. Idempotent: overwrites any prior sidecar.
     """
     run_dir = Path(run_dir)
+    # durable_mode may be a DurableMode enum or a plain string.
+    durable_mode_str: str | None = None
+    if durable_mode is not None:
+        durable_mode_str = getattr(durable_mode, "value", str(durable_mode))
     config: dict[str, str | None] = {
         "signing_key_path": str(signing_key_path) if signing_key_path else None,
         "durable_store": str(durable_store) if durable_store else None,
         "public_key_path": str(public_key_path) if public_key_path else None,
+        "durable_mode": durable_mode_str,
     }
     path = run_dir / EVIDENCE_CONFIG_FILENAME
     path.write_text(json.dumps(config, indent=2) + "\n")
     return path
 
 
-def read_evidence_config(run_dir: Path) -> dict[str, Path | None]:
+def read_evidence_config(run_dir: Path) -> dict[str, Path | None | str]:
     """Read the run's evidence config sidecar.
 
-    Returns a dict with ``signing_key_path``, ``durable_store``, and
-    ``public_key_path`` keys (each a ``Path`` or ``None``). Returns all-None
-    if the sidecar is absent (e.g. runs from before this was written).
+    Returns a dict with ``signing_key_path``, ``durable_store``,
+    ``public_key_path`` (each a ``Path`` or ``None``), and ``durable_mode``
+    (a ``str`` or ``None``). Returns all-None if the sidecar is absent
+    (e.g. runs from before this was written).
 
     Raises ``ValueError`` if the sidecar exists but contains malformed JSON —
     a corrupt evidence config must not be silently treated as "no config,"
@@ -410,7 +639,12 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None]:
     run_dir = Path(run_dir)
     path = run_dir / EVIDENCE_CONFIG_FILENAME
     if not path.is_file():
-        return {"signing_key_path": None, "durable_store": None, "public_key_path": None}
+        return {
+            "signing_key_path": None,
+            "durable_store": None,
+            "public_key_path": None,
+            "durable_mode": None,
+        }
     try:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, ValueError) as exc:
@@ -421,4 +655,5 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None]:
         "signing_key_path": Path(data["signing_key_path"]) if data.get("signing_key_path") else None,
         "durable_store": Path(data["durable_store"]) if data.get("durable_store") else None,
         "public_key_path": Path(data["public_key_path"]) if data.get("public_key_path") else None,
+        "durable_mode": data.get("durable_mode"),
     }

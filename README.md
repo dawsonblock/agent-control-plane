@@ -26,12 +26,14 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.10 alpha — Evidence binding (signed artifact evidence)
+## Current scope: v0.5.11 alpha — Full evidence binding
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
-signing, artifact manifests, and human approval workflow. The trust layer is
-under active hardening and should be used for controlled dogfooding, not
-production autonomous operation.
+signing, artifact manifests, and human approval workflow. The trust layer
+binds the complete evidence record — artifacts, task metadata, and the
+human-facing report — to the signed event log. It is under active hardening
+and should be used for controlled dogfooding, not production autonomous
+operation.
 
 This repository currently implements:
 
@@ -48,7 +50,8 @@ This repository currently implements:
 | **v0.5.7** | Config-driven signing + durable store, `acp verify` + `acp events` CLI commands | Stable |
 | **v0.5.8** | Human approval workflow — `acp approve`, `acp reject`, `acp list`, vault note audit trail | Stable |
 | **v0.5.9** | Approval-safe evidence: lifecycle events signed + manifest-refreshed; fail-closed signing; task_id validation; `EvidenceLoop` quarantined | Stable |
-| **v0.5.10** | Evidence binding: `evidence.finalized` event binds artifacts+report+task.json to signed event log; composite durable store key; task identity binding; manifest hash recompute; lifecycle manifest; durable mode (disabled/best_effort/required); `--runs-root` on `acp run`; diff junk filtering; `--debug` on verify | Current |
+| **v0.5.10** | Evidence binding: `evidence.finalized` binds artifact content hash to signed event log; composite durable store key; task identity binding; manifest hash recompute; lifecycle manifest; durable mode; `--runs-root`; diff junk filtering; `--debug` on verify | Stable |
+| **v0.5.11** | Full evidence binding: `evidence.finalized` binds artifacts + task.json (immutable fields); `evidence.report_bound` binds the human-facing report; missing manifest/report/lifecycle-manifest fails verification; `durable_mode` persisted + fail-closed lifecycle writes; malformed event log suppresses signature success; `acp verify --deep` mode with `DigestCache`; immutable run manifest + separate lifecycle evidence | Current |
 | **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.

@@ -113,11 +113,18 @@ def _record_lifecycle_event(
 ) -> str | None:
     """Append a post-run lifecycle event and keep the evidence manifest valid.
 
-    Returns a warning string if the durable store write failed, or ``None``
-    if everything succeeded (or no durable store was configured).
+    Returns a warning string if the durable store write failed (in best_effort
+    mode), or ``None`` if everything succeeded (or no durable store was
+    configured). In ``required`` durable mode, a durable store write failure
+    raises ``ACPError`` instead of returning a warning — the lifecycle action
+    must not succeed if the durable store is unavailable.
     """
-    from acp.errors import EvidenceConfigError
-    from acp.evidence.manifest import read_evidence_config, write_evidence_manifest
+    from acp.errors import ACPError, EvidenceConfigError
+    from acp.evidence.manifest import (
+        compute_report_hash,
+        read_evidence_config,
+        write_lifecycle_manifest,
+    )
 
     events = EventWriter(task_id, run_dir)
     ev_cfg = read_evidence_config(run_dir)
@@ -164,9 +171,10 @@ def _record_lifecycle_event(
 
     # Dual-write to the run's durable store if it had one. The SQLite store
     # is a derived index, but failures must be visible — not silently swallowed.
-    # We surface the error via a warning printed to the console; the JSONL log
-    # (the canonical source) already has the lifecycle event.
+    # In ``required`` durable mode, a write failure is fatal: the lifecycle
+    # action must not succeed if the durable store is unavailable.
     durable_store_path = ev_cfg["durable_store"]
+    durable_mode = ev_cfg.get("durable_mode")
     durable_warning = None
     if durable_store_path is not None:
         try:
@@ -174,21 +182,20 @@ def _record_lifecycle_event(
             with DurableEventStore(durable_store_path) as db:
                 db.append(evt)
         except Exception as exc:  # noqa: BLE001
+            if durable_mode == "required":
+                # Fail closed — the durable store is required evidence, not
+                # just a query index. The lifecycle event was already written
+                # to the JSONL log, but the action must not succeed.
+                raise ACPError(
+                    f"durable store write failed (mode=required): {exc}",
+                    exit_code=1,
+                ) from exc
             durable_warning = f"durable store write failed: {exc}"
 
-    # Recompute + rewrite the evidence manifest so its event chain head
-    # matches the new last event. ``acp verify`` checks events[-1].hash
-    # against manifest.event_chain_head, so this must be current.
-    write_evidence_manifest(run_dir=run_dir, events_writer=events)
-
-    # Write a lifecycle manifest — a separate record of post-run lifecycle
-    # events (approve/reject). This keeps the run evidence immutable while
-    # providing a verifiable record of lifecycle actions.
-    try:
-        from acp.evidence.manifest import write_lifecycle_manifest
-        write_lifecycle_manifest(run_dir=run_dir, events_writer=events)
-    except Exception:  # noqa: BLE001
-        pass  # best-effort; the event log is authoritative
+    # The run evidence manifest is immutable — it covers the run phase (up to
+    # evidence.finalized) and is never rewritten after lifecycle events. The
+    # lifecycle manifest (written below) covers post-run events. This keeps
+    # the run evidence tamper-evident without a mutable manifest.
 
     # Re-render the report so its event timeline + manifest hash reflect the
     # updated event log. Without this, the report shows stale evidence after
@@ -198,6 +205,51 @@ def _record_lifecycle_event(
         rerender_report_from_run(run_dir)
     except Exception:  # noqa: BLE001
         pass  # report re-render is best-effort; the manifest is authoritative
+
+    # Write a second evidence.report_bound event binding the re-rendered report
+    # to the signed event log. This is the key security property: the post-
+    # lifecycle report is bound to a SIGNED, hash-chained event — not just to
+    # the unsigned lifecycle manifest. An attacker who tampers with the report
+    # after lifecycle events breaks this signed binding.
+    report_hash = compute_report_hash(run_dir)
+    report_bound_evt = None
+    if report_hash is not None:
+        report_bound_evt = events.write(
+            EventType.EVIDENCE_REPORT_BOUND,
+            {
+                "task_id": task_id,
+                "report_hash": report_hash,
+                "lifecycle_event": event_type.value,
+                "event_chain_head_before_report_bound": events.last_hash,
+            },
+        )
+
+    # Dual-write the report_bound event to the durable store (same mode
+    # semantics as the lifecycle event above).
+    if report_bound_evt is not None and durable_store_path is not None:
+        try:
+            from acp.evidence.durable_store import DurableEventStore
+            with DurableEventStore(durable_store_path) as db:
+                db.append(report_bound_evt)
+        except Exception as exc:  # noqa: BLE001
+            if durable_mode == "required":
+                raise ACPError(
+                    f"durable store write failed (mode=required): {exc}",
+                    exit_code=1,
+                ) from exc
+            durable_warning = f"durable store write failed: {exc}"
+
+    # Write a lifecycle manifest — a separate record of post-run lifecycle
+    # events (approve/reject). This keeps the run evidence immutable while
+    # providing a verifiable record of lifecycle actions. The report_hash
+    # is included for human readability, but the authoritative binding is
+    # the signed evidence.report_bound event above.
+    try:
+        write_lifecycle_manifest(
+            run_dir=run_dir, events_writer=events, report_hash=report_hash
+        )
+    except Exception:  # noqa: BLE001
+        pass  # best-effort; the event log is authoritative
 
     return durable_warning
 
@@ -313,6 +365,11 @@ def verify(
         "--public-key",
         help="Path to a 32-byte raw Ed25519 public key for signature verification.",
     ),
+    deep: bool = typer.Option(
+        False,
+        "--deep",
+        help="Deep mode: recompute all declared artifact hashes from disk (slower, stricter).",
+    ),
     debug: bool = typer.Option(
         False,
         "--debug",
@@ -327,18 +384,21 @@ def verify(
       2. Event hash chain is valid (tamper-evident)
       3. Evidence manifest exists, manifest_hash is correct, and all artifact
          hashes match
-      4. evidence.finalized event binds artifact manifest to signed event log
-      5. (Optional) Ed25519 event signatures are valid
+      4. evidence.finalized event binds artifacts + task.json to signed event log
+      5. evidence.report_bound event binds the human-facing report
+      6. Lifecycle manifest required + valid when lifecycle events exist
+      7. (Optional) Ed25519 event signatures are valid
+
+    Default (fast) mode checks event chain, signatures, manifest structure,
+    task identity, and selected evidence hashes. ``--deep`` mode recomputes
+    all declared artifact hashes from disk — use in CI/nightly for stricter
+    verification.
 
     Exits 0 if all checks pass, 1 if any fail. Malformed data produces clean
     error messages, not tracebacks. Use ``--debug`` to see full tracebacks.
     """
-    from acp.events import verify_event_chain, verify_event_signatures
-    from acp.evidence.manifest import verify_evidence_manifest
-    from acp.models import Event, EventType
-
     try:
-        _verify_impl(task_id, runs_root, public_key, debug)
+        _verify_impl(task_id, runs_root, public_key, deep, debug)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -348,7 +408,13 @@ def verify(
         raise typer.Exit(code=1) from exc
 
 
-def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: bool) -> None:
+def _verify_impl(
+    task_id: str,
+    runs_root: Path,
+    public_key: Path | None,
+    deep: bool,
+    debug: bool,
+) -> None:
     """Internal verify implementation — separated for clean error handling."""
     from acp.events import verify_event_chain, verify_event_signatures
     from acp.evidence.manifest import verify_evidence_manifest
@@ -364,6 +430,7 @@ def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: 
 
     all_ok = True
     events: list[Event] = []
+    has_malformed_events = False
 
     # 0. Task identity binding — all identity fields must agree.
     dir_name = run_dir.name
@@ -409,6 +476,7 @@ def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: 
                 f"[red]✗[/] event log malformed at line(s): {', '.join(str(n) for n in malformed_lines[:5])}"
             )
             all_ok = False
+            has_malformed_events = True
         elif not events:
             console.print(f"[red]✗[/] event log is empty")
             all_ok = False
@@ -428,10 +496,22 @@ def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: 
                 )
                 all_ok = False
 
-    # 2. Evidence manifest (includes manifest_hash recompute + evidence.finalized check).
+    # Detect lifecycle events — these require a lifecycle manifest.
+    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    has_lifecycle = any(e.type.value in lifecycle_types for e in events)
+    has_evidence_finalized = any(e.type == EventType.EVIDENCE_FINALIZED for e in events)
+
+    # 2. Evidence manifest — required for v0.5.10+ runs (those with
+    # evidence.finalized). Missing manifest is fatal, not a warning.
     manifest_path = run_dir / "evidence_manifest.json"
     if not manifest_path.is_file():
-        console.print(f"[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
+        if has_evidence_finalized:
+            # v0.5.10+ run — the manifest is required evidence. Its absence
+            # means the evidence set has been tampered with.
+            console.print(f"[red]✗[/] evidence manifest not found — required for runs with evidence.finalized")
+            all_ok = False
+        else:
+            console.print(f"[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
     else:
         try:
             import json as _json
@@ -446,16 +526,30 @@ def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: 
             console.print(f"[red]✗[/] evidence manifest is malformed JSON")
             all_ok = False
 
-        if verify_evidence_manifest(run_dir):
-            console.print(f"[green]✓[/] evidence manifest valid (artifacts + event chain + manifest_hash match)")
+        if verify_evidence_manifest(run_dir, deep=deep):
+            mode_label = "deep" if deep else "fast"
+            console.print(
+                f"[green]✓[/] evidence manifest valid ({mode_label} mode: "
+                f"artifacts + report + task.json + event chain + manifest_hash match)"
+            )
         else:
-            console.print(f"[red]✗[/] evidence manifest INVALID — artifacts, event log, or manifest_hash don't match")
+            console.print(
+                f"[red]✗[/] evidence manifest INVALID — artifacts, report, task.json, "
+                f"event log, or manifest_hash don't match"
+            )
             all_ok = False
 
-    # 3. Ed25519 signatures (optional).
+    # 3. Ed25519 signatures (optional). If the event log is malformed, we
+    # skip the "signatures valid" success message — printing it would be
+    # misleading, since it only applies to the parsed subset, not the full log.
     if public_key is not None:
         if not events_path.is_file():
             console.print(f"[red]✗[/] cannot verify signatures without event log")
+            all_ok = False
+        elif has_malformed_events:
+            console.print(
+                f"[red]✗[/] signature verification skipped because event log is malformed"
+            )
             all_ok = False
         else:
             try:
@@ -477,10 +571,25 @@ def _verify_impl(task_id: str, runs_root: Path, public_key: Path | None, debug: 
                 console.print(f"[red]✗[/] signature verification error: {exc}")
                 all_ok = False
 
-    # 4. Lifecycle manifest (if lifecycle events exist).
+    # 4. Lifecycle manifest — required when lifecycle events exist. A missing
+    # lifecycle manifest with lifecycle events in the log means the lifecycle
+    # record has been deleted (tampering).
     from acp.evidence.manifest import verify_lifecycle_manifest
     lifecycle_path = run_dir / "lifecycle_manifest.json"
-    if lifecycle_path.is_file():
+    if has_lifecycle:
+        if not lifecycle_path.is_file():
+            console.print(
+                f"[red]✗[/] lifecycle manifest not found — required when lifecycle "
+                f"events (approve/reject/promote) exist in the event log"
+            )
+            all_ok = False
+        elif verify_lifecycle_manifest(run_dir):
+            console.print(f"[green]✓[/] lifecycle manifest valid")
+        else:
+            console.print(f"[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
+            all_ok = False
+    elif lifecycle_path.is_file():
+        # Lifecycle manifest exists but no lifecycle events — verify it's valid.
         if verify_lifecycle_manifest(run_dir):
             console.print(f"[green]✓[/] lifecycle manifest valid")
         else:

@@ -73,6 +73,7 @@ class EventType(str, Enum):
     TASK_COMPLETED = "task.completed"
     NODE_FAILED = "node.failed"
     EVIDENCE_FINALIZED = "evidence.finalized"
+    EVIDENCE_REPORT_BOUND = "evidence.report_bound"
 
 
 class RiskLevel(str, Enum):
