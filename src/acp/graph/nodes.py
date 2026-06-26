@@ -1016,8 +1016,14 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # v0.6.0: Detect TESTS_MISSING from the review result. If the
     # RiskEngine flagged this and dynamic_test_generation is enabled,
     # the repair prompt instructs the agent to write tests.
+    # IMPORTANT: Only use the test-gen prompt when there are NO actual
+    # command failures. If tests are failing, always use the repair
+    # prompt (fix the code first, write tests later). The TESTS_MISSING
+    # path is reached when tests pass but the reviewer flags that no
+    # test files were modified — the agent needs to write tests, not
+    # fix broken code.
     tests_missing = False
-    if cfg.agent.dynamic_test_generation:
+    if cfg.agent.dynamic_test_generation and not failures:
         review = state.get("review_result")
         if review is not None and hasattr(review, "concerns"):
             tests_missing = any(

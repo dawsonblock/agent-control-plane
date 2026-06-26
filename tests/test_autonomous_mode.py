@@ -473,6 +473,86 @@ class TestGraphRouting:
         state = {"status": TaskStatus.NEEDS_REVIEW}
         assert _route_after_auto_merge(state) == "needs_review"
 
+    def test_route_after_review_tests_missing(self):
+        """review_diff routes to repair_plan when TESTS_MISSING is flagged."""
+        from acp.graph.workflow import _route_after_review
+
+        cfg = MagicMock()
+        cfg.agent.dynamic_test_generation = True
+        cfg.agent.max_repair_attempts = 5
+        cfg.agent.repair_repeat_breaker = 0
+
+        review = MagicMock()
+        review.concerns = [
+            "Behavior changed but no test files were modified or added",
+        ]
+
+        state = {
+            "config": cfg,
+            "review_result": review,
+            "repair_attempts": 0,
+        }
+        assert _route_after_review(state) == "repair_plan"
+
+    def test_route_after_review_no_tests_missing(self):
+        """review_diff routes to write_report when TESTS_MISSING is not flagged."""
+        from acp.graph.workflow import _route_after_review
+
+        cfg = MagicMock()
+        cfg.agent.dynamic_test_generation = True
+        cfg.agent.max_repair_attempts = 5
+
+        review = MagicMock()
+        review.concerns = ["Some other concern"]
+
+        state = {
+            "config": cfg,
+            "review_result": review,
+            "repair_attempts": 0,
+        }
+        assert _route_after_review(state) == "write_report"
+
+    def test_route_after_review_tests_missing_disabled(self):
+        """review_diff routes to write_report when dynamic_test_generation is False."""
+        from acp.graph.workflow import _route_after_review
+
+        cfg = MagicMock()
+        cfg.agent.dynamic_test_generation = False
+        cfg.agent.max_repair_attempts = 5
+
+        review = MagicMock()
+        review.concerns = [
+            "Behavior changed but no test files were modified or added",
+        ]
+
+        state = {
+            "config": cfg,
+            "review_result": review,
+            "repair_attempts": 0,
+        }
+        assert _route_after_review(state) == "write_report"
+
+    def test_route_after_review_tests_missing_exhausted(self):
+        """review_diff routes to write_report when repair attempts are exhausted."""
+        from acp.graph.workflow import _route_after_review
+
+        cfg = MagicMock()
+        cfg.agent.dynamic_test_generation = True
+        cfg.agent.max_repair_attempts = 2
+        cfg.agent.repair_repeat_breaker = 0
+
+        review = MagicMock()
+        review.concerns = [
+            "Behavior changed but no test files were modified or added",
+        ]
+
+        state = {
+            "config": cfg,
+            "review_result": review,
+            "repair_attempts": 2,  # exhausted
+        }
+        assert _route_after_review(state) == "write_report"
+
 
 # --------------------------------------------------------------------------- #
 # 6. Circuit breaker

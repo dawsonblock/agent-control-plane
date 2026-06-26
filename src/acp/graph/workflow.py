@@ -154,6 +154,44 @@ def _route_after_auto_merge(state: dict[str, Any]) -> str:
     return "done"
 
 
+def _route_after_review(state: dict[str, Any]) -> str:
+    """Route after review_diff: test-generation repair or write_report.
+
+    v0.6.0: When dynamic_test_generation is enabled and the review flags
+    TESTS_MISSING (behavior changed but no test files), route back to the
+    repair loop so the agent can write tests. This is a second entry point
+    into the repair loop (the first is from run_tests when commands fail).
+
+    The repair loop cap (max_repair_attempts) still applies — the circuit
+    breaker prevents infinite loops. If attempts are exhausted, fall
+    through to write_report which will produce a NEEDS_REVIEW report.
+    """
+    cfg = state.get("config")
+    review = state.get("review_result")
+
+    # Check if TESTS_MISSING is flagged and dynamic test generation is enabled.
+    if cfg is not None and cfg.agent.dynamic_test_generation:
+        if review is not None and hasattr(review, "concerns"):
+            tests_missing = any(
+                "tests_missing" in c.lower() or "no test files" in c.lower()
+                for c in review.concerns
+            )
+            if tests_missing:
+                attempts = int(state.get("repair_attempts", 0))
+                if attempts < cfg.agent.max_repair_attempts:
+                    # Circuit breaker check (same as _route_after_tests).
+                    breaker = getattr(cfg.agent, "repair_repeat_breaker", 0)
+                    if breaker > 0 and attempts >= breaker:
+                        fingerprints = state.get("repair_fingerprints", [])
+                        if len(fingerprints) >= breaker:
+                            recent = fingerprints[-breaker:]
+                            if len(set(recent)) == 1:
+                                return "write_report"
+                    return "repair_plan"
+
+    return "write_report"
+
+
 def _route_after_check(state: dict[str, Any]) -> str:
     return "failed" if _is_failed(state) else "create_worktree"
 
@@ -273,7 +311,10 @@ def build_workflow(
     g.add_edge("run_repair", "run_tests")
 
     g.add_edge("capture_diff", "review_diff")
-    g.add_edge("review_diff", "write_report")
+    # v0.6.0: review_diff → repair_plan (if TESTS_MISSING + dynamic_test_generation)
+    # OR write_report (normal path). The conditional edge lets the repair loop
+    # trigger a second time for test generation after the diff is reviewed.
+    g.add_conditional_edges("review_diff", _route_after_review)
 
     # write_report → done (PASSED) OR needs_review OR failed
     # v0.6.0: When autonomous_mode is True and PASSED, routes through
