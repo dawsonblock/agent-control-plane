@@ -1,0 +1,17 @@
+# Agent File: codex
+#
+# A versioned, hashed profile for the OpenAI Codex CLI agent.
+
+name: codex
+version: "1.0.0"
+role: coder
+command_template: "codex --prompt-file {prompt_path}"
+capabilities:
+  - code_edit
+  - file_read
+  - file_write
+  - test_generation
+timeout_seconds: 1800
+max_repair_attempts: 5
+sha256: ""
+binary_path: null

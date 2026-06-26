@@ -1,0 +1,25 @@
+# Agent File: claude-code
+#
+# A versioned, hashed profile for the Claude Code CLI agent.
+# The registry verifies the sha256 hash of the binary before execution.
+# If the hash doesn't match, ACP refuses to run the agent.
+#
+# Generate the hash with:
+#   sha256sum $(which claude-code)
+
+name: claude-code
+version: "1.0.0"
+role: coder
+command_template: "claude-code --prompt-file {prompt_path}"
+capabilities:
+  - code_edit
+  - file_read
+  - file_write
+  - test_generation
+  - shell_exec
+timeout_seconds: 1800
+max_repair_attempts: 5
+# SHA-256 of the agent binary. Leave empty to skip hash verification.
+sha256: ""
+# Path to the binary to verify. Leave empty to skip.
+binary_path: null

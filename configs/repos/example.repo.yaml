@@ -27,6 +27,10 @@ agent:
   #   command_template: "codex --prompt-file {prompt_path}"           # Codex CLI
   #   command_template: "opencode run --prompt {prompt_path}"         # OpenCode
   command_template: ""
+  # v0.6.4 (M9): Agent File registry — versioned, hashed agent profiles.
+  # When set, build_agent verifies the selected agent's hash against the
+  # registry before execution. A hash mismatch raises AgentConfigError.
+  # agents_dir: agents
 
 commands:
   # Leave a command empty ("") to skip it. Only non-empty commands run.

@@ -60,6 +60,18 @@ class AgentSection(BaseModel):
     # this many times in a row, the repair loop stops even if attempts
     # remain. Prevents hallucination loops. 0 disables the breaker.
     repair_repeat_breaker: int = 3
+    # v0.6.4 (M9): Path to a directory containing .agent.yaml files.
+    # When set, build_agent verifies the selected agent's hash against
+    # the registry before execution. A hash mismatch raises
+    # AgentConfigError — ACP refuses to run a tampered agent.
+    agents_dir: Path | None = None
+
+    @field_validator("agents_dir")
+    @classmethod
+    def _absolute_agents(cls, v: Path | None) -> Path | None:
+        if v is None:
+            return None
+        return v.expanduser().resolve()
 
 
 class CommandsSection(BaseModel):
