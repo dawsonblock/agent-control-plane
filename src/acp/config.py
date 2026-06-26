@@ -14,6 +14,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from acp.models import RiskLevel
+
 
 class DurableMode(str, Enum):
     """Durable store operational mode.
@@ -145,6 +147,14 @@ class ReviewSection(BaseModel):
     # into the default branch. Requires autonomous_mode=True.
     # Default False — must be explicitly opted in.
     auto_merge: bool = False
+    # v0.6.8: Human firewall for autonomous auto-merge. Auto-merge is only
+    # allowed when the review risk is at or below this level. Tasks above
+    # this level are downgraded to NEEDS_REVIEW so a human must click
+    # approved: true before the change reaches the default branch. This
+    # enforces the rule: "do not let the swarm act on the wider network
+    # until a human approves" for high-risk changes (database, secrets,
+    # auth). Default "medium" — HIGH-risk tasks always require a human.
+    auto_merge_max_risk: RiskLevel = RiskLevel.MEDIUM
 
     @field_validator("max_changed_files")
     @classmethod

@@ -295,6 +295,9 @@ class TestAutoMergeNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # A real run has a full event chain by auto-merge time; establish a
+        # valid chain so the integrity gate passes and the merge proceeds.
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -401,6 +404,9 @@ class TestAutoMergeNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # Establish a valid chain so the integrity gate passes and the
+        # conflict is actually exercised (not short-circuited).
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -413,6 +419,272 @@ class TestAutoMergeNode:
 
         assert result.get("auto_merged") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
+
+    def test_auto_merge_refused_on_high_risk(self, tmp_path):
+        """auto_merge_node refuses when review risk exceeds auto_merge_max_risk.
+
+        Human firewall: a HIGH-risk change (database, secrets, auth) may
+        not be auto-merged to the default branch — a human must click
+        approved: true first. The refusal writes an auto.merge.refused
+        event and downgrades to NEEDS_REVIEW.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test", path=repo_path, default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+                auto_merge_max_risk=RiskLevel.MEDIUM,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        review = ReviewResult(
+            risk=RiskLevel.HIGH,
+            recommendation=Recommendation.MERGE,
+            concerns=["high-risk change"],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "exceeds auto_merge_max_risk" in result.get("error", "")
+
+        # The refusal is recorded in the event log.
+        all_events = events.read_all()
+        refused = [e for e in all_events if e.type == EventType.AUTO_MERGE_REFUSED]
+        assert len(refused) == 1
+        assert refused[0].payload["reason"] == "risk_exceeds_max"
+        assert refused[0].payload["review_risk"] == "high"
+
+        # And no auto.merged event was written.
+        merged = [e for e in all_events if e.type == EventType.AUTO_MERGED]
+        assert len(merged) == 0
+
+        # The merge must NOT have happened — feature.py is not on main.
+        repo = Repo(str(repo_path))
+        repo.git.checkout("main")
+        assert not (repo_path / "feature.py").exists()
+
+    def test_auto_merge_allowed_when_risk_at_ceiling(self, tmp_path):
+        """auto_merge proceeds when review risk equals auto_merge_max_risk.
+
+        MEDIUM risk with auto_merge_max_risk=MEDIUM is allowed (not
+        strictly above the ceiling). This confirms the boundary.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test", path=repo_path, default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+                auto_merge_max_risk=RiskLevel.MEDIUM,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        review = ReviewResult(
+            risk=RiskLevel.MEDIUM,
+            recommendation=Recommendation.MERGE,
+            concerns=[],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is True
+        all_events = events.read_all()
+        assert any(e.type == EventType.AUTO_MERGED for e in all_events)
+
+    def test_auto_merge_refused_on_broken_event_chain(self, tmp_path):
+        """auto_merge_node refuses when the event chain is tampered/broken.
+
+        Integrity gate: a task with no tamper-proof audit trail may not
+        reach the default branch autonomously. We corrupt the chain by
+        rewriting an event's hash so verify_event_chain fails.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test", path=repo_path, default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        # Corrupt the event log: rewrite the hash so the chain breaks.
+        log_path = run_dir / "events.jsonl"
+        lines = log_path.read_text().splitlines()
+        import json as _json
+        first = _json.loads(lines[0])
+        first["hash"] = "0" * 64  # bogus hash
+        log_path.write_text(_json.dumps(first) + "\n")
+
+        review = ReviewResult(
+            risk=RiskLevel.LOW,
+            recommendation=Recommendation.MERGE,
+            concerns=[],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "event chain verification failed" in result.get("error", "")
+
+        all_events = events.read_all()
+        refused = [e for e in all_events if e.type == EventType.AUTO_MERGE_REFUSED]
+        # The refusal event is appended after the corrupted line.
+        assert any(r.payload["reason"] == "event_chain_broken" for r in refused)
+        merged = [e for e in all_events if e.type == EventType.AUTO_MERGED]
+        assert len(merged) == 0
+
+        # The merge must NOT have happened.
+        repo = Repo(str(repo_path))
+        repo.git.checkout("main")
+        assert not (repo_path / "feature.py").exists()
 
 
 # --------------------------------------------------------------------------- #

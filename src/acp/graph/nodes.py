@@ -40,7 +40,7 @@ from acp.evidence.manifest import (
 )
 from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
 from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, RiskLevel, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
@@ -1031,9 +1031,24 @@ def auto_merge_node(
     here after auto_approve). Writes an ``auto.merged`` event with the
     merge commit SHA.
 
-    If the merge fails (conflicts, diverged base), the task is downgraded
-    to ``NEEDS_REVIEW`` so a human can resolve it manually. The merge
-    failure is recorded in the event log.
+    Two hard gates refuse the merge and downgrade to ``NEEDS_REVIEW`` so
+    a human must click approved: true before the change reaches the
+    default branch (the "human firewall" for autonomous mode):
+
+      1. **Risk gate**: if the review risk exceeds
+         ``config.review.auto_merge_max_risk`` (default MEDIUM), the
+         merge is refused. HIGH-risk changes (database, secrets, auth)
+         always require a human — the swarm may not push them to main
+         on its own.
+      2. **Integrity gate**: the hash-chained event log is verified
+         with :func:`verify_event_chain` before merging. A broken or
+         tampered audit trail refuses the merge — a task with no
+         tamper-proof evidence trail is not allowed to reach the
+         default branch autonomously.
+
+    If the merge itself fails (conflicts, diverged base), the task is
+    likewise downgraded to ``NEEDS_REVIEW``. Every refusal writes an
+    ``auto.merge.refused`` event recording the reason.
     """
     cfg = state.get("config")
     if cfg is None or not cfg.review.auto_merge:
@@ -1043,6 +1058,77 @@ def auto_merge_node(
     repo_path = state.get("repo_path")
     if repo_path is None:
         return {}
+
+    # --- Hard gate 1: risk-level human firewall ----------------------- #
+    review = state.get("review_result")
+    if review is not None:
+        max_risk = cfg.review.auto_merge_max_risk
+        if _risk_exceeds(review.risk, max_risk):
+            ctx.events.write(
+                EventType.AUTO_MERGE_REFUSED,
+                {
+                    "reason": "risk_exceeds_max",
+                    "review_risk": review.risk.value,
+                    "auto_merge_max_risk": max_risk.value,
+                    "task_branch": task.task_branch,
+                    "base_branch": cfg.repo.default_branch,
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_merged": False,
+                "error": (
+                    f"auto_merge refused: review risk '{review.risk.value}' "
+                    f"exceeds auto_merge_max_risk '{max_risk.value}' — "
+                    "human approval required"
+                ),
+            }
+
+    # --- Hard gate 2: event-chain integrity --------------------------- #
+    try:
+        from acp.events import verify_event_chain
+
+        events = ctx.events.read_all()
+        if not verify_event_chain(events):
+            ctx.events.write(
+                EventType.AUTO_MERGE_REFUSED,
+                {
+                    "reason": "event_chain_broken",
+                    "task_branch": task.task_branch,
+                    "base_branch": cfg.repo.default_branch,
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_merged": False,
+                "error": (
+                    "auto_merge refused: event chain verification failed "
+                    "(tampered or incomplete audit trail) — human approval required"
+                ),
+            }
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {
+                "node": "auto_merge",
+                "exception_type": type(exc).__name__,
+                "message": f"event chain verification error: {exc}",
+            },
+        )
+        task.status = TaskStatus.NEEDS_REVIEW
+        task.touch()
+        ctx.store.save(task)
+        return {
+            "status": TaskStatus.NEEDS_REVIEW,
+            "auto_merged": False,
+            "error": f"auto_merge: event chain verification error: {exc}",
+        }
 
     try:
         from acp.gitops.merge import merge_to_base
@@ -1081,6 +1167,17 @@ def auto_merge_node(
             "auto_merged": False,
             "error": f"auto_merge: {exc}",
         }
+
+
+def _risk_exceeds(actual: "RiskLevel", ceiling: "RiskLevel") -> bool:
+    """Return True if ``actual`` is riskier than ``ceiling``.
+
+    Order: LOW < MEDIUM < HIGH. ``actual`` exceeds ``ceiling`` when it
+    sits strictly above the ceiling — a HIGH-risk task exceeds a MEDIUM
+    ceiling, but a MEDIUM-risk task does not.
+    """
+    order = [RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH]
+    return order.index(actual) > order.index(ceiling)
 
 
 # --------------------------------------------------------------------------- #

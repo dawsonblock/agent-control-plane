@@ -59,6 +59,13 @@ review:
   # and block_secret_leaks: true.
   # autonomous_mode: false     # true = auto-approve on PASSED (no human click)
   # auto_merge: false          # true = merge task branch into default branch
+  # v0.6.8: Human firewall for auto-merge. Auto-merge is only allowed when
+  # the review risk is at or below this level. Tasks above it (e.g. HIGH-
+  # risk database/secret/auth changes) are downgraded to NEEDS_REVIEW so
+  # a human must approve before the change reaches the default branch.
+  # Default "medium". Set to "low" to require a human for any non-trivial
+  # change; "high" disables the gate (not recommended).
+  # auto_merge_max_risk: medium
 
 context:
   include:
