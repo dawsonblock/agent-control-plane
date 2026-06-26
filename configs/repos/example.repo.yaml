@@ -63,6 +63,22 @@ memory:
   graphiti_group_id: my-app
   promote_reports_by_default: false
 
+# v0.6.3 (M8): Skills governance — YAML playbooks that govern review,
+# repair, and prompt behavior. When active_skill is set, the skill's
+# prompt instructions are injected into the agent prompt and its review
+# gates (hard blocks, risk elevators, required files) are applied during
+# diff review.
+#
+# skills_dir: path to a directory containing skill .yaml or SKILL.md files
+# active_skill: name of the skill to activate (leave empty for no skill)
+#
+# Example:
+#   skills_dir: skills
+#   active_skill: RefactorDatabase
+skills:
+  # skills_dir: skills
+  # active_skill: ""
+
 # Execution backend (v0.5.13). Determines HOW the coding agent runs.
 #
 #   worktree    — traditional git worktree isolation (default). The agent

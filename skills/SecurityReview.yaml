@@ -1,0 +1,50 @@
+# Skill: SecurityReview
+#
+# Governs security-sensitive changes (auth, crypto, permissions). When
+# active, this skill:
+#   1. Injects prompt instructions guiding the agent to follow secure
+#      coding practices.
+#   2. Hard-blocks changes to permission/policy files without a test.
+#   3. Elevates risk for auth/crypto changes to HIGH.
+#   4. Requires test files for any auth-related change.
+
+name: SecurityReview
+purpose: >
+  Enforce secure coding practices for auth, crypto, and permission
+  changes. Ensures the agent follows least-privilege principles and
+  includes tests for security-sensitive modifications.
+
+prompt_instructions: |
+  When making security-sensitive changes:
+  - Follow least-privilege: grant only the permissions needed.
+  - Never hardcode secrets, tokens, or passwords.
+  - Use parameterized queries to prevent SQL injection.
+  - Validate and sanitize all user inputs.
+  - Include tests for auth flows and permission checks.
+  - Do not weaken existing security controls without explicit approval.
+
+review_gates:
+  hard_blocks:
+    - description: "Block permission/policy changes without tests"
+      file_pattern: "*permission*"
+      requires_file: "*test*"
+    - description: "Block policy.json changes without tests"
+      file_pattern: "*policy*"
+      requires_file: "*test*"
+
+  risk_elevators:
+    - description: "Elevate risk for auth changes"
+      file_pattern: "*auth*"
+      to_level: high
+    - description: "Elevate risk for crypto changes"
+      file_pattern: "*crypto*"
+      to_level: high
+
+  required_files:
+    - "*test*"
+
+rules:
+  - "Never hardcode secrets or tokens"
+  - "Always include tests for auth flow changes"
+  - "Follow least-privilege for permission changes"
+  - "Validate and sanitize all user inputs"

@@ -47,6 +47,26 @@ def write_prompt(
             f"  {context_bundle_path}\n"
         )
 
+    # v0.6.3 (M8): Inject skill prompt instructions when a skill is active.
+    skill_section = ""
+    skill_name = getattr(repo_config.skills, "active_skill", "") if hasattr(repo_config, "skills") else ""
+    if skill_name:
+        try:
+            from acp.skills.enforcement import get_skill_prompt_instructions
+            instructions = get_skill_prompt_instructions(
+                skill_name,
+                getattr(repo_config.skills, "skills_dir", None),
+            )
+            if instructions:
+                skill_section = (
+                    f"\n\nSkill: {skill_name}\n"
+                    f"The following skill-specific instructions apply to this task.\n"
+                    f"Follow them in addition to the general constraints below.\n\n"
+                    f"{instructions}\n"
+                )
+        except Exception:  # noqa: BLE001
+            pass  # Skills not available — don't block the run
+
     body = f"""You are operating inside an isolated git worktree. A control plane
 is watching you. Everything you print is captured. The diff you produce is
 reviewed before any human approval.
@@ -58,7 +78,7 @@ Repo:
   {repo.name} (default branch: {repo.default_branch})
 
 Task:
-  {user_request}{context_section}
+  {user_request}{context_section}{skill_section}
 
 Constraints (non-negotiable):
   - Edit only files inside this worktree.

@@ -262,6 +262,23 @@ def _evaluate(
             level=RiskLevel.MEDIUM,
         )
 
+    # --- v0.6.3 (M8): skill review gates ---------------------------------- #
+    # When a skill is active, its review gates (hard blocks, risk elevators,
+    # required files) are applied on top of the default evaluation.
+    skill_name = getattr(cfg.skills, "active_skill", "") if hasattr(cfg, "skills") else ""
+    if skill_name:
+        try:
+            from acp.skills.enforcement import apply_skill_review_gates, get_active_skill
+
+            skill = get_active_skill(
+                skill_name,
+                getattr(cfg.skills, "skills_dir", None),
+            )
+            if skill:
+                apply_skill_review_gates(engine, skill, diff.changed_files)
+        except Exception:  # noqa: BLE001
+            pass  # Skills not available — don't block the review
+
     risk = engine.level
     recommendation = engine.recommend(
         tests_pass=tests_pass,

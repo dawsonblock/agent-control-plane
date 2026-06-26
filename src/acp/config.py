@@ -113,6 +113,31 @@ class MemorySection(BaseModel):
     promote_reports_by_default: bool = False
 
 
+class SkillsSection(BaseModel):
+    """Skills governance settings (v0.6.3 / M8).
+
+    - ``skills_dir``: path to a directory containing skill definition
+      files (``.yaml`` or ``SKILL.md``). When set, skills are loaded
+      at startup and can be activated per-task via ``active_skill``.
+
+    - ``active_skill``: the name of the skill to activate for all tasks
+      run with this config. When set, the skill's prompt instructions
+      are injected into the agent prompt and its review gates are
+      applied during diff review. Leave empty to run without a skill
+      (default).
+    """
+
+    skills_dir: Path | None = None
+    active_skill: str = ""
+
+    @field_validator("skills_dir")
+    @classmethod
+    def _absolute(cls, v: Path | None) -> Path | None:
+        if v is None:
+            return None
+        return v.expanduser().resolve()
+
+
 class ExecutorSection(BaseModel):
     """Sandbox / execution backend settings (v0.5.13).
 
@@ -212,6 +237,7 @@ class RepoConfig(BaseModel):
     memory: MemorySection = Field(default_factory=MemorySection)
     evidence: EvidenceSection = Field(default_factory=EvidenceSection)
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
+    skills: SkillsSection = Field(default_factory=SkillsSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

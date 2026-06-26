@@ -1,0 +1,48 @@
+# Skill: RefactorDatabase
+#
+# Governs database schema refactoring tasks. When active, this skill:
+#   1. Injects prompt instructions guiding the agent to create backups
+#      and include both up/down migrations.
+#   2. Hard-blocks any schema deletion (DROP/DELETE) without a backup file.
+#   3. Elevates risk for raw SQL changes.
+#   4. Requires at least one migration file in the diff.
+
+name: RefactorDatabase
+purpose: >
+  Safely refactor database schema with backup and migration files.
+  Ensures the agent creates backups before destructive changes and
+  includes reversible migration scripts.
+
+prompt_instructions: |
+  When refactoring database schema:
+  - Always create a backup file before deleting columns or tables.
+  - Include both up and down migrations for every schema change.
+  - Test the migration on a copy of the schema first.
+  - Never use DROP TABLE or DROP COLUMN without a backup file.
+  - Name migration files with a timestamp prefix (e.g., 001_add_column.py).
+
+review_gates:
+  hard_blocks:
+    - description: "Block schema deletion without backup file"
+      file_pattern: "*drop*"
+      requires_file: "*backup*"
+    - description: "Block DROP TABLE in SQL without migration file"
+      file_pattern: "*.sql"
+      requires_file: "*migration*"
+
+  risk_elevators:
+    - description: "Elevate risk for raw SQL changes"
+      file_pattern: "*.sql"
+      to_level: high
+    - description: "Elevate risk for schema files"
+      file_pattern: "*schema*"
+      to_level: high
+
+  required_files:
+    - "*migration*"
+
+rules:
+  - "Never delete a column without a backup"
+  - "Always include up and down migrations"
+  - "Test migrations on a copy of the schema first"
+  - "Name migration files with a timestamp prefix"
