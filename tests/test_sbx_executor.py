@@ -48,9 +48,9 @@ def _mock_sbx_installed():
 
 
 def _mock_sbx_version(version: str = "sbx 1.0.0"):
-    """Patch subprocess.run to return a version string for --version."""
+    """Patch subprocess.run to return a version string for `sbx version`."""
     def _run_mock(cmd, **kwargs):
-        if cmd == ["sbx", "--version"]:
+        if cmd == ["sbx", "version"]:
             return MagicMock(stdout=version, stderr="", returncode=0)
         return MagicMock(stdout="", stderr="", returncode=0)
     return patch("acp.executor.sbx.subprocess.run", side_effect=_run_mock)

@@ -106,8 +106,9 @@ class SbxExecutor:
     def get_version() -> str:
         """Return the ``sbx`` version string, or empty if not installed."""
         try:
+            # sbx uses "sbx version" (not "--version").
             proc = subprocess.run(
-                ["sbx", "--version"],
+                ["sbx", "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
