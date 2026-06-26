@@ -271,6 +271,38 @@ class ExecutorSection(BaseModel):
         return v
 
 
+class FederationServerConfig(BaseModel):
+    """Configuration for a single MCP server (v0.6.9).
+
+    - ``name``: server name for identification in events and prompts.
+    - ``command``: the command to spawn the MCP server (e.g.
+      ``["python", "-m", "my_mcp_server"]``).
+    - ``env``: optional environment variables for the server process.
+    - ``timeout_seconds``: per-request timeout (default 30).
+    """
+
+    name: str
+    command: list[str]
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = 30
+
+
+class FederationSection(BaseModel):
+    """Agent federation via MCP (v0.6.9).
+
+    When configured, ACP discovers tools from each MCP server before
+    the agent runs and injects them into the agent prompt. The agent
+    can request federated tool calls; ACP proxies them — the agent
+    never touches the network directly.
+
+    This implements the rUv federation concept inside the ACP vault:
+    agents are microservices that expose capabilities to one another,
+    but all calls go through the zero-trust control plane.
+    """
+
+    servers: list[FederationServerConfig] = Field(default_factory=list)
+
+
 class EvidenceSection(BaseModel):
     """Evidence integrity settings (v0.5.6).
 
@@ -328,6 +360,7 @@ class RepoConfig(BaseModel):
     evidence: EvidenceSection = Field(default_factory=EvidenceSection)
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
     skills: SkillsSection = Field(default_factory=SkillsSection)
+    federation: FederationSection = Field(default_factory=FederationSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

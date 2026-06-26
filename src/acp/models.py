@@ -97,6 +97,11 @@ class EventType(str, Enum):
     AUTO_MERGED = "auto.merged"
     AUTO_MERGE_REFUSED = "auto.merge.refused"
     TEST_GENERATION_ATTEMPTED = "test_generation.attempted"
+    # v0.6.9: Agent federation via MCP.
+    # federation.discovered = MCP server tools discovered before agent run
+    # federation.tool_called  = a federated tool was called (proxied by ACP)
+    FEDERATION_DISCOVERED = "federation.discovered"
+    FEDERATION_TOOL_CALLED = "federation.tool_called"
 
 
 class RiskLevel(str, Enum):

@@ -130,3 +130,24 @@ executor:
   # network_policy: locked_down  # locked_down | balanced (strict enum, never open)
   # remove_after_run: false    # true = remove sandbox after run; false = keep
 
+# v0.6.9: Agent federation via MCP (Model Context Protocol).
+# When configured, ACP discovers tools from each MCP server before the
+# agent runs and injects them into the agent prompt. The agent can
+# request federated tool calls; ACP proxies them — the agent never
+# touches the network directly. This implements the rUv federation
+# concept inside the ACP vault: agents are microservices that expose
+# capabilities to one another, but all calls go through the zero-trust
+# control plane.
+#
+# Each server is a subprocess that speaks JSON-RPC 2.0 over stdio (the
+# standard MCP transport). Example:
+#   federation:
+#     servers:
+#       - name: codebase-search
+#         command: ["python", "-m", "my_search_mcp_server"]
+#         env:
+#           API_KEY: "secret"
+#         timeout_seconds: 30
+federation:
+  servers: []
+

@@ -67,6 +67,22 @@ def write_prompt(
         except Exception:  # noqa: BLE001
             pass  # Skills not available — don't block the run
 
+    # v0.6.9: Inject federated MCP tool capabilities when configured.
+    federation_section = ""
+    federation_servers = getattr(repo_config.federation, "servers", []) if hasattr(repo_config, "federation") else []
+    if federation_servers:
+        try:
+            from acp.federation.client import FederationManager
+            fm = FederationManager(
+                servers=[s.model_dump() for s in federation_servers],
+            )
+            fm.start_all()
+            tools_by_server = fm.discover_tools()
+            federation_section = fm.build_prompt_section(tools_by_server)
+            fm.stop_all()
+        except Exception:  # noqa: BLE001
+            pass  # Federation not available — don't block the run
+
     body = f"""You are operating inside an isolated git worktree. A control plane
 is watching you. Everything you print is captured. The diff you produce is
 reviewed before any human approval.
@@ -78,7 +94,7 @@ Repo:
   {repo.name} (default branch: {repo.default_branch})
 
 Task:
-  {user_request}{context_section}{skill_section}
+  {user_request}{context_section}{skill_section}{federation_section}
 
 Constraints (non-negotiable):
   - Edit only files inside this worktree.
