@@ -42,3 +42,5 @@ vault/tasks/*
 .idea/
 .vscode/
 *.swp
+ui/node_modules/
+ui/dist/

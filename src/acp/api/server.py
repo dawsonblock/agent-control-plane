@@ -26,6 +26,8 @@ from acp.store import TaskStore
 # FastAPI is an optional dependency (the `api` extra).
 try:
     from fastapi import FastAPI, HTTPException, Query
+    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
     raise ImportError(
@@ -433,3 +435,27 @@ async def memory_search(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return results
+
+
+# --------------------------------------------------------------------------- #
+# v0.6.6 (M11): Serve the React UI (built from ui/dist/)
+# --------------------------------------------------------------------------- #
+
+# The React dashboard is built with `npm run build` in the ui/ directory.
+# The output goes to ui/dist/. We mount it as static files at /ui/ and
+# serve index.html at /ui (the root dashboard).
+_UI_DIST = Path(__file__).resolve().parent.parent.parent.parent / "ui" / "dist"
+
+if _UI_DIST.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(_UI_DIST), html=True), name="ui")
+
+    @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+    async def dashboard() -> str:
+        """Serve the React dashboard (built from ui/dist/)."""
+        index = _UI_DIST / "index.html"
+        if index.is_file():
+            return index.read_text(encoding="utf-8")
+        raise HTTPException(
+            status_code=404,
+            detail="UI not built. Run: cd ui && npm run build"
+        )
