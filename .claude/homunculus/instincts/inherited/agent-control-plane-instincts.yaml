@@ -1,0 +1,320 @@
+# Instincts generated from https://github.com/dawsonblock/agent-control-plane
+# Generated: 2026-06-26T08:13:17.864Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: agent-control-plane-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat
+
+## Evidence
+
+- 2 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat(v0.6.8): human firewall for autonomous auto-merge, feat: surface auto-merge refusal reason in CLI and UI
+
+---
+id: agent-control-plane-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Commit Length
+
+## Action
+
+Write moderate-length commit messages (~54 characters)
+
+## Evidence
+
+- Average commit message length: 54 chars
+- Based on 2 commits
+
+---
+id: agent-control-plane-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: agent-control-plane-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: agent-control-plane-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: agent-control-plane-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: agent-control-plane-instinct-file-naming
+trigger: "When creating a new file in the codebase"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct File Naming
+
+## Action
+
+Name the file using camelCase format
+
+## Evidence
+
+- Pattern in namingConventions.files: camelCase
+
+---
+id: agent-control-plane-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Function Naming
+
+## Action
+
+Name the function using camelCase format
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: agent-control-plane-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase format
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: agent-control-plane-instinct-constant-naming
+trigger: "When declaring a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: agent-control-plane-instinct-import-style
+trigger: "When importing modules within the codebase"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Import Style
+
+## Action
+
+Use relative import statements
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: agent-control-plane-instinct-export-style
+trigger: "When exporting functions or classes from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: agent-control-plane-instinct-commit-format
+trigger: "When making a git commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Commit Format
+
+## Action
+
+Format the commit message using the conventional commit style with 'feat' prefix for features
+
+## Evidence
+
+- Pattern in commits.type: conventional
+- Pattern in commits.prefixes: ['feat']
+- Seen in commit: feat(v0.6.8): human firewall for autonomous auto-merge
+
+---
+id: agent-control-plane-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Commit Length
+
+## Action
+
+Keep the commit message concise, around 54 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength: 54
+
+---
+id: agent-control-plane-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Test Location
+
+## Action
+
+Place test files in the separate 'tests' folder
+
+## Evidence
+
+- Pattern in architecture.testLocation: separate
+- Pattern in architecture.commonFolders: tests
+
+---
+id: agent-control-plane-instinct-try-catch-errors
+trigger: "When handling errors in code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/agent-control-plane
+---
+
+# Agent Control Plane Instinct Try Catch Errors
+
+## Action
+
+Use try-catch blocks for error handling
+
+## Evidence
+
+- Pattern in errorHandling.style: try-catch
+
