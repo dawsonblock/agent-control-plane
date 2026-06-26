@@ -132,6 +132,9 @@ def run(
         elif status == TaskStatus.NEEDS_REVIEW:
             console.print(f"[yellow]![/] report: {report_path or '(missing)'}")
             console.print(f"[yellow]![/] vault: {vault_note_path or '(missing)'}")
+            error = result.get("error")
+            if error:
+                console.print(f"[yellow]![/] reason: {error}")
             console.print(
                 f"\n[dim]Task {result.get('task_id')} → needs review. "
                 f"Review the vault note and set approved: true to promote memory.[/]"
@@ -314,9 +317,11 @@ def _verify_impl(
 
     # Detect lifecycle events — these require a lifecycle manifest.
     # v0.6.0: auto.approved and auto.merged are also lifecycle events.
+    # v0.6.8: auto.merge.refused is a lifecycle event (it downgrades the
+    # task to NEEDS_REVIEW, so it affects the derived status).
     lifecycle_types = {
         "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "auto.approved", "auto.merged", "auto.merge.refused",
     }
     has_lifecycle = any(e.type.value in lifecycle_types for e in events)
     has_evidence_finalized = any(e.type == EventType.EVIDENCE_FINALIZED for e in events)

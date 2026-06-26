@@ -288,6 +288,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
 }
 
+.event-refusal {
+  border-left: 3px solid var(--warning, #f0ad4e);
+  background: rgba(240, 173, 78, 0.08);
+}
+
+.event-payload {
+  color: var(--warning, #f0ad4e);
+  font-size: 11px;
+  font-family: monospace;
+}
+
 /* Memory results */
 .memory-results {
   margin-top: 16px;

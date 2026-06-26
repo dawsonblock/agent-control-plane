@@ -146,13 +146,20 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       <div className="detail-section">
         <h3>Event Timeline ({events.length} events)</h3>
         <div className="event-timeline">
-          {events.map((e) => (
-            <div key={e.event_id} className="event-item">
-              <div className="event-type">{e.type}</div>
-              <div className="event-time">{new Date(e.timestamp).toLocaleString()}</div>
-              <div className="event-hash">{e.hash.slice(0, 16)}...</div>
-            </div>
-          ))}
+          {events.map((e) => {
+            const isRefusal = e.type === "auto.merge.refused";
+            const reason = (e.payload as Record<string, string>).reason;
+            return (
+              <div key={e.event_id} className={`event-item${isRefusal ? " event-refusal" : ""}`}>
+                <div className="event-type">{e.type}</div>
+                <div className="event-time">{new Date(e.timestamp).toLocaleString()}</div>
+                <div className="event-hash">{e.hash.slice(0, 16)}...</div>
+                {isRefusal && reason && (
+                  <div className="event-payload">⚠ {reason}</div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
