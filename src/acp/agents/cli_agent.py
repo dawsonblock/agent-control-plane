@@ -7,11 +7,12 @@ it's calling — it just substitutes placeholders, runs the command in the
 worktree, and captures output. Swapping agents is a config change only;
 the workflow never changes.
 
-**Security note:** the command is run with ``shell=True`` because templates
-may include pipes, redirects, or env vars. This is **trusted config** — the
-operator writing the repo config is trusted to provide a safe command
-template. This is NOT safe against malicious repo config. Do not point ACP
-at a repo config you did not write.
+**Security note:** By default, the command is split with ``shlex.split()``
+and run with ``shell=False`` — no shell interpretation. If the template
+contains shell metacharacters (``|``, ``>``, ``<``, ``&``, ``;``, ``$``,
+backticks), ``shell=True`` is used as a fallback, but **only** when the
+executor backend is ``docker_sbx`` (sandboxed). In ``worktree`` mode, shell
+metacharacters are refused to prevent RCE on the host.
 
 Supported placeholders in ``command_template``:
 
@@ -33,6 +34,19 @@ from acp.config import RepoConfig
 from acp.errors import AgentConfigError
 from acp.models import AgentResult
 
+# Shell metacharacters that require shell=True. If any of these appear in
+# the rendered command, we either use shell=True (in docker_sbx mode) or
+# refuse to run (in worktree mode).
+_SHELL_METACHARS = set("|<>;&$\n`")
+
+# Commands that are known to be safe for shell=False even though they may
+# contain spaces (e.g. "npm run lint" → ["npm", "run", "lint"]).
+
+
+def _needs_shell(command: str) -> bool:
+    """Return True if the command contains shell metacharacters."""
+    return any(ch in _SHELL_METACHARS for ch in command)
+
 
 class CLIAgent:
     """Runs an external coding agent via a configured command template."""
@@ -48,6 +62,8 @@ class CLIAgent:
                 "agent.command_template in the repo config."
             )
         self.template = template
+        self._backend = config.executor.backend
+        self._allow_shell = config.agent.allow_shell
 
     def run(
         self,
@@ -68,12 +84,36 @@ class CLIAgent:
             timeout_seconds=timeout_seconds,
         )
 
+        # Determine whether we need shell=True for shell metacharacters.
+        use_shell = False
+        if _needs_shell(command):
+            if self._backend == "docker_sbx":
+                # Sandboxed — shell features are safe inside the microVM.
+                use_shell = True
+            elif self._allow_shell:
+                # Operator explicitly opted in — trusted config.
+                use_shell = True
+            else:
+                # Worktree mode — running on the host. Refuse shell
+                # metacharacters to prevent RCE via manipulated config.
+                raise AgentConfigError(
+                    f"agent.command_template contains shell metacharacters "
+                    f"(|, >, <, &, ;, $, backticks) but executor.backend is "
+                    f"'worktree' — these are only allowed in 'docker_sbx' mode "
+                    f"or when agent.allow_shell=True. Either switch to "
+                    f"docker_sbx, set allow_shell: true in the repo config, "
+                    f"or simplify the command template.\n"
+                    f"Template: {command}"
+                )
+
+        argv = command if use_shell else shlex.split(command)
+
         start = time.monotonic()
         try:
             proc = subprocess.run(
-                command,
+                argv,
                 cwd=str(worktree_path),
-                shell=True,
+                shell=use_shell,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,

@@ -65,6 +65,12 @@ class AgentSection(BaseModel):
     # the registry before execution. A hash mismatch raises
     # AgentConfigError — ACP refuses to run a tampered agent.
     agents_dir: Path | None = None
+    # v0.6.7: Allow shell=True for command_template in worktree mode.
+    # By default, shell metacharacters (|, >, <, &, ;, $, backticks) are
+    # refused in worktree mode to prevent RCE. Set to True to allow them
+    # — this is an explicit opt-in for operators who trust their config
+    # and need shell features (pipes, redirects) on the host.
+    allow_shell: bool = False
 
     @field_validator("default")
     @classmethod

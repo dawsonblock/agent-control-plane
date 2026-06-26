@@ -29,6 +29,7 @@ def _config(repo_path: Path, *, agent: str, command_template: str = "") -> RepoC
             default=agent,
             command_template=command_template,
             timeout_seconds=60,
+            allow_shell=True,  # test uses shell features (pipes, redirects)
         ),
         commands=CommandsSection(test='echo "tests passed"'),
         review=ReviewSection(),

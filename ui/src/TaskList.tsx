@@ -1,5 +1,6 @@
 // Task list component — shows all tasks with status badges.
-// Auto-refreshes every 3 seconds to show status changes for running tasks.
+// Uses SSE (Server-Sent Events) for real-time status updates, with
+// a fallback to periodic polling if SSE is not available.
 
 import { useEffect, useState, useCallback } from "react";
 import { api, type TaskSummary } from "./api";
@@ -21,7 +22,7 @@ const STATUS_COLORS: Record<string, string> = {
   executing: "#06b6d4",
 };
 
-const REFRESH_INTERVAL = 3000; // 3 seconds
+const POLL_FALLBACK_INTERVAL = 5000; // 5 seconds (fallback if SSE fails)
 
 export function TaskList({ onSelect, selectedId, refreshKey }: TaskListProps) {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
@@ -41,10 +42,36 @@ export function TaskList({ onSelect, selectedId, refreshKey }: TaskListProps) {
     fetchTasks();
   }, [refreshKey, fetchTasks]);
 
-  // Auto-refresh polling — picks up status changes from background tasks.
+  // SSE stream for real-time updates — falls back to polling on error.
   useEffect(() => {
-    const interval = setInterval(fetchTasks, REFRESH_INTERVAL);
-    return () => clearInterval(interval);
+    let es: EventSource | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let sseFailed = false;
+
+    try {
+      es = api.streamTasks();
+      es.onmessage = () => {
+        // SSE message received — refresh the task list.
+        fetchTasks();
+      };
+      es.onerror = () => {
+        // SSE failed — fall back to polling.
+        if (!sseFailed) {
+          sseFailed = true;
+          es?.close();
+          es = null;
+          pollInterval = setInterval(fetchTasks, POLL_FALLBACK_INTERVAL);
+        }
+      };
+    } catch {
+      // EventSource not supported — fall back to polling.
+      pollInterval = setInterval(fetchTasks, POLL_FALLBACK_INTERVAL);
+    }
+
+    return () => {
+      es?.close();
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, [fetchTasks]);
 
   if (loading && tasks.length === 0) return <div className="loading">Loading tasks...</div>;

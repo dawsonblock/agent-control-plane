@@ -106,4 +106,10 @@ export const api = {
 
   searchMemory: (query: string, numResults = 10) =>
     fetchJSON<MemoryFact[]>(`/memory/search?query=${encodeURIComponent(query)}&num_results=${numResults}`),
+
+  // SSE stream — returns an EventSource that emits task status changes.
+  // Each event has a `data` field with a JSON object containing task_id,
+  // status, repo_name, and user_request.
+  streamTasks: (runsRoot = "data/runs"): EventSource =>
+    new EventSource(`${API_BASE}/tasks/stream?runs_root=${encodeURIComponent(runsRoot)}`),
 };

@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -27,13 +28,70 @@ from acp.store import TaskStore
 try:
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
     raise ImportError(
         "FastAPI is not installed. Install with: uv sync --extra api"
     ) from None
+
+import logging
+
+_logger = logging.getLogger("acp.api")
+
+
+def _recover_orphaned_tasks() -> None:
+    """Recover tasks orphaned by a previous server crash.
+
+    Scans for tasks in non-terminal states (created, executing, reviewing)
+    and marks them as FAILED. Also cleans up git worktrees.
+    """
+    runs_root = state.runs_root
+    durable_db_path = runs_root / "tasks.db"
+
+    # Try the DurableTaskStore first (if it has data).
+    if durable_db_path.is_file():
+        try:
+            from acp.evidence.durable_task_store import DurableTaskStore
+            with DurableTaskStore(durable_db_path) as db:
+                recovered = db.recover_orphaned_tasks(runs_root=runs_root)
+                for tid in recovered:
+                    _logger.info("Recovered orphaned task: %s", tid)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("DurableTaskStore recovery failed: %s", exc)
+
+    # Also scan task.json files directly (covers no-DurableTaskStore case).
+    try:
+        from acp.models import TaskStatus
+        from acp.store import TaskStore
+        store = TaskStore(runs_root=runs_root)
+        if store.root.is_dir():
+            for task_dir in sorted(store.root.iterdir()):
+                task_json = task_dir / "task.json"
+                if not task_json.is_file():
+                    continue
+                try:
+                    task = store.load(task_dir.name)
+                    if task.status in (TaskStatus.CREATED, TaskStatus.EXECUTING, TaskStatus.REVIEWING):
+                        task.status = TaskStatus.FAILED
+                        task.touch()
+                        store.save(task)
+                        _logger.info("Recovered orphaned task from task.json: %s", task.task_id)
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("task.json scan for orphans failed: %s", exc)
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: recover orphaned tasks. Shutdown: nothing to clean up."""
+    _recover_orphaned_tasks()
+    yield
 
 
 # --------------------------------------------------------------------------- #
@@ -66,6 +124,7 @@ class ApproveRequest(BaseModel):
 class RejectRequest(BaseModel):
     """Request body for POST /tasks/{task_id}/reject."""
     rejecter: str = ""
+    reason: str = ""
 
 
 class MemorySearchRequest(BaseModel):
@@ -137,6 +196,7 @@ app = FastAPI(
     title="Agent Control Plane",
     description="Local HTTP API for the ACP workflow",
     version="0.6.6",
+    lifespan=lifespan,
 )
 
 # CORS: allow the Vite dev server (5173) and localhost:3000 to call the API.
@@ -311,9 +371,18 @@ async def approve_task(
     runs_root: str = "data/runs",
     vault_root: str = "vault",
 ) -> dict[str, Any]:
-    """Approve a task's vault note."""
-    from acp.events import EventWriter
-    from acp.vault.approval import approve_vault_note, can_approve
+    """Approve a task's vault note.
+
+    Uses the shared lifecycle service (acp.evidence.lifecycle) to ensure
+    full transactional integrity: signed events, SQLite dual-writes,
+    manifest recompute, and rollback on failure — same as ``acp approve``.
+    """
+    from acp.errors import ACPError
+    from acp.evidence.lifecycle import (
+        record_lifecycle_event,
+        rerender_vault_note_from_state,
+    )
+    from acp.vault.approval import can_approve
 
     store = TaskStore(runs_root=Path(runs_root))
     try:
@@ -331,22 +400,41 @@ async def approve_task(
     if not note_path.is_file():
         raise HTTPException(status_code=404, detail=f"Vault note not found: {note_path}")
 
-    try:
-        approve_vault_note(note_path, approver=request.approver)
-        # Write the event
-        run_dir = store.run_dir(task_id)
-        if run_dir.is_dir():
-            events = EventWriter(task_id, run_dir)
-            events.write(EventType.HUMAN_APPROVED, {"approver": request.approver})
-        task.status = TaskStatus.APPROVED
-        task.touch()
-        store.save(task)
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    run_dir = store.run_dir(task_id)
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
 
-    return {"status": "approved", "task_id": task_id}
+    try:
+        durable_warning = record_lifecycle_event(
+            task_id=task_id,
+            run_dir=run_dir,
+            event_type=EventType.HUMAN_APPROVED,
+            payload={
+                "approver": request.approver or "unknown",
+                "vault_note_path": str(note_path),
+            },
+        )
+    except ACPError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Lifecycle event write failed: {exc}") from exc
+
+    task.status = TaskStatus.APPROVED
+    task.touch()
+    store.save(task)
+
+    rerender_vault_note_from_state(
+        note_path=note_path,
+        run_dir=run_dir,
+        task=task,
+        store=store,
+        vault_root=Path(vault_root),
+    )
+
+    result: dict[str, Any] = {"status": "approved", "task_id": task_id}
+    if durable_warning:
+        result["warning"] = durable_warning
+    return result
 
 
 @app.post("/tasks/{task_id}/reject")
@@ -356,9 +444,16 @@ async def reject_task(
     runs_root: str = "data/runs",
     vault_root: str = "vault",
 ) -> dict[str, Any]:
-    """Reject a task's vault note."""
-    from acp.events import EventWriter
-    from acp.vault.approval import reject_vault_note
+    """Reject a task's vault note.
+
+    Uses the shared lifecycle service (acp.evidence.lifecycle) to ensure
+    full transactional integrity — same as ``acp reject``.
+    """
+    from acp.errors import ACPError
+    from acp.evidence.lifecycle import (
+        record_lifecycle_event,
+        rerender_vault_note_from_state,
+    )
 
     store = TaskStore(runs_root=Path(runs_root))
     try:
@@ -366,25 +461,53 @@ async def reject_task(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=404, detail=f"Task not found: {exc}") from exc
 
+    # Cannot reject an already-approved, already-rejected, or archived task.
+    if task.status in (TaskStatus.APPROVED, TaskStatus.REJECTED, TaskStatus.ARCHIVED):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task status is '{task.status.value}' — cannot reject.",
+        )
+
     note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
     if not note_path.is_file():
         raise HTTPException(status_code=404, detail=f"Vault note not found: {note_path}")
 
-    try:
-        reject_vault_note(note_path, rejecter=request.rejecter)
-        run_dir = store.run_dir(task_id)
-        if run_dir.is_dir():
-            events = EventWriter(task_id, run_dir)
-            events.write(EventType.HUMAN_REJECTED, {"rejecter": request.rejecter})
-        task.status = TaskStatus.REJECTED
-        task.touch()
-        store.save(task)
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    run_dir = store.run_dir(task_id)
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
 
-    return {"status": "rejected", "task_id": task_id}
+    try:
+        durable_warning = record_lifecycle_event(
+            task_id=task_id,
+            run_dir=run_dir,
+            event_type=EventType.HUMAN_REJECTED,
+            payload={
+                "rejecter": request.rejecter or "unknown",
+                "reason": request.reason,
+                "vault_note_path": str(note_path),
+            },
+        )
+    except ACPError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Lifecycle event write failed: {exc}") from exc
+
+    task.status = TaskStatus.REJECTED
+    task.touch()
+    store.save(task)
+
+    rerender_vault_note_from_state(
+        note_path=note_path,
+        run_dir=run_dir,
+        task=task,
+        store=store,
+        vault_root=Path(vault_root),
+    )
+
+    result: dict[str, Any] = {"status": "rejected", "task_id": task_id}
+    if durable_warning:
+        result["warning"] = durable_warning
+    return result
 
 
 @app.get("/tasks/{task_id}/events", response_model=list[EventResponse])
@@ -457,6 +580,85 @@ async def memory_search(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return results
+
+
+# --------------------------------------------------------------------------- #
+# SSE streaming — real-time task event updates
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/tasks/stream")
+async def stream_tasks(
+    runs_root: str = "data/runs",
+    poll_interval: float = Query(2.0, ge=0.5, le=30.0),
+) -> Any:
+    """Server-Sent Events stream of task status changes.
+
+    Polls the runs directory every ``poll_interval`` seconds and streams
+    SSE events whenever a task is created or its status changes. The UI
+    consumes this via ``EventSource`` to get instant updates without polling.
+
+    Event format::
+
+        data: {"task_id": "task_...", "status": "executing", "repo_name": "...", ...}
+
+    A ``heartbeat`` event is sent every 30 seconds to keep the connection alive.
+    """
+    store = TaskStore(runs_root=Path(runs_root))
+
+    async def event_stream() -> Any:
+        last_statuses: dict[str, str] = {}
+        heartbeat_counter = 0
+
+        while True:
+            # Scan all tasks.
+            current: dict[str, dict[str, Any]] = {}
+            if store.root.is_dir():
+                for task_dir in sorted(store.root.iterdir()):
+                    task_json = task_dir / "task.json"
+                    if not task_json.is_file():
+                        continue
+                    try:
+                        task = store.load(task_dir.name)
+                        current[task.task_id] = {
+                            "task_id": task.task_id,
+                            "status": task.status.value,
+                            "repo_name": task.repo_name,
+                            "user_request": task.user_request,
+                        }
+                    except Exception:  # noqa: BLE001
+                        continue
+
+            # Emit events for new or changed tasks.
+            for tid, info in current.items():
+                prev_status = last_statuses.get(tid)
+                if prev_status != info["status"]:
+                    yield f"data: {json.dumps(info)}\n\n"
+                    last_statuses[tid] = info["status"]
+
+            # Emit events for tasks that disappeared (cleanup).
+            for tid in list(last_statuses.keys()):
+                if tid not in current:
+                    yield f"data: {json.dumps({'task_id': tid, 'status': 'removed'})}\n\n"
+                    del last_statuses[tid]
+
+            # Heartbeat every ~30 seconds.
+            heartbeat_counter += 1
+            if heartbeat_counter >= int(30 / poll_interval):
+                yield ": heartbeat\n\n"
+                heartbeat_counter = 0
+
+            await asyncio.sleep(poll_interval)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #

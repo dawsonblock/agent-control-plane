@@ -1,5 +1,6 @@
 // Task detail component — shows task info, report, events, approve/reject.
-// Auto-refreshes while the task is in a non-terminal state.
+// Uses SSE for real-time updates while the task is in a non-terminal state,
+// with polling fallback.
 
 import { useEffect, useState, useCallback } from "react";
 import { api, type TaskDetail, type EventItem } from "./api";
@@ -9,7 +10,7 @@ interface TaskDetailProps {
   onAction: () => void;
 }
 
-const REFRESH_INTERVAL = 3000; // 3 seconds
+const POLL_FALLBACK_INTERVAL = 3000; // 3 seconds
 const TERMINAL_STATES = new Set(["passed", "failed", "approved", "rejected", "needs_review"]);
 
 export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
@@ -44,12 +45,34 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
     fetchDetail();
   }, [taskId, fetchDetail]);
 
-  // Auto-refresh while task is in a non-terminal state.
+  // SSE + polling fallback for live updates while non-terminal.
   const isTerminal = task ? TERMINAL_STATES.has(task.status) : true;
   useEffect(() => {
     if (isTerminal) return;
-    const interval = setInterval(fetchDetail, REFRESH_INTERVAL);
-    return () => clearInterval(interval);
+
+    let es: EventSource | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let sseFailed = false;
+
+    try {
+      es = api.streamTasks();
+      es.onmessage = () => fetchDetail();
+      es.onerror = () => {
+        if (!sseFailed) {
+          sseFailed = true;
+          es?.close();
+          es = null;
+          pollInterval = setInterval(fetchDetail, POLL_FALLBACK_INTERVAL);
+        }
+      };
+    } catch {
+      pollInterval = setInterval(fetchDetail, POLL_FALLBACK_INTERVAL);
+    }
+
+    return () => {
+      es?.close();
+      if (pollInterval) clearInterval(pollInterval);
+    };
   }, [isTerminal, fetchDetail]);
 
   const handleApprove = async () => {

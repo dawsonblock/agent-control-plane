@@ -41,10 +41,16 @@ Schema:
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from acp.models import Task, TaskStatus
+
+
+def _now_iso() -> str:
+    """Current UTC time in ISO format."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class DurableTaskStore:
@@ -195,6 +201,91 @@ class DurableTaskStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def find_orphaned_tasks(self) -> list[Task]:
+        """Find tasks in non-terminal states (created, executing, reviewing).
+
+        These are tasks that were interrupted by a server crash or SIGKILL
+        and never reached a terminal state. They should be recovered on
+        the next server startup.
+        """
+        orphaned_statuses = (
+            TaskStatus.CREATED.value,
+            TaskStatus.EXECUTING.value,
+            TaskStatus.REVIEWING.value,
+        )
+        if self._conn is None:
+            raise RuntimeError("DurableTaskStore not initialized — call .init() first")
+        placeholders = ",".join("?" * len(orphaned_statuses))
+        rows = self._conn.execute(
+            f"SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
+            f"task_branch, worktree_path, user_request, status, created_at, updated_at "
+            f"FROM tasks WHERE status IN ({placeholders}) ORDER BY created_at ASC",
+            orphaned_statuses,
+        ).fetchall()
+        return [_row_to_task(row) for row in rows]
+
+    def mark_orphaned(self, task_id: str, reason: str = "server restart") -> None:
+        """Mark an orphaned task as failed with an orphan reason.
+
+        Updates the SQLite store. Use ``recover_orphaned_tasks`` for full
+        recovery (task.json + worktree cleanup).
+        """
+        if self._conn is None:
+            raise RuntimeError("DurableTaskStore not initialized — call .init() first")
+
+        self._conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?",
+            (TaskStatus.FAILED.value, _now_iso(), task_id),
+        )
+
+    def recover_orphaned_tasks(
+        self,
+        runs_root: Path | str,
+        on_recovered: Any = None,
+    ) -> list[str]:
+        """Recover orphaned tasks found in the SQLite store.
+
+        Marks each orphaned task as FAILED with an "orphaned by server
+        restart" reason. Also updates the task.json file and attempts to
+        clean up the git worktree if it still exists.
+
+        Returns a list of recovered task IDs. Calls ``on_recovered(task_id)``
+        for each recovered task if the callback is provided.
+        """
+        from acp.gitops.worktrees import remove_worktree
+        from acp.store import TaskStore
+
+        orphans = self.find_orphaned_tasks()
+        recovered: list[str] = []
+
+        store = TaskStore(runs_root=Path(runs_root))
+
+        for task in orphans:
+            try:
+                # Update task.json.
+                task.status = TaskStatus.FAILED
+                task.touch()
+                store.save(task)
+
+                # Update SQLite.
+                self.save(task)
+
+                # Clean up worktree if it exists.
+                wt_path = task.worktree_path
+                if wt_path and Path(wt_path).is_dir():
+                    try:
+                        remove_worktree(Path(wt_path))
+                    except Exception:  # noqa: BLE001
+                        pass  # best-effort cleanup
+
+                recovered.append(task.task_id)
+                if on_recovered is not None:
+                    on_recovered(task.task_id)
+            except Exception:  # noqa: BLE001
+                pass  # best-effort — continue recovering other tasks
+
+        return recovered
 
     def __enter__(self) -> DurableTaskStore:
         self.init()
