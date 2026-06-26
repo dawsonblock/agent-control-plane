@@ -66,6 +66,32 @@ class AgentSection(BaseModel):
     # AgentConfigError — ACP refuses to run a tampered agent.
     agents_dir: Path | None = None
 
+    @field_validator("default")
+    @classmethod
+    def _validate_agent_kind(cls, v: str) -> str:
+        known = ("shell", "custom")
+        kind = v.strip().lower()
+        if kind not in known:
+            raise ValueError(
+                f"agent.default='{v}' is not a known agent. "
+                f"Known: {', '.join(known)}."
+            )
+        return kind
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, v: int) -> int:
+        if v <= 0 or v > 86400:
+            raise ValueError("agent.timeout_seconds must be between 1 and 86400 (24h)")
+        return v
+
+    @field_validator("max_repair_attempts")
+    @classmethod
+    def _validate_max_repair(cls, v: int) -> int:
+        if v < 0 or v > 20:
+            raise ValueError("agent.max_repair_attempts must be between 0 and 20")
+        return v
+
     @field_validator("agents_dir")
     @classmethod
     def _absolute_agents(cls, v: Path | None) -> Path | None:
@@ -113,6 +139,20 @@ class ReviewSection(BaseModel):
     # into the default branch. Requires autonomous_mode=True.
     # Default False — must be explicitly opted in.
     auto_merge: bool = False
+
+    @field_validator("max_changed_files")
+    @classmethod
+    def _validate_max_files(cls, v: int) -> int:
+        if v <= 0 or v > 10000:
+            raise ValueError("review.max_changed_files must be between 1 and 10000")
+        return v
+
+    @field_validator("max_added_lines")
+    @classmethod
+    def _validate_max_lines(cls, v: int) -> int:
+        if v <= 0 or v > 1_000_000:
+            raise ValueError("review.max_added_lines must be between 1 and 1000000")
+        return v
 
 
 class ContextSection(BaseModel):
@@ -191,6 +231,28 @@ class ExecutorSection(BaseModel):
     clone_mode: bool = True
     network_policy: str = "locked_down"
     remove_after_run: bool = False
+
+    @field_validator("backend")
+    @classmethod
+    def _validate_backend(cls, v: str) -> str:
+        allowed = ("worktree", "docker_sbx")
+        if v not in allowed:
+            raise ValueError(
+                f"executor.backend='{v}' is not valid. "
+                f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
+
+    @field_validator("network_policy")
+    @classmethod
+    def _validate_network_policy(cls, v: str) -> str:
+        allowed = ("locked_down", "balanced", "open")
+        if v not in allowed:
+            raise ValueError(
+                f"executor.network_policy='{v}' is not valid. "
+                f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
 
 
 class EvidenceSection(BaseModel):

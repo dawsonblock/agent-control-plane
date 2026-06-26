@@ -1,10 +1,10 @@
-// Run task form — submit a new coding task.
+// Run task form — submit a new coding task asynchronously.
 
 import { useState } from "react";
 import { api } from "./api";
 
 interface RunFormProps {
-  onSubmitted: () => void;
+  onSubmitted: (taskId: string) => void;
 }
 
 export function RunForm({ onSubmitted }: RunFormProps) {
@@ -19,10 +19,10 @@ export function RunForm({ onSubmitted }: RunFormProps) {
     setError("");
     setResult("");
     try {
-      const resp = await api.runTask(task);
-      setResult(`Task ${resp.task_id} → ${resp.status}`);
+      const resp = await api.runTaskAsync(task);
+      setResult(`Task ${resp.task_id} started — polling for status...`);
       setTask("");
-      onSubmitted();
+      onSubmitted(resp.task_id);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -44,7 +44,7 @@ export function RunForm({ onSubmitted }: RunFormProps) {
           disabled={loading}
         />
         <button onClick={handleSubmit} disabled={loading || !task.trim()}>
-          {loading ? "Running..." : "Run"}
+          {loading ? "Starting..." : "Run"}
         </button>
       </div>
       {error && <div className="error">{error}</div>}

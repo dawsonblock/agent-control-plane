@@ -1,12 +1,16 @@
 // Task detail component — shows task info, report, events, approve/reject.
+// Auto-refreshes while the task is in a non-terminal state.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { api, type TaskDetail, type EventItem } from "./api";
 
 interface TaskDetailProps {
   taskId: string;
   onAction: () => void;
 }
+
+const REFRESH_INTERVAL = 3000; // 3 seconds
+const TERMINAL_STATES = new Set(["passed", "failed", "approved", "rejected", "needs_review"]);
 
 export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
@@ -17,9 +21,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
   const [actor, setActor] = useState("");
   const [actionMsg, setActionMsg] = useState("");
 
-  useEffect(() => {
-    setLoading(true);
-    setError("");
+  const fetchDetail = useCallback(() => {
     Promise.all([
       api.getTask(taskId),
       api.getEvents(taskId),
@@ -34,11 +36,28 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       .finally(() => setLoading(false));
   }, [taskId]);
 
+  // Initial load.
+  useEffect(() => {
+    setLoading(true);
+    setError("");
+    setActionMsg("");
+    fetchDetail();
+  }, [taskId, fetchDetail]);
+
+  // Auto-refresh while task is in a non-terminal state.
+  const isTerminal = task ? TERMINAL_STATES.has(task.status) : true;
+  useEffect(() => {
+    if (isTerminal) return;
+    const interval = setInterval(fetchDetail, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, [isTerminal, fetchDetail]);
+
   const handleApprove = async () => {
     try {
       await api.approve(taskId, actor);
       setActionMsg("Approved successfully");
       onAction();
+      fetchDetail();
     } catch (e) {
       setActionMsg(`Error: ${(e as Error).message}`);
     }
@@ -49,6 +68,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       await api.reject(taskId, actor);
       setActionMsg("Rejected successfully");
       onAction();
+      fetchDetail();
     } catch (e) {
       setActionMsg(`Error: ${(e as Error).message}`);
     }
@@ -65,6 +85,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       <div className="detail-header">
         <h2>{task.task_id}</h2>
         <span className={`status-badge status-${task.status}`}>{task.status}</span>
+        {!isTerminal && <span className="live-indicator">● live</span>}
       </div>
 
       <div className="detail-section">

@@ -187,12 +187,9 @@ class TestSandboxEventVerifierClassification:
 
 class TestNetworkPolicyEnum:
     def test_rejects_arbitrary_string(self):
-        """network_policy='banana' is rejected."""
-        cfg = _executor_config(network_policy="banana")
-        executor = SbxExecutor(cfg)
-        with _mock_sbx_installed():
-            with pytest.raises(AgentConfigError, match="not valid"):
-                executor._validate()  # pylint: disable=protected-access
+        """network_policy='banana' is rejected at config validation time."""
+        with pytest.raises(Exception, match="not valid"):
+            _executor_config(network_policy="banana")
 
     def test_rejects_open(self):
         """network_policy='open' is rejected."""

@@ -40,6 +40,12 @@ export interface RunResponse {
   error: string | null;
 }
 
+export interface RunAsyncResponse {
+  status: string;
+  task_id: string;
+  task: string;
+}
+
 export interface MemoryFact {
   fact: string;
   source_node: string;
@@ -88,6 +94,12 @@ export const api = {
 
   runTask: (task: string, runsRoot = "data/runs", vaultRoot = "vault") =>
     fetchJSON<RunResponse>(`/tasks/run`, {
+      method: "POST",
+      body: JSON.stringify({ task, runs_root: runsRoot, vault_root: vaultRoot }),
+    }),
+
+  runTaskAsync: (task: string, runsRoot = "data/runs", vaultRoot = "vault") =>
+    fetchJSON<RunAsyncResponse>(`/tasks/run/async`, {
       method: "POST",
       body: JSON.stringify({ task, runs_root: runsRoot, vault_root: vaultRoot }),
     }),

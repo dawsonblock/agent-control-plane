@@ -5,7 +5,8 @@
 
 repo:
   name: my-app
-  path: /Users/dawsonblock/projects/my-app
+  # Replace with the absolute path to your Git repository.
+  path: /home/user/projects/my-app
   default_branch: main
 
 agent:

@@ -12,6 +12,11 @@ function App() {
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
+  const handleSubmitted = (taskId: string) => {
+    refresh();
+    setSelectedTask(taskId);
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -36,7 +41,7 @@ function App() {
         {view === "tasks" && (
           <>
             <div className="sidebar">
-              <RunForm onSubmitted={refresh} />
+              <RunForm onSubmitted={handleSubmitted} />
               <TaskList
                 onSelect={setSelectedTask}
                 selectedId={selectedTask}

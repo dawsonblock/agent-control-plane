@@ -26,6 +26,7 @@ from acp.store import TaskStore
 # FastAPI is an optional dependency (the `api` extra).
 try:
     from fastapi import FastAPI, HTTPException, Query
+    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
@@ -138,6 +139,23 @@ app = FastAPI(
     version="0.6.6",
 )
 
+# CORS: allow the Vite dev server (5173) and localhost:3000 to call the API.
+# In production, the UI is served from the same origin via /ui/ so CORS
+# isn't needed — but during development (npm run dev on :5173, API on :8000)
+# the browser blocks cross-origin requests without this.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --------------------------------------------------------------------------- #
 # Endpoints
@@ -212,6 +230,10 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
         state.set_config(request.config_path)
         cfg = state.get_config()
 
+    # Pre-generate the task_id so the client can poll immediately.
+    store = TaskStore(runs_root=Path(request.runs_root))
+    task_id = store.next_task_id(repo_path=cfg.repo.path)
+
     # Run in a background thread (the workflow is synchronous).
     async def _run() -> None:
         from acp.graph.workflow import run_workflow
@@ -226,7 +248,7 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
             pass  # Error is recorded in the event log
 
     asyncio.create_task(_run())
-    return {"status": "started", "task": request.task}
+    return {"status": "started", "task_id": task_id, "task": request.task}
 
 
 @app.get("/tasks", response_model=list[TaskSummary])

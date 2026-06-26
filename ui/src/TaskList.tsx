@@ -1,6 +1,7 @@
 // Task list component — shows all tasks with status badges.
+// Auto-refreshes every 3 seconds to show status changes for running tasks.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { api, type TaskSummary } from "./api";
 
 interface TaskListProps {
@@ -20,20 +21,33 @@ const STATUS_COLORS: Record<string, string> = {
   executing: "#06b6d4",
 };
 
+const REFRESH_INTERVAL = 3000; // 3 seconds
+
 export function TaskList({ onSelect, selectedId, refreshKey }: TaskListProps) {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    setLoading(true);
+  const fetchTasks = useCallback(() => {
     api.listTasks()
       .then(setTasks)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [refreshKey]);
+  }, []);
 
-  if (loading) return <div className="loading">Loading tasks...</div>;
+  // Initial load + refresh on refreshKey change.
+  useEffect(() => {
+    setLoading(true);
+    fetchTasks();
+  }, [refreshKey, fetchTasks]);
+
+  // Auto-refresh polling — picks up status changes from background tasks.
+  useEffect(() => {
+    const interval = setInterval(fetchTasks, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchTasks]);
+
+  if (loading && tasks.length === 0) return <div className="loading">Loading tasks...</div>;
   if (error) return <div className="error">{error}</div>;
   if (tasks.length === 0) return <div className="empty">No tasks found. Run one with the form above.</div>;
 
