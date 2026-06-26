@@ -2,7 +2,7 @@
 
 Tests the autonomous mode feature:
 
-  1. Config fields (autonomous_mode, auto_merge_on_pass,
+  1. Config fields (autonomous_mode, auto_merge,
      dynamic_test_generation, repair_repeat_breaker)
   2. GitOps merge module (merge_to_base, conflict handling)
   3. Auto-approve node (writes auto.approved event)
@@ -41,7 +41,7 @@ class TestAutonomousConfig:
 
     def test_auto_merge_defaults_false(self):
         cfg = ReviewSection()
-        assert cfg.auto_merge_on_pass is False
+        assert cfg.auto_merge is False
 
     def test_dynamic_test_generation_defaults_true(self):
         cfg = AgentSection()
@@ -56,8 +56,8 @@ class TestAutonomousConfig:
         assert cfg.autonomous_mode is True
 
     def test_auto_merge_can_be_enabled(self):
-        cfg = ReviewSection(auto_merge_on_pass=True)
-        assert cfg.auto_merge_on_pass is True
+        cfg = ReviewSection(auto_merge=True)
+        assert cfg.auto_merge is True
 
 
 # --------------------------------------------------------------------------- #
@@ -157,7 +157,7 @@ class TestAutoApproveNode:
     def _make_config(self, **kwargs) -> RepoConfig:
         review = ReviewSection(
             autonomous_mode=kwargs.get("autonomous_mode", False),
-            auto_merge_on_pass=kwargs.get("auto_merge_on_pass", False),
+            auto_merge=kwargs.get("auto_merge", False),
         )
         return RepoConfig(
             repo=RepoSection(
@@ -275,7 +275,7 @@ class TestAutoMergeNode:
             ),
             review=ReviewSection(
                 autonomous_mode=True,
-                auto_merge_on_pass=True,
+                auto_merge=True,
             ),
         )
         task = Task(
@@ -312,14 +312,14 @@ class TestAutoMergeNode:
         assert any(e.type == EventType.AUTO_MERGED for e in all_events)
 
     def test_auto_merge_noop_when_disabled(self, tmp_path):
-        """auto_merge_node is a no-op when auto_merge_on_pass is False."""
+        """auto_merge_node is a no-op when auto_merge is False."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
         from acp.store import TaskStore
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=Path("/tmp")),
-            review=ReviewSection(auto_merge_on_pass=False),
+            review=ReviewSection(auto_merge=False),
         )
         task = Task(
             task_id="task_001",
@@ -380,7 +380,7 @@ class TestAutoMergeNode:
             ),
             review=ReviewSection(
                 autonomous_mode=True,
-                auto_merge_on_pass=True,
+                auto_merge=True,
             ),
         )
         task = Task(
@@ -443,7 +443,7 @@ class TestGraphRouting:
         from acp.graph.workflow import _route_after_auto_approve
 
         cfg = MagicMock()
-        cfg.review.auto_merge_on_pass = True
+        cfg.review.auto_merge = True
         state = {
             "status": TaskStatus.APPROVED,
             "config": cfg,
@@ -454,7 +454,7 @@ class TestGraphRouting:
         from acp.graph.workflow import _route_after_auto_approve
 
         cfg = MagicMock()
-        cfg.review.auto_merge_on_pass = False
+        cfg.review.auto_merge = False
         state = {
             "status": TaskStatus.APPROVED,
             "config": cfg,
@@ -626,6 +626,91 @@ class TestTestsMissingPrompt:
         assert "Fix the root cause" in content
         assert "Do NOT delete, skip, or weaken" in content
 
+    def test_write_missing_tests_prompt_directly(self, tmp_path):
+        """write_missing_tests_prompt produces a dedicated test-gen prompt."""
+        from acp.agents.base import write_missing_tests_prompt
+        from acp.config import RepoConfig, RepoSection
+
+        cfg = RepoConfig(
+            repo=RepoSection(name="test", path=tmp_path),
+        )
+        prompt_path = write_missing_tests_prompt(
+            original_request="add a feature",
+            worktree_path=tmp_path / "worktree",
+            artifact_dir=tmp_path / "artifacts",
+            repo_config=cfg,
+            failures=[],
+            attempt=1,
+            max_attempts=3,
+        )
+
+        content = prompt_path.read_text()
+        assert "Behavior was modified but no tests were found" in content
+        assert "Write unit tests" in content
+        assert "Test generation attempt" in content
+
+    def test_tests_missing_event_written(self, tmp_path):
+        """repair_plan_node writes TEST_GENERATION_ATTEMPTED when tests_missing."""
+        from acp.config import (
+            AgentSection, RepoConfig, RepoSection,
+        )
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, repair_plan_node
+        from acp.models import Task
+        from acp.store import TaskStore
+
+        cfg = RepoConfig(
+            repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
+            agent=AgentSection(
+                dynamic_test_generation=True,
+                max_repair_attempts=3,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+
+        # A review result with TESTS_MISSING concern.
+        review = MagicMock()
+        review.concerns = [
+            "tests_missing: Behavior changed but no test files were modified",
+        ]
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "user_request": "test",
+            "worktree_path": tmp_path / "worktree",
+            "artifacts_dir": run_dir / "artifacts",
+            "command_results": [],
+            "repair_attempts": 0,
+            "repair_history": [],
+            "repair_fingerprints": [],
+            "review_result": review,
+        }
+
+        repair_plan_node(state, ctx)
+
+        all_events = events.read_all()
+        types = [e.type for e in all_events]
+        assert EventType.REPAIR_ATTEMPTED in types
+        assert EventType.TEST_GENERATION_ATTEMPTED in types
+
 
 # --------------------------------------------------------------------------- #
 # 8. Evidence classification
@@ -772,3 +857,75 @@ class TestDeriveStatusAutoApproved:
             ),
         ]
         assert derive_status_from_events(events) == "approved"
+
+
+# --------------------------------------------------------------------------- #
+# 10. Vault note rendering recognizes AUTO_APPROVED
+# --------------------------------------------------------------------------- #
+
+
+class TestVaultNoteAutoApproved:
+    """rerender_vault_note sets approved=true for auto.approved."""
+
+    def test_vault_note_shows_approved_for_auto_approved(self, tmp_path):
+        """Vault note frontmatter has approved=true when auto.approved exists."""
+        from acp.events import EventWriter
+        from acp.gitops.diff import DiffCapture
+        from acp.models import (
+            Recommendation, ReviewResult, RiskLevel, Task,
+        )
+        from acp.vault.obsidian_writer import rerender_vault_note
+
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        review = ReviewResult(
+            risk=RiskLevel.LOW,
+            recommendation=Recommendation.MERGE,
+            changed_files=["feature.py"],
+            concerns=[],
+            summary="ok",
+        )
+        diff = DiffCapture(
+            patch="",
+            stat="",
+            changed_files=["feature.py"],
+            insertions=5,
+            deletions=0,
+        )
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        events_writer = EventWriter("task_001", run_dir)
+        events_writer.write(EventType.TASK_CREATED, {})
+        events_writer.write(EventType.AUTO_APPROVED, {
+            "approver": "ACP-Autonomous-Bot",
+        })
+        all_events = events_writer.read_all()
+
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+        note_path = vault_root / "task_001.md"
+
+        rerender_vault_note(
+            note_path=note_path,
+            report_body="# Report\n",
+            task=task,
+            review=review,
+            diff=diff,
+            events=all_events,
+            vault_root=vault_root,
+        )
+
+        content = note_path.read_text()
+        assert "approved: true" in content
+        assert "auto_approved" in content
+        assert "ACP-Autonomous-Bot" in content

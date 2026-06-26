@@ -50,7 +50,7 @@ class RepoSection(BaseModel):
 class AgentSection(BaseModel):
     default: str = "shell"  # M1: shell. M2 adds: custom
     timeout_seconds: int = 1800
-    max_repair_attempts: int = 1
+    max_repair_attempts: int = 5
     command_template: str = ""  # used by M2's CLIAgent
     # v0.6.0: Autonomous mode repair loop settings.
     # When dynamic_test_generation is True, the repair prompt instructs
@@ -100,7 +100,7 @@ class ReviewSection(BaseModel):
     # v0.6.0: Auto-merge — after auto-approval, merge the task branch
     # into the default branch. Requires autonomous_mode=True.
     # Default False — must be explicitly opted in.
-    auto_merge_on_pass: bool = False
+    auto_merge: bool = False
 
 
 class ContextSection(BaseModel):

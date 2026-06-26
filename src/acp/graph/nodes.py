@@ -919,7 +919,7 @@ def auto_merge_node(
 ) -> dict[str, Any]:
     """Merge the task branch into the default branch.
 
-    Only fires when ``config.review.auto_merge_on_pass`` is True (and
+    Only fires when ``config.review.auto_merge`` is True (and
     implicitly ``autonomous_mode`` is True, since the graph only routes
     here after auto_approve). Writes an ``auto.merged`` event with the
     merge commit SHA.
@@ -929,7 +929,7 @@ def auto_merge_node(
     failure is recorded in the event log.
     """
     cfg = state.get("config")
-    if cfg is None or not cfg.review.auto_merge_on_pass:
+    if cfg is None or not cfg.review.auto_merge:
         return {}
 
     task = state["task"]
@@ -1046,6 +1046,18 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "tests_missing": tests_missing,
         },
     )
+
+    # v0.6.0: When the repair loop switches to test-generation mode,
+    # write a dedicated event so the evidence trail distinguishes
+    # "fixing broken code" from "writing missing tests."
+    if tests_missing:
+        ctx.events.write(
+            EventType.TEST_GENERATION_ATTEMPTED,
+            {
+                "attempt": attempts,
+                "prompt_path": str(prompt_path),
+            },
+        )
 
     history = list(state.get("repair_history", []))
     history.append({

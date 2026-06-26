@@ -127,10 +127,21 @@ def write_repair_prompt(
     tests (not delete or skip them). Each attempt is a separate artifact so
     the evidence trail shows exactly what each repair round was told.
 
-    v0.6.0: When ``tests_missing`` is True, the prompt instructs the agent
-    to write new tests covering its changes (dynamic test generation),
-    rather than only fixing failing commands.
+    v0.6.0: When ``tests_missing`` is True, delegates to
+    ``write_missing_tests_prompt`` which instructs the agent to write new
+    tests covering its changes (dynamic test generation).
     """
+    if tests_missing:
+        return write_missing_tests_prompt(
+            original_request=original_request,
+            worktree_path=worktree_path,
+            artifact_dir=artifact_dir,
+            repo_config=repo_config,
+            failures=failures,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+
     artifact_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = artifact_dir / f"repair_prompt_{attempt}.txt"
     repo = repo_config.repo
@@ -146,19 +157,6 @@ def write_repair_prompt(
             f"stderr:\n{f['stderr'] or '(empty)'}\n"
         )
     failures_section = "\n".join(failure_blocks) if failure_blocks else "(none captured)"
-
-    if tests_missing:
-        tests_instruction = (
-            "  - Your code changes look functionally correct, but validation\n"
-            "    failed because you did not write accompanying unit tests.\n"
-            "    Design and implement tests covering your new behavior.\n"
-            "    The tests must pass when run by the control plane.\n"
-        )
-    else:
-        tests_instruction = (
-            "  - Fix the root cause so the failing commands above pass.\n"
-            "  - Do NOT delete, skip, or weaken tests to make them pass.\n"
-        )
 
     body = f"""You are operating inside an isolated git worktree. A previous run
 of your task produced failing tests. Repair attempt {attempt} of {max_attempts}.
@@ -176,9 +174,82 @@ Failing command output (the signal to fix):
 {failures_section}
 
 Instructions:
-{tests_instruction}  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
+  - Fix the root cause so the failing commands above pass.
+  - Do NOT delete, skip, or weaken tests to make them pass.
+  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
   - Keep the change minimal and scoped to the failure.
   - If the failure cannot be fixed without a larger change, stop and report.
+
+Runtime commands (re-run after your edits by the control plane):
+  test       : {cmds.test or '(none)'}
+  lint       : {cmds.lint or '(none)'}
+  typecheck  : {cmds.typecheck or '(none)'}
+"""
+    prompt_path.write_text(body)
+    return prompt_path
+
+
+def write_missing_tests_prompt(
+    *,
+    original_request: str,
+    worktree_path: Path,
+    artifact_dir: Path,
+    repo_config: RepoConfig,
+    failures: list[dict[str, object]],
+    attempt: int,
+    max_attempts: int,
+) -> Path:
+    """Write a test-generation prompt to ``artifacts/repair_prompt_<attempt>.txt``.
+
+    v0.6.0: When the RiskEngine flags TESTS_MISSING (behavior changed but
+    no test files were modified), the repair loop switches to this prompt.
+    Instead of fixing failing commands, the agent is instructed to design
+    and implement unit tests covering the behavior it already changed.
+
+    The prompt includes the diff of what was changed (via the failures
+    context) and strictly instructs: "Behavior was modified but no tests
+    were found. Write unit tests for these specific changes."
+    """
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = artifact_dir / f"repair_prompt_{attempt}.txt"
+    repo = repo_config.repo
+    cmds = repo_config.commands
+
+    failure_blocks: list[str] = []
+    for i, f in enumerate(failures, start=1):
+        failure_blocks.append(
+            f"--- failure {i} ---\n"
+            f"command: {f['command']}\n"
+            f"exit_code: {f['exit_code']}\n"
+            f"stdout:\n{f['stdout'] or '(empty)'}\n"
+            f"stderr:\n{f['stderr'] or '(empty)'}\n"
+        )
+    failures_section = "\n".join(failure_blocks) if failure_blocks else "(none captured)"
+
+    body = f"""You are operating inside an isolated git worktree. A previous run
+of your task modified behavior but did not include accompanying tests.
+Test generation attempt {attempt} of {max_attempts}.
+
+Worktree:
+  {worktree_path}
+
+Repo:
+  {repo.name} (default branch: {repo.default_branch})
+
+Original task:
+  {original_request}
+
+Failing command output (the signal to fix):
+{failures_section}
+
+Instructions:
+  - Behavior was modified but no tests were found.
+  - Write unit tests for these specific changes.
+  - The tests must pass when run by the control plane.
+  - Do NOT delete, skip, or weaken existing tests.
+  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
+  - Keep the tests minimal and scoped to the changed behavior.
+  - If the behavior cannot be tested without a larger change, stop and report.
 
 Runtime commands (re-run after your edits by the control plane):
   test       : {cmds.test or '(none)'}

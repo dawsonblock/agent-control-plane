@@ -132,7 +132,7 @@ def _route_after_write_report(state: dict[str, Any]) -> str:
 def _route_after_auto_approve(state: dict[str, Any]) -> str:
     """Route after auto_approve: merge if enabled, else done.
 
-    If auto_merge_on_pass is True, route to auto_merge. Otherwise, route
+    If auto_merge is True, route to auto_merge. Otherwise, route
     straight to done (the task is already approved).
     If auto_approve downgraded to NEEDS_REVIEW (shouldn't happen, but
     guard against it), route to needs_review.
@@ -141,7 +141,7 @@ def _route_after_auto_approve(state: dict[str, Any]) -> str:
     if st == TaskStatus.NEEDS_REVIEW:
         return "needs_review"
     cfg = state.get("config")
-    if cfg is not None and cfg.review.auto_merge_on_pass:
+    if cfg is not None and cfg.review.auto_merge:
         return "auto_merge"
     return "done"
 
@@ -281,7 +281,7 @@ def build_workflow(
     g.add_conditional_edges("write_report", _route_after_write_report)
 
     # v0.6.0: Autonomous mode edges.
-    # auto_approve → auto_merge (if auto_merge_on_pass) OR done
+    # auto_approve → auto_merge (if auto_merge) OR done
     g.add_conditional_edges("auto_approve", _route_after_auto_approve)
     # auto_merge → done (success) OR needs_review (merge conflict)
     g.add_conditional_edges("auto_merge", _route_after_auto_merge)

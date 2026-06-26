@@ -622,7 +622,11 @@ def _verify_impl(
                 all_ok = False
 
     # Detect lifecycle events — these require a lifecycle manifest.
-    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    # v0.6.0: auto.approved and auto.merged are also lifecycle events.
+    lifecycle_types = {
+        "human.approved", "human.rejected", "memory.promoted",
+        "auto.approved", "auto.merged",
+    }
     has_lifecycle = any(e.type.value in lifecycle_types for e in events)
     has_evidence_finalized = any(e.type == EventType.EVIDENCE_FINALIZED for e in events)
 
@@ -744,7 +748,10 @@ def _verify_impl(
     # Report final approval state if present.
     if events:
         from acp.models import EventType as _ET
-        approved = any(e.type == _ET.HUMAN_APPROVED for e in events)
+        approved = any(
+            e.type == _ET.HUMAN_APPROVED or e.type == _ET.AUTO_APPROVED
+            for e in events
+        )
         rejected = any(e.type == _ET.HUMAN_REJECTED for e in events)
         if approved:
             console.print(f"[dim]Final approval state: approved[/]")

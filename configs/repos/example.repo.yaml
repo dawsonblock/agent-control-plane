@@ -97,5 +97,5 @@ executor:
 # and block_secret_leaks: true.
 review:
   # autonomous_mode: false     # true = auto-approve on PASSED (no human click)
-  # auto_merge_on_pass: false  # true = merge task branch into default branch
+  # auto_merge: false  # true = merge task branch into default branch
 

@@ -91,8 +91,10 @@ class EventType(str, Enum):
     # v0.6.0: Autonomous mode — programmatic approval + merge.
     # auto.approved = gates passed in autonomous mode, no human click
     # auto.merged   = task branch merged into default branch
+    # test_generation.attempted = repair loop switched to test-writing mode
     AUTO_APPROVED = "auto.approved"
     AUTO_MERGED = "auto.merged"
+    TEST_GENERATION_ATTEMPTED = "test_generation.attempted"
 
 
 class RiskLevel(str, Enum):

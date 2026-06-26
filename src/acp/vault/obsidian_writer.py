@@ -127,6 +127,16 @@ def rerender_vault_note(
                 "actor": event.payload.get("approver", "unknown"),
                 "timestamp": event.timestamp,
             })
+        elif event.type == EventType.AUTO_APPROVED:
+            # v0.6.0: Autonomous mode approval — equivalent to human approval
+            # for frontmatter purposes. The approver is "ACP-Autonomous-Bot".
+            approved = True
+            memory_status = MemoryStatus.ACTIVE.value
+            audit_trail.append({
+                "action": "auto_approved",
+                "actor": event.payload.get("approver", "ACP-Autonomous-Bot"),
+                "timestamp": event.timestamp,
+            })
         elif event.type == EventType.HUMAN_REJECTED:
             memory_status = MemoryStatus.ARCHIVED.value
             audit_trail.append({
