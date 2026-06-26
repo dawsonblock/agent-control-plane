@@ -151,8 +151,13 @@ class StdioTransport:
             raise MCPError(f"MCP server '{self.server_name}' is not running")
         line = json.dumps(request) + "\n"
         assert self._proc.stdin is not None
-        self._proc.stdin.write(line)
-        self._proc.stdin.flush()
+        try:
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise MCPError(
+                f"MCP server '{self.server_name}' closed connection during write: {exc}"
+            ) from exc
 
         import select
         assert self._proc.stdout is not None

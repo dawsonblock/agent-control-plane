@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 from acp.events import EventWriter
-from acp.models import EventType, Mission, MissionStatus
+from acp.models import EventType, Mission, MissionStatus, _utcnow_iso
 
 
 # mission_20260626_0001
@@ -233,7 +233,7 @@ class MissionStore:
                 f"{non_terminal}. All steps must be completed or failed."
             )
         mission.status = MissionStatus.COMPLETED
-        mission.completed_at = mission.updated_at
+        mission.completed_at = _utcnow_iso()
         self.save(mission)
 
         events = EventWriter(mission_id, self.mission_dir(mission_id))
@@ -262,7 +262,7 @@ class MissionStore:
         if step_index <= 0:
             return ""
         mission = self.load(mission_id)
-        if step_index > len(mission.steps):
+        if step_index >= len(mission.steps):
             return ""
         return mission.steps[step_index - 1].task_id
 

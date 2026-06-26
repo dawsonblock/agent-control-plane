@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from acp.models import (
+    EventType,
     MemoryStatus,
     Task,
     TaskStatus,
@@ -544,6 +545,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         # Write a vault note.
         vault_note_path = tmp_path / "vault" / "tasks" / f"{task.task_id}.md"
@@ -607,6 +610,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -639,6 +644,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         ctx = NodeContext(store=store, events=events)
         state = {

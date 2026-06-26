@@ -193,6 +193,9 @@ class TestAutoApproveNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # A real run has a full event chain by auto-approve time; establish a
+        # valid chain so the integrity gate passes and the approval proceeds.
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
@@ -203,9 +206,13 @@ class TestAutoApproveNode:
         assert result.get("status") == TaskStatus.APPROVED
 
         all_events = events.read_all()
-        assert len(all_events) == 1
-        assert all_events[0].type == EventType.AUTO_APPROVED
-        assert all_events[0].payload["approver"] == "ACP-Autonomous-Bot"
+        assert any(
+            e.type == EventType.AUTO_APPROVED for e in all_events
+        )
+        approved = [
+            e for e in all_events if e.type == EventType.AUTO_APPROVED
+        ]
+        assert approved[0].payload["approver"] == "ACP-Autonomous-Bot"
 
     def test_auto_approve_noop_when_disabled(self, tmp_path):
         """auto_approve_node is a no-op when autonomous_mode is False."""
@@ -238,6 +245,49 @@ class TestAutoApproveNode:
 
         assert result == {}
         assert len(events.read_all()) == 0
+
+    def test_auto_approve_refused_on_broken_event_chain(
+        self, tmp_path,
+    ):
+        """auto_approve_node refuses when the event chain is empty/broken.
+
+        Integrity gate: a task with no tamper-proof audit trail may not
+        be auto-approved. An empty event chain fails verify_event_chain
+        and the task is downgraded to NEEDS_REVIEW.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
+        from acp.store import TaskStore
+
+        cfg = self._make_config(autonomous_mode=True)
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test request",
+            status=TaskStatus.PASSED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        # No events written — empty chain fails verify_event_chain.
+
+        ctx = NodeContext(store=store, events=events)
+        state = {"config": cfg, "task": task}
+
+        result = auto_approve_node(state, ctx)
+
+        assert result.get("auto_approved") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "event chain verification" in result.get("error", "")
 
 
 # --------------------------------------------------------------------------- #

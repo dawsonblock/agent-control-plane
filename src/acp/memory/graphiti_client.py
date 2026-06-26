@@ -36,6 +36,25 @@ from acp.vault.frontmatter import Frontmatter, parse_frontmatter
 logger = logging.getLogger(__name__)
 
 
+def _run_async(coro: Any) -> Any:
+    """Run a coroutine, handling existing event loops.
+
+    Falls back to creating a new thread with its own event loop if
+    the current thread already has a running loop (e.g. inside an
+    async web framework). This prevents ``RuntimeError: This event
+    loop is already running``.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
+
+
 # --------------------------------------------------------------------------- #
 # Human firewall checks
 # --------------------------------------------------------------------------- #
@@ -149,11 +168,19 @@ def _mark_as_ingested(vault_note_path: Path) -> None:
 
     This is a targeted in-place update of just the ``graphiti_ingested``
     field. It re-serializes the frontmatter and preserves the body.
+
+    Raises:
+        ValueError: If the frontmatter is malformed and cannot be parsed.
+        OSError: If the file cannot be read or written.
     """
     import yaml
 
     content = vault_note_path.read_text(encoding="utf-8")
-    fm, body = parse_frontmatter(content)
+    try:
+        fm, body = parse_frontmatter(content)
+    except ValueError:
+        # Malformed frontmatter — can't safely update the field.
+        raise
     fm.graphiti_ingested = True
 
     data = fm.model_dump()
@@ -233,10 +260,21 @@ def ingest_task_to_graphiti(
         finally:
             await client.close()
 
-    result = asyncio.run(_ingest())
+    result = _run_async(_ingest())
 
     # 4. Mark the vault note as ingested.
-    _mark_as_ingested(vault_note_path)
+    # If this fails, the note was ingested into Graphiti but not marked.
+    # Log a warning so operators can manually mark it and avoid duplicate
+    # ingestion on retry.
+    try:
+        _mark_as_ingested(vault_note_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Graphiti ingestion succeeded for task %s but marking the vault "
+            "note as ingested failed: %s. Manual marking required to avoid "
+            "duplicate ingestion.",
+            task.task_id, exc,
+        )
 
     return {
         "task_id": task.task_id,
@@ -298,7 +336,7 @@ def search_graphiti_facts(
         finally:
             await client.close()
 
-    return asyncio.run(_search())
+    return _run_async(_search())
 
 
 def get_temporal_relationships(
@@ -346,7 +384,7 @@ def get_temporal_relationships(
         finally:
             await client.close()
 
-    return asyncio.run(_get_relationships())
+    return _run_async(_get_relationships())
 
 
 # --------------------------------------------------------------------------- #
@@ -410,13 +448,22 @@ def find_superseded_nodes(
                     graph_id=gid,
                 )
             except (AttributeError, TypeError):
-                # Fallback: search all edges and filter for SUPERSEDES.
-                # This is slower but works with older Graphiti versions.
+                # Fallback: search all edges and filter for SUPERSEDES
+                # by edge_type attribute. We use a broad search query and
+                # then filter client-side by checking the edge_type field,
+                # since semantic text search for "SUPERSEDES" would return
+                # results by similarity, not by edge type.
                 all_edges = await client.search(
-                    "SUPERSEDES", group_id=gid, num_results=1000,
+                    "", group_id=gid, num_results=1000,
                 )
                 results = []
                 for edge in all_edges:
+                    # Check if this edge is a SUPERSEDES edge.
+                    edge_type = getattr(
+                        edge, "edge_type", None,
+                    ) or getattr(edge, "type", "")
+                    if edge_type != "SUPERSEDES":
+                        continue
                     # Graphiti uses 'valid_at' on SUPERSEDES edges to record
                     # when the superseding relationship became effective.
                     valid_at = getattr(edge, "valid_at", None)
@@ -464,7 +511,7 @@ def find_superseded_nodes(
         finally:
             await client.close()
 
-    return asyncio.run(_find())
+    return _run_async(_find())
 
 
 def prune_superseded_nodes(
@@ -532,7 +579,7 @@ def prune_superseded_nodes(
             finally:
                 await client.close()
 
-        pruned = asyncio.run(_prune())
+        pruned = _run_async(_prune())
 
     return {
         "dry_run": dry_run,

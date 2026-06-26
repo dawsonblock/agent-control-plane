@@ -1235,6 +1235,53 @@ def auto_approve_node(
 
     task = state["task"]
 
+    # Integrity gate: verify the hash-chained event log before
+    # auto-approving. A broken or tampered audit trail must not be
+    # auto-approved — downgrade to NEEDS_REVIEW so a human inspects.
+    try:
+        from acp.events import verify_event_chain
+
+        events = ctx.events.read_all()
+        if not verify_event_chain(events):
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "auto_approve",
+                    "message": (
+                        "event chain verification failed "
+                        "(tampered or incomplete audit trail)"
+                    ),
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_approved": False,
+                "error": (
+                    "auto_approve refused: event chain verification "
+                    "failed — human approval required"
+                ),
+            }
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {
+                "node": "auto_approve",
+                "exception_type": type(exc).__name__,
+                "message": f"event chain verification error: {exc}",
+            },
+        )
+        task.status = TaskStatus.NEEDS_REVIEW
+        task.touch()
+        ctx.store.save(task)
+        return {
+            "status": TaskStatus.NEEDS_REVIEW,
+            "auto_approved": False,
+            "error": f"auto_approve: event chain verification error: {exc}",
+        }
+
     ctx.events.write(
         EventType.AUTO_APPROVED,
         {
@@ -1286,8 +1333,21 @@ def auto_approve_node(
                     memory_promoted = True
         except ImportError:
             pass  # memory extra not installed — skip silently
-        except Exception:  # noqa: BLE001
-            pass  # FalkorDB not running or LLM error — don't block approval
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Auto-promotion to Graphiti failed for task %s: %s "
+                "— approval still stands, promote manually later.",
+                task.task_id, exc,
+            )
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "auto_approve",
+                    "sub_node": "memory_promotion",
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
 
     return {"status": TaskStatus.APPROVED, "auto_approved": True, "memory_promoted": memory_promoted}
 

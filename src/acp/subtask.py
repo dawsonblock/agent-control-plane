@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 
 # The structured line format the agent emits to request a sub-task.
@@ -133,7 +134,3 @@ def emit_subtask_events(
         )
         count += 1
     return count
-
-
-# Type annotation helper — avoids importing EventWriter at module level.
-from typing import Any  # noqa: E402
