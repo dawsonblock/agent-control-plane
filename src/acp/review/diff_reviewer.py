@@ -29,6 +29,7 @@ Check categories:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from acp.config import RepoConfig
@@ -107,6 +108,24 @@ def review_diff(
 # --------------------------------------------------------------------------- #
 
 
+def _compile_custom_regexes(
+    configs: list[dict[str, str]],
+) -> list[tuple[str, re.Pattern[str]]] | None:
+    """Compile custom secret regex configs into (name, pattern) pairs.
+
+    Each config entry has ``name`` and ``pattern`` keys. The name is
+    prefixed with ``custom:`` to distinguish from built-in patterns.
+    Returns None if the list is empty (so the scanner skips the extra
+    loop entirely).
+    """
+    if not configs:
+        return None
+    return [
+        (f"custom:{entry['name']}", re.compile(entry["pattern"]))
+        for entry in configs
+    ]
+
+
 def _evaluate(
     diff: DiffCapture,
     command_results: list[CommandResult],
@@ -123,9 +142,16 @@ def _evaluate(
 
     # --- secret scanning (HARD BLOCK) ------------------------------------- #
     # v0.5.14: Use TruffleHog for verified detection when available.
+    # v0.7.0 (Phase 3.2): Pass custom user-defined regexes from config.
     if cfg.review.block_secret_leaks:
         use_th = getattr(cfg.review, "use_trufflehog", True)
-        findings = scan_diff(diff.patch, worktree_path=worktree_path, use_trufflehog=use_th)
+        custom_regexes = _compile_custom_regexes(cfg.review.custom_secret_regexes)
+        findings = scan_diff(
+            diff.patch,
+            worktree_path=worktree_path,
+            use_trufflehog=use_th,
+            custom_regexes=custom_regexes,
+        )
         if findings:
             kinds = sorted({f.kind for f in findings})
             engine.add(

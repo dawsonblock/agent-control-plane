@@ -295,6 +295,92 @@ class DurableTaskStore:
 
         return recovered
 
+    def check_integrity(
+        self,
+        runs_root: Path | str,
+        *,
+        on_breach: Any = None,
+    ) -> list[dict[str, str]]:
+        """Check for status mismatches between task.json and SQLite.
+
+        For every task present in both stores, compares the ``status``
+        field. If they disagree, records a breach entry and calls
+        ``on_breach(task_id, json_status, sqlite_status)`` if provided.
+
+        Returns a list of breach dicts:
+        ``{"task_id": ..., "json_status": ..., "sqlite_status": ...}``
+
+        This is the v0.7.1 integrity check — fail-closed: when breaches
+        are detected, the caller should emit a ``store.integrity_breach``
+        event and refuse to proceed with the affected tasks.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        runs_root = Path(runs_root)
+        breaches: list[dict[str, str]] = []
+
+        if self._conn is None:
+            raise RuntimeError("DurableTaskStore not initialized — call .init() first")
+
+        # Get all tasks from SQLite.
+        rows = self._conn.execute(
+            "SELECT task_id, status FROM tasks ORDER BY created_at ASC",
+        ).fetchall()
+
+        for row in rows:
+            task_id = row[0]
+            sqlite_status = row[1]
+
+            # Find the corresponding task.json.
+            task_json_path = runs_root / task_id / "task.json"
+            if not task_json_path.is_file():
+                # task.json missing but SQLite has it — that's a breach.
+                breaches.append({
+                    "task_id": task_id,
+                    "json_status": "(missing)",
+                    "sqlite_status": sqlite_status,
+                })
+                logger.warning(
+                    "integrity breach: task %s — task.json missing, "
+                    "SQLite status=%s", task_id, sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, "(missing)", sqlite_status)
+                continue
+
+            try:
+                task = Task.model_validate_json(task_json_path.read_text())
+                json_status = task.status.value
+            except Exception as exc:  # noqa: BLE001
+                breaches.append({
+                    "task_id": task_id,
+                    "json_status": f"(parse error: {exc})",
+                    "sqlite_status": sqlite_status,
+                })
+                logger.warning(
+                    "integrity breach: task %s — task.json parse error: %s, "
+                    "SQLite status=%s", task_id, exc, sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, "(parse error)", sqlite_status)
+                continue
+
+            if json_status != sqlite_status:
+                breaches.append({
+                    "task_id": task_id,
+                    "json_status": json_status,
+                    "sqlite_status": sqlite_status,
+                })
+                logger.warning(
+                    "integrity breach: task %s — task.json status=%s, "
+                    "SQLite status=%s", task_id, json_status, sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, json_status, sqlite_status)
+
+        return breaches
+
     def __enter__(self) -> DurableTaskStore:
         self.init()
         return self

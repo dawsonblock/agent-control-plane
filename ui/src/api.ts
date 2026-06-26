@@ -53,6 +53,42 @@ export interface MemoryFact {
   valid_at: string;
 }
 
+export interface MissionSummary {
+  mission_id: string;
+  goal: string;
+  status: string;
+  repo_name: string;
+  steps_total: number;
+  steps_completed: number;
+  created_at: string;
+}
+
+export interface MissionStep {
+  description: string;
+  task_id: string;
+  status: string;
+}
+
+export interface MissionDetail {
+  mission_id: string;
+  goal: string;
+  description: string;
+  repo_name: string;
+  status: string;
+  steps: MissionStep[];
+  created_at: string;
+  updated_at: string;
+  completed_at: string;
+}
+
+export interface SkillSummary {
+  name: string;
+  purpose: string;
+  rules: string[];
+  has_hard_blocks: boolean;
+  has_risk_elevators: boolean;
+}
+
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${url}`, {
     headers: { "Content-Type": "application/json" },
@@ -106,6 +142,15 @@ export const api = {
 
   searchMemory: (query: string, numResults = 10) =>
     fetchJSON<MemoryFact[]>(`/memory/search?query=${encodeURIComponent(query)}&num_results=${numResults}`),
+
+  listMissions: (missionsRoot = "data/missions") =>
+    fetchJSON<MissionSummary[]>(`/missions?missions_root=${encodeURIComponent(missionsRoot)}`),
+
+  getMission: (missionId: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}?missions_root=${encodeURIComponent(missionsRoot)}`),
+
+  listSkills: (skillsDir = "skills") =>
+    fetchJSON<SkillSummary[]>(`/skills?skills_dir=${encodeURIComponent(skillsDir)}`),
 
   // SSE stream — returns an EventSource that emits task status changes.
   // Each event has a `data` field with a JSON object containing task_id,

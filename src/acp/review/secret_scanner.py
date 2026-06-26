@@ -78,10 +78,25 @@ class SecretFinding:
     entropy: float = 0.0  # bits/char for high_entropy_assignment; 0.0 otherwise
 
 
-def scan_patch(patch: str) -> list[SecretFinding]:
-    """Scan added lines of a unified diff patch for secret-like content."""
+def scan_patch(
+    patch: str,
+    *,
+    custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+) -> list[SecretFinding]:
+    """Scan added lines of a unified diff patch for secret-like content.
+
+    When ``custom_regexes`` is provided, each (name, pattern) pair is
+    checked against added lines in addition to the built-in provider
+    patterns. Custom matches are tagged with kind ``custom:<name>`` and
+    are included in hard-block detection.
+    """
     findings: list[SecretFinding] = []
     seen: set[tuple[str, int]] = set()  # dedupe (kind, line_no)
+
+    # Merge built-in and custom patterns.
+    all_patterns = list(_PROVIDER_PATTERNS)
+    if custom_regexes:
+        all_patterns.extend(custom_regexes)
 
     for idx, raw_line in enumerate(patch.splitlines(), start=1):
         # Only added lines carry new secret risk.
@@ -89,7 +104,7 @@ def scan_patch(patch: str) -> list[SecretFinding]:
             continue
         added = raw_line[1:]
 
-        for kind, pat in _PROVIDER_PATTERNS:
+        for kind, pat in all_patterns:
             for m in pat.finditer(added):
                 key = (kind, idx)
                 if key in seen:
@@ -262,6 +277,7 @@ def scan_diff(
     *,
     worktree_path: Path | None = None,
     use_trufflehog: bool = True,
+    custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
 ) -> list[SecretFinding]:
     """Scan a diff for secrets, using TruffleHog if available.
 
@@ -273,10 +289,15 @@ def scan_diff(
     When TruffleHog is used, the regex scanner is also run as a
     complementary check — TruffleHog catches verified secrets but may
     miss unverified ones that the regex scanner would flag.
+
+    v0.7.0 (Phase 3.2): When ``custom_regexes`` is provided, each
+    (name, pattern) pair is checked in addition to the built-in patterns.
+    Custom matches are tagged with kind ``custom:<name>`` and are
+    included in hard-block detection.
     """
     # Always run the regex scanner — it catches patterns TruffleHog might
     # miss (e.g., private key blocks that TruffleHog doesn't verify).
-    findings = scan_patch(patch)
+    findings = scan_patch(patch, custom_regexes=custom_regexes)
 
     # If TruffleHog is available and a worktree path is provided, run it
     # for verified detection. Merge any new findings.
@@ -315,7 +336,11 @@ _HARD_BLOCK_KINDS = frozenset({
 })
 
 
-def detect_hard_block_secrets(patch: str) -> list[SecretFinding]:
+def detect_hard_block_secrets(
+    patch: str,
+    *,
+    custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+) -> list[SecretFinding]:
     """Fast pre-TruffleHog scan for secrets that constitute a HARD_BLOCK.
 
     Runs only the regex scanner (no subprocess, no network) and returns
@@ -329,11 +354,18 @@ def detect_hard_block_secrets(patch: str) -> list[SecretFinding]:
     particularly high (>= 4.0 bits/char), indicating a very likely secret.
     The threshold is higher than the scan threshold (3.5) to reduce false
     positives for the hard-block path.
+
+    v0.7.0 (Phase 3.2): Custom regex matches (kind starting with
+    ``custom:``) are always treated as hard blocks — the user explicitly
+    defined them because they know they're secrets.
     """
-    findings = scan_patch(patch)
+    findings = scan_patch(patch, custom_regexes=custom_regexes)
     hard_blocks: list[SecretFinding] = []
     for f in findings:
         if f.kind in _HARD_BLOCK_KINDS:
+            hard_blocks.append(f)
+        elif f.kind.startswith("custom:"):
+            # Custom regexes are user-defined — always hard-block.
             hard_blocks.append(f)
         elif f.kind == "high_entropy_assignment":
             # Use the entropy field directly (set during scan) instead of

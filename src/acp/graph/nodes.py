@@ -642,6 +642,58 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "worktree_path": state["worktree_path"],
         }
 
+    # --- gvisor backend: run agent in gVisor-sandboxed container ---------- #
+    # gVisor mounts the worktree as a volume, so diff capture works the
+    # same as the worktree backend — no remote fetch needed.
+    if cfg.executor.backend == "gvisor":
+        from acp.executor.gvisor import GvisorExecutor
+        executor = GvisorExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"gvisor:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "sandbox": True,
+                "runtime": "runsc",
+            },
+        )
+        try:
+            agent_result = executor.start(
+                task_id=task.task_id,
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "message": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # gVisor mounts the worktree as a volume — changes are already there.
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
     # --- worktree backend (default): current behavior --------------------- #
     agent = ctx.agent_factory(cfg)
     task.status = TaskStatus.EXECUTING
@@ -706,6 +758,29 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 "reason": "tests still failing after cap reached",
             },
         )
+
+    # v0.7.1: Circuit breaker — if the agent has produced the same failure
+    # signature N times in a row, emit an explicit event so the review
+    # gate can differentiate "normal review request" from "hallucinating
+    # agent loop aborted." This is distinct from REPAIR_EXHAUSTED (cap
+    # reached) — the breaker fires when attempts remain but the agent is
+    # stuck in a loop.
+    if has_failures and attempts > 0:
+        breaker = getattr(cfg.agent, "repair_repeat_breaker", 0)
+        if breaker > 0 and attempts >= breaker:
+            fingerprints = state.get("repair_fingerprints", [])
+            if len(fingerprints) >= breaker:
+                recent = fingerprints[-breaker:]
+                if len(set(recent)) == 1:
+                    ctx.events.write(
+                        EventType.AUTO_REPAIR_LOOP_ABORTED,
+                        {
+                            "attempt": attempts,
+                            "breaker_threshold": breaker,
+                            "fingerprint": recent[-1],
+                            "reason": "circuit breaker: same failure signature repeated",
+                        },
+                    )
 
     return {"command_results": command_results}
 
@@ -963,15 +1038,20 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
     ``node.failed`` event on failure. Never raises.
     """
     cfg = state.get("config")
-    if cfg is None or cfg.executor.backend != "docker_sbx":
+    if cfg is None or cfg.executor.backend not in ("docker_sbx", "gvisor"):
         return
     sandbox_name = state.get("sandbox_name", "")
     if not sandbox_name:
         return
     try:
-        executor = SbxExecutor(cfg.executor)
-        executor._sandbox_name = sandbox_name
-        executor._sandbox_remote = state.get("sandbox_remote", "")
+        if cfg.executor.backend == "gvisor":
+            from acp.executor.gvisor import GvisorExecutor
+            executor = GvisorExecutor(cfg.executor)
+            executor._container_name = sandbox_name
+        else:
+            executor = SbxExecutor(cfg.executor)
+            executor._sandbox_name = sandbox_name
+            executor._sandbox_remote = state.get("sandbox_remote", "")
         executor.cleanup()
         ctx.events.write(
             EventType.SANDBOX_STOPPED,
@@ -1255,6 +1335,13 @@ def auto_merge_node(
     if review is not None:
         max_risk = cfg.review.auto_merge_max_risk
         if _risk_exceeds(review.risk, max_risk):
+            # v0.7.1: Log which specific risk factors breached the ceiling
+            # so operators can see exactly what triggered the refusal.
+            risk_factors = []
+            if review.hard_block:
+                risk_factors.append("hard_block")
+            if review.concerns:
+                risk_factors.extend(review.concerns)
             ctx.events.write(
                 EventType.AUTO_MERGE_REFUSED,
                 {
@@ -1263,6 +1350,7 @@ def auto_merge_node(
                     "auto_merge_max_risk": max_risk.value,
                     "task_branch": task.task_branch,
                     "base_branch": cfg.repo.default_branch,
+                    "risk_factors": risk_factors,
                 },
             )
             task.status = TaskStatus.NEEDS_REVIEW

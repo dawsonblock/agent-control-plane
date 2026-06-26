@@ -166,6 +166,16 @@ class ReviewSection(BaseModel):
     # until a human approves" for high-risk changes (database, secrets,
     # auth). Default "medium" — HIGH-risk tasks always require a human.
     auto_merge_max_risk: RiskLevel = RiskLevel.MEDIUM
+    # v0.7.0 (Phase 3.2): Custom secret detection regexes. Users can
+    # define their own regex patterns for internal/company-specific
+    # token formats that TruffleHog doesn't know about. Each entry is
+    # a dict with "name" (label for the finding) and "pattern" (regex).
+    # Matches trigger a HARD_BLOCK just like built-in provider patterns.
+    # Example:
+    #   custom_secret_regexes = [
+    #     {"name": "internal_api_key", "pattern": r"IAK-[A-Z0-9]{32}"},
+    #   ]
+    custom_secret_regexes: list[dict[str, str]] = Field(default_factory=list)
 
     @field_validator("max_changed_files")
     @classmethod
@@ -179,6 +189,25 @@ class ReviewSection(BaseModel):
     def _validate_max_lines(cls, v: int) -> int:
         if v <= 0 or v > 1_000_000:
             raise ValueError("review.max_added_lines must be between 1 and 1000000")
+        return v
+
+    @field_validator("custom_secret_regexes")
+    @classmethod
+    def _validate_custom_regexes(cls, v: list[dict[str, str]]) -> list[dict[str, str]]:
+        import re
+        for entry in v:
+            if "name" not in entry or "pattern" not in entry:
+                raise ValueError(
+                    "custom_secret_regexes entries must have 'name' and 'pattern' keys"
+                )
+            if not entry["name"].strip():
+                raise ValueError("custom_secret_regexes entry 'name' must not be empty")
+            try:
+                re.compile(entry["pattern"])
+            except re.error as exc:
+                raise ValueError(
+                    f"custom_secret_regexes: invalid regex for '{entry['name']}': {exc}"
+                ) from exc
         return v
 
 

@@ -642,6 +642,111 @@ async def memory_search(
 
 
 # --------------------------------------------------------------------------- #
+# v0.7.1: Missions API (M14 — mission epics)
+# --------------------------------------------------------------------------- #
+
+
+class MissionSummary(BaseModel):
+    mission_id: str
+    goal: str
+    status: str
+    repo_name: str
+    steps_total: int
+    steps_completed: int
+    created_at: str
+
+
+class MissionDetailResponse(BaseModel):
+    mission_id: str
+    goal: str
+    description: str
+    repo_name: str
+    status: str
+    steps: list[dict[str, Any]]
+    created_at: str
+    updated_at: str
+    completed_at: str
+
+
+@app.get("/missions", response_model=list[MissionSummary])
+async def list_missions(
+    missions_root: str = "data/missions",
+) -> list[MissionSummary]:
+    """List all missions ordered by creation date."""
+    from acp.missions.store import MissionStore
+    store = MissionStore(missions_root=Path(missions_root))
+    missions = store.list_missions()
+    return [
+        MissionSummary(
+            mission_id=m.mission_id,
+            goal=m.goal,
+            status=m.status.value,
+            repo_name=m.repo_name,
+            steps_total=len(m.steps),
+            steps_completed=sum(1 for s in m.steps if s.status == "completed"),
+            created_at=m.created_at,
+        )
+        for m in missions
+    ]
+
+
+@app.get("/missions/{mission_id}", response_model=MissionDetailResponse)
+async def get_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Get detailed information about a specific mission."""
+    from acp.missions.store import MissionStore
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_root=Path(missions_root))
+    mission = store.load(mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.1: Skills API (M8 — skills governance)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/skills")
+async def list_skills(
+    skills_dir: str = "skills",
+) -> list[dict[str, Any]]:
+    """List all available skill playbooks from the skills directory."""
+    from acp.skills.loader import load_skills
+    skills_path = Path(skills_dir)
+    if not skills_path.is_dir():
+        return []
+    try:
+        skills = load_skills(skills_path)
+        return [
+            {
+                "name": s.get("name", ""),
+                "purpose": s.get("purpose", ""),
+                "rules": s.get("rules", []),
+                "has_hard_blocks": bool(s.get("review_gates", {}).get("hard_blocks")),
+                "has_risk_elevators": bool(s.get("review_gates", {}).get("risk_elevators")),
+            }
+            for s in skills
+        ]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to load skills: {exc}")
+
+
+# --------------------------------------------------------------------------- #
 # SSE streaming — real-time task event updates
 # --------------------------------------------------------------------------- #
 

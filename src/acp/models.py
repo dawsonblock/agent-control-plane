@@ -123,6 +123,10 @@ class EventType(str, Enum):
     TASK_SUBTASK_SPAWNED = "task.subtask_spawned"
     # Phase 4.1: Semantic memory garbage collection.
     MEMORY_PRUNED = "memory.pruned"
+    # v0.7.1: SQLite integrity breach — task.json and SQLite disagree.
+    STORE_INTEGRITY_BREACH = "store.integrity_breach"
+    # v0.7.1: Autonomous mode — repair loop aborted by circuit breaker.
+    AUTO_REPAIR_LOOP_ABORTED = "auto.repair_loop_aborted"
 
 
 class RiskLevel(str, Enum):
