@@ -346,6 +346,7 @@ def run_workflow(
     runs_root: Path | str,
     vault_root: Path | str,
     agent_factory: Callable[[Any], AgentProtocol] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
 
@@ -443,6 +444,8 @@ def run_workflow(
         "vault_root": Path(vault_root),
         "runs_root": Path(runs_root),
     }
+    if task_id is not None:
+        state["preallocated_task_id"] = task_id
     result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
 
     # Close the durable store if it was opened.

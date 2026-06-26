@@ -22,7 +22,7 @@ from typing import Any
 from acp.config import load_repo_config
 from acp.errors import ACPError
 from acp.models import EventType, TaskStatus
-from acp.store import TaskStore
+from acp.store import TaskStore, is_valid_task_id
 
 # FastAPI is an optional dependency (the `api` extra).
 try:
@@ -63,8 +63,6 @@ def _recover_orphaned_tasks() -> None:
 
     # Also scan task.json files directly (covers no-DurableTaskStore case).
     try:
-        from acp.models import TaskStatus
-        from acp.store import TaskStore
         store = TaskStore(runs_root=runs_root)
         if store.root.is_dir():
             for task_dir in sorted(store.root.iterdir()):
@@ -127,12 +125,6 @@ class RejectRequest(BaseModel):
     reason: str = ""
 
 
-class MemorySearchRequest(BaseModel):
-    """Request body for GET /memory/search."""
-    query: str
-    num_results: int = 10
-
-
 class TaskSummary(BaseModel):
     """Summary of a task for the list endpoint."""
     task_id: str
@@ -152,6 +144,125 @@ class EventResponse(BaseModel):
     payload: dict[str, Any] = {}
     prev_hash: str = ""
     hash: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+
+def _validate_task_id(task_id: str) -> None:
+    """Reject non-canonical task IDs to prevent path traversal."""
+    if not is_valid_task_id(task_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid task id: {task_id!r} "
+                "(expected task_<YYYYMMDD>_<NNNN>)"
+            ),
+        )
+
+
+def _load_task_or_404(
+    task_id: str,
+    runs_root: str,
+) -> tuple[Any, TaskStore]:
+    """Validate task_id, load the task, and return (task, store).
+
+    Raises HTTPException(400) for invalid IDs and 404 for missing tasks.
+    """
+    _validate_task_id(task_id)
+    store = TaskStore(runs_root=Path(runs_root))
+    try:
+        task = store.load(task_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {exc}",
+        ) from exc
+    return task, store
+
+
+def _lifecycle_action(
+    *,
+    task_id: str,
+    runs_root: str,
+    vault_root: str,
+    event_type: EventType,
+    new_status: TaskStatus,
+    actor: str,
+    reason: str = "",
+    status_check: Any,
+    status_error: str,
+) -> dict[str, Any]:
+    """Shared logic for approve and reject endpoints."""
+    from acp.evidence.lifecycle import (
+        record_lifecycle_event,
+        rerender_vault_note_from_state,
+    )
+
+    task, store = _load_task_or_404(task_id, runs_root)
+
+    if not status_check(task.status):
+        raise HTTPException(status_code=400, detail=status_error)
+
+    note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
+    if not note_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Vault note not found: {note_path}",
+        )
+
+    run_dir = store.run_dir(task_id)
+    if not run_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run directory not found: {run_dir}",
+        )
+
+    payload: dict[str, Any] = {
+        "actor": actor,
+        "vault_note_path": str(note_path),
+    }
+    if reason:
+        payload["reason"] = reason
+
+    try:
+        durable_warning = record_lifecycle_event(
+            task_id=task_id,
+            run_dir=run_dir,
+            event_type=event_type,
+            payload=payload,
+        )
+    except ACPError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lifecycle event write failed: {exc}",
+        ) from exc
+
+    task.status = new_status
+    task.touch()
+    store.save(task)
+
+    rerender_vault_note_from_state(
+        note_path=note_path,
+        run_dir=run_dir,
+        task=task,
+        store=store,
+        vault_root=Path(vault_root),
+        on_warning=lambda msg: _logger.warning(msg),
+    )
+
+    action = "approved" if new_status == TaskStatus.APPROVED else "rejected"
+    result: dict[str, Any] = {"status": action, "task_id": task_id}
+    if durable_warning:
+        result["warning"] = durable_warning
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -195,7 +306,7 @@ state = ServerState()
 app = FastAPI(
     title="Agent Control Plane",
     description="Local HTTP API for the ACP workflow",
-    version="0.6.6",
+    version="0.6.7",
     lifespan=lifespan,
 )
 
@@ -225,7 +336,7 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Health check."""
-    return {"status": "ok", "version": "0.6.6"}
+    return {"status": "ok", "version": "0.6.7"}
 
 
 @app.post("/config")
@@ -252,7 +363,8 @@ async def run_task(request: RunRequest) -> RunResponse:
     from acp.graph.workflow import run_workflow
 
     try:
-        result = run_workflow(
+        result = await asyncio.to_thread(
+            run_workflow,
             config=cfg,
             user_request=request.task,
             runs_root=Path(request.runs_root),
@@ -294,36 +406,57 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
     store = TaskStore(runs_root=Path(request.runs_root))
     task_id = store.next_task_id(repo_path=cfg.repo.path)
 
-    # Run in a background thread (the workflow is synchronous).
+    # Run in a background thread so the blocking workflow doesn't
+    # stall the event loop.
     async def _run() -> None:
         from acp.graph.workflow import run_workflow
         try:
-            run_workflow(
+            await asyncio.to_thread(
+                run_workflow,
                 config=cfg,
                 user_request=request.task,
                 runs_root=Path(request.runs_root),
                 vault_root=Path(request.vault_root),
+                task_id=task_id,
             )
-        except Exception:  # noqa: BLE001
-            pass  # Error is recorded in the event log
+        except Exception as exc:  # noqa: BLE001
+            _logger.error("async task %s failed: %s", task_id, exc)
 
     asyncio.create_task(_run())
     return {"status": "started", "task_id": task_id, "task": request.task}
 
 
 @app.get("/tasks", response_model=list[TaskSummary])
-async def list_tasks(runs_root: str = "data/runs") -> list[TaskSummary]:
-    """List all tasks."""
+async def list_tasks(
+    runs_root: str = "data/runs",
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> list[TaskSummary]:
+    """List tasks with pagination.
+
+    Returns up to ``limit`` tasks starting from ``offset`` (newest first
+    by directory name, which sorts chronologically). Use ``limit=0`` for
+    all tasks (backwards-compatible behavior).
+    """
     store = TaskStore(runs_root=Path(runs_root))
     tasks: list[TaskSummary] = []
 
     if not store.root.is_dir():
         return tasks
 
-    for task_dir in sorted(store.root.iterdir()):
-        task_json = task_dir / "task.json"
-        if not task_json.is_file():
-            continue
+    # Collect valid task dir names sorted newest-first.
+    task_dirs = sorted(
+        (d for d in store.root.iterdir()
+         if d.is_dir() and (d / "task.json").is_file()),
+        reverse=True,
+    )
+
+    if limit > 0:
+        task_dirs = task_dirs[offset:offset + limit]
+    elif offset > 0:
+        task_dirs = task_dirs[offset:]
+
+    for task_dir in task_dirs:
         try:
             task = store.load(task_dir.name)
             tasks.append(TaskSummary(
@@ -346,11 +479,7 @@ async def get_task(
     runs_root: str = "data/runs",
 ) -> dict[str, Any]:
     """Get task status and metadata."""
-    store = TaskStore(runs_root=Path(runs_root))
-    try:
-        task = store.load(task_id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=404, detail=f"Task not found: {exc}") from exc
+    task, _store = _load_task_or_404(task_id, runs_root)
 
     return {
         "task_id": task.task_id,
@@ -377,64 +506,21 @@ async def approve_task(
     full transactional integrity: signed events, SQLite dual-writes,
     manifest recompute, and rollback on failure — same as ``acp approve``.
     """
-    from acp.errors import ACPError
-    from acp.evidence.lifecycle import (
-        record_lifecycle_event,
-        rerender_vault_note_from_state,
-    )
     from acp.vault.approval import can_approve
 
-    store = TaskStore(runs_root=Path(runs_root))
-    try:
-        task = store.load(task_id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=404, detail=f"Task not found: {exc}") from exc
-
-    if not can_approve(task.status):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Task status '{task.status.value}' — only 'passed' or 'needs_review' can be approved."
-        )
-
-    note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
-    if not note_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Vault note not found: {note_path}")
-
-    run_dir = store.run_dir(task_id)
-    if not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
-
-    try:
-        durable_warning = record_lifecycle_event(
-            task_id=task_id,
-            run_dir=run_dir,
-            event_type=EventType.HUMAN_APPROVED,
-            payload={
-                "approver": request.approver or "unknown",
-                "vault_note_path": str(note_path),
-            },
-        )
-    except ACPError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Lifecycle event write failed: {exc}") from exc
-
-    task.status = TaskStatus.APPROVED
-    task.touch()
-    store.save(task)
-
-    rerender_vault_note_from_state(
-        note_path=note_path,
-        run_dir=run_dir,
-        task=task,
-        store=store,
-        vault_root=Path(vault_root),
+    return _lifecycle_action(
+        task_id=task_id,
+        runs_root=runs_root,
+        vault_root=vault_root,
+        event_type=EventType.HUMAN_APPROVED,
+        new_status=TaskStatus.APPROVED,
+        actor=request.approver or "unknown",
+        status_check=can_approve,
+        status_error=(
+            "Task status is not approvable — only 'passed' or"
+            " 'needs_review' can be approved."
+        ),
     )
-
-    result: dict[str, Any] = {"status": "approved", "task_id": task_id}
-    if durable_warning:
-        result["warning"] = durable_warning
-    return result
 
 
 @app.post("/tasks/{task_id}/reject")
@@ -449,65 +535,36 @@ async def reject_task(
     Uses the shared lifecycle service (acp.evidence.lifecycle) to ensure
     full transactional integrity — same as ``acp reject``.
     """
-    from acp.errors import ACPError
-    from acp.evidence.lifecycle import (
-        record_lifecycle_event,
-        rerender_vault_note_from_state,
+    _non_rejectable = frozenset({
+        TaskStatus.APPROVED,
+        TaskStatus.REJECTED,
+        TaskStatus.ARCHIVED,
+        TaskStatus.CREATED,
+        TaskStatus.EXECUTING,
+        TaskStatus.REVIEWING,
+        TaskStatus.REPAIRING,
+        TaskStatus.TESTING,
+        TaskStatus.WORKTREE_CREATED,
+        TaskStatus.CONTEXT_BUILT,
+    })
+
+    def _can_reject(status: TaskStatus) -> bool:
+        return status not in _non_rejectable
+
+    return _lifecycle_action(
+        task_id=task_id,
+        runs_root=runs_root,
+        vault_root=vault_root,
+        event_type=EventType.HUMAN_REJECTED,
+        new_status=TaskStatus.REJECTED,
+        actor=request.rejecter or "unknown",
+        reason=request.reason,
+        status_check=_can_reject,
+        status_error=(
+            "Task status cannot be rejected — only PASSED, FAILED,"
+            " or NEEDS_REVIEW tasks can be rejected."
+        ),
     )
-
-    store = TaskStore(runs_root=Path(runs_root))
-    try:
-        task = store.load(task_id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=404, detail=f"Task not found: {exc}") from exc
-
-    # Cannot reject an already-approved, already-rejected, or archived task.
-    if task.status in (TaskStatus.APPROVED, TaskStatus.REJECTED, TaskStatus.ARCHIVED):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Task status is '{task.status.value}' — cannot reject.",
-        )
-
-    note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
-    if not note_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Vault note not found: {note_path}")
-
-    run_dir = store.run_dir(task_id)
-    if not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
-
-    try:
-        durable_warning = record_lifecycle_event(
-            task_id=task_id,
-            run_dir=run_dir,
-            event_type=EventType.HUMAN_REJECTED,
-            payload={
-                "rejecter": request.rejecter or "unknown",
-                "reason": request.reason,
-                "vault_note_path": str(note_path),
-            },
-        )
-    except ACPError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Lifecycle event write failed: {exc}") from exc
-
-    task.status = TaskStatus.REJECTED
-    task.touch()
-    store.save(task)
-
-    rerender_vault_note_from_state(
-        note_path=note_path,
-        run_dir=run_dir,
-        task=task,
-        store=store,
-        vault_root=Path(vault_root),
-    )
-
-    result: dict[str, Any] = {"status": "rejected", "task_id": task_id}
-    if durable_warning:
-        result["warning"] = durable_warning
-    return result
 
 
 @app.get("/tasks/{task_id}/events", response_model=list[EventResponse])
@@ -516,6 +573,7 @@ async def get_events(
     runs_root: str = "data/runs",
 ) -> list[EventResponse]:
     """Get the event log for a task."""
+    _validate_task_id(task_id)
     from acp.events import EventWriter
 
     store = TaskStore(runs_root=Path(runs_root))
@@ -546,6 +604,7 @@ async def get_report(
     runs_root: str = "data/runs",
 ) -> dict[str, str]:
     """Get the report content for a task."""
+    _validate_task_id(task_id)
     store = TaskStore(runs_root=Path(runs_root))
     run_dir = store.run_dir(task_id)
     report_path = run_dir / "artifacts" / "report.md"
@@ -608,18 +667,34 @@ async def stream_tasks(
 
     async def event_stream() -> Any:
         last_statuses: dict[str, str] = {}
+        last_mtimes: dict[str, float] = {}
         heartbeat_counter = 0
 
         while True:
-            # Scan all tasks.
+            # Scan all tasks, but skip task.json files whose mtime
+            # hasn't changed since the last poll.
             current: dict[str, dict[str, Any]] = {}
             if store.root.is_dir():
                 for task_dir in sorted(store.root.iterdir()):
                     task_json = task_dir / "task.json"
                     if not task_json.is_file():
                         continue
+                    tid = task_dir.name
                     try:
-                        task = store.load(task_dir.name)
+                        mtime = task_json.stat().st_mtime
+                    except OSError:
+                        continue
+                    if tid in last_mtimes and mtime == last_mtimes[tid]:
+                        # File unchanged — reuse cached status.
+                        if tid in last_statuses:
+                            current[tid] = {
+                                "task_id": tid,
+                                "status": last_statuses[tid],
+                            }
+                        continue
+                    last_mtimes[tid] = mtime
+                    try:
+                        task = store.load(tid)
                         current[task.task_id] = {
                             "task_id": task.task_id,
                             "status": task.status.value,

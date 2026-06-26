@@ -39,9 +39,6 @@ from acp.models import AgentResult
 # refuse to run (in worktree mode).
 _SHELL_METACHARS = set("|<>;&$\n`")
 
-# Commands that are known to be safe for shell=False even though they may
-# contain spaces (e.g. "npm run lint" → ["npm", "run", "lint"]).
-
 
 def _needs_shell(command: str) -> bool:
     """Return True if the command contains shell metacharacters."""

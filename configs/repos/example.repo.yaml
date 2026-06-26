@@ -28,6 +28,11 @@ agent:
   #   command_template: "codex --prompt-file {prompt_path}"           # Codex CLI
   #   command_template: "opencode run --prompt {prompt_path}"         # OpenCode
   command_template: ""
+  # v0.6.7: Allow shell metacharacters (|, >, <, &, ;, $, backticks) in
+  # command_template when running in worktree mode. By default these are
+  # refused to prevent RCE on the host. Set to true only if you trust the
+  # config and need shell features (pipes, redirects) on the host.
+  # allow_shell: false
   # v0.6.4 (M9): Agent File registry — versioned, hashed agent profiles.
   # When set, build_agent verifies the selected agent's hash against the
   # registry before execution. A hash mismatch raises AgentConfigError.

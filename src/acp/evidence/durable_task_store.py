@@ -101,8 +101,16 @@ class DurableTaskStore:
             "task_branch, worktree_path, user_request, status, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(task_id) DO UPDATE SET "
+            "repo_name=excluded.repo_name, "
+            "repo_path=excluded.repo_path, "
+            "base_branch=excluded.base_branch, "
             "base_commit_sha=excluded.base_commit_sha, "
-            "status=excluded.status, updated_at=excluded.updated_at",
+            "task_branch=excluded.task_branch, "
+            "worktree_path=excluded.worktree_path, "
+            "user_request=excluded.user_request, "
+            "status=excluded.status, "
+            "created_at=excluded.created_at, "
+            "updated_at=excluded.updated_at",
             (
                 task.task_id,
                 task.repo_name,

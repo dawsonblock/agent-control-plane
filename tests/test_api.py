@@ -142,6 +142,18 @@ class TestTaskListing:
 class TestTaskDetail:
     """GET /tasks/{task_id} — get task status."""
 
+    def test_get_task_rejects_invalid_id(self, tmp_path):
+        """Invalid task_id should return 400, not 404 or 500."""
+        client = _make_client(tmp_path)
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+
+        resp = client.get(
+            "/tasks/invalid_id",
+            params={"runs_root": str(runs_root)},
+        )
+        assert resp.status_code == 400
+
     def test_get_task(self, tmp_path):
         from acp.store import TaskStore
         from acp.models import Task, TaskStatus
@@ -180,7 +192,7 @@ class TestTaskDetail:
         runs_root.mkdir()
 
         resp = client.get(
-            "/tasks/nonexistent",
+            "/tasks/task_20260626_9999",
             params={"runs_root": str(runs_root)},
         )
         assert resp.status_code == 404
@@ -225,7 +237,7 @@ class TestEvents:
         runs_root.mkdir()
 
         resp = client.get(
-            "/tasks/nonexistent/events",
+            "/tasks/task_20260626_9999/events",
             params={"runs_root": str(runs_root)},
         )
         assert resp.status_code == 404
@@ -266,7 +278,7 @@ class TestReport:
         runs_root.mkdir()
 
         resp = client.get(
-            "/tasks/nonexistent/report",
+            "/tasks/task_20260626_9999/report",
             params={"runs_root": str(runs_root)},
         )
         assert resp.status_code == 404
@@ -341,7 +353,7 @@ class TestApproveReject:
         runs_root.mkdir()
 
         resp = client.post(
-            "/tasks/nonexistent/approve",
+            "/tasks/task_20260626_9999/approve",
             json={"approver": "alice"},
             params={"runs_root": str(runs_root)},
         )

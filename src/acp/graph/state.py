@@ -37,6 +37,7 @@ class ACPState(TypedDict, total=False):
     user_request: str
     vault_root: Path
     runs_root: Path
+    preallocated_task_id: str  # when set, create_task reuses it
 
     # --- accumulated as the run progresses ------------------------------ #
     task_id: str

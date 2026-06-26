@@ -222,7 +222,11 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
 def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     repo_path = cfg.repo.path
-    task_id = ctx.store.next_task_id(repo_path=repo_path)
+    preallocated = state.get("preallocated_task_id")
+    if preallocated:
+        task_id = preallocated
+    else:
+        task_id = ctx.store.next_task_id(repo_path=repo_path)
     # The EventWriter was constructed with a placeholder id; point it at the
     # real run dir now that we know the task id.
     ctx.events.relocate(task_id, ctx.store.run_dir(task_id))
