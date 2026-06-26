@@ -1,0 +1,774 @@
+"""v0.6.0 Autonomous Mode tests.
+
+Tests the autonomous mode feature:
+
+  1. Config fields (autonomous_mode, auto_merge_on_pass,
+     dynamic_test_generation, repair_repeat_breaker)
+  2. GitOps merge module (merge_to_base, conflict handling)
+  3. Auto-approve node (writes auto.approved event)
+  4. Auto-merge node (writes auto.merged event, handles conflicts)
+  5. Graph routing (write_report → auto_approve → auto_merge → done)
+  6. Circuit breaker (stops repair loop on repeated failures)
+  7. TESTS_MISSING repair prompt (dynamic test generation)
+  8. Evidence classification (auto.approved/auto.merged as post-run)
+  9. derive_status_from_events handles auto.approved
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from git import Repo
+
+from acp.config import AgentSection, RepoConfig, RepoSection, ReviewSection
+from acp.models import EventType, Task, TaskStatus
+
+
+# --------------------------------------------------------------------------- #
+# 1. Config fields
+# --------------------------------------------------------------------------- #
+
+
+class TestAutonomousConfig:
+    """Config fields for autonomous mode."""
+
+    def test_autonomous_mode_defaults_false(self):
+        cfg = ReviewSection()
+        assert cfg.autonomous_mode is False
+
+    def test_auto_merge_defaults_false(self):
+        cfg = ReviewSection()
+        assert cfg.auto_merge_on_pass is False
+
+    def test_dynamic_test_generation_defaults_true(self):
+        cfg = AgentSection()
+        assert cfg.dynamic_test_generation is True
+
+    def test_repair_repeat_breaker_defaults_3(self):
+        cfg = AgentSection()
+        assert cfg.repair_repeat_breaker == 3
+
+    def test_autonomous_mode_can_be_enabled(self):
+        cfg = ReviewSection(autonomous_mode=True)
+        assert cfg.autonomous_mode is True
+
+    def test_auto_merge_can_be_enabled(self):
+        cfg = ReviewSection(auto_merge_on_pass=True)
+        assert cfg.auto_merge_on_pass is True
+
+
+# --------------------------------------------------------------------------- #
+# 2. GitOps merge module
+# --------------------------------------------------------------------------- #
+
+
+class TestGitOpsMerge:
+    """merge_to_base merges task branch into default branch."""
+
+    def _setup_repo(self, tmp_path: Path) -> tuple[Path, str]:
+        """Create a test repo with a base branch and a task branch."""
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+
+        # Base commit on main.
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base commit")
+        repo.git.branch("-M", "main")
+
+        # Task branch with a new file.
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hello')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "add feature")
+
+        # Back to main.
+        repo.git.checkout("main")
+
+        return repo_path, "agent/task_001"
+
+    def test_merge_to_base_success(self, tmp_path):
+        """merge_to_base merges the task branch into main."""
+        from acp.gitops.merge import merge_to_base
+
+        repo_path, task_branch = self._setup_repo(tmp_path)
+
+        merge_sha = merge_to_base(repo_path, "agent/task_001", "main")
+
+        # Verify the merge happened.
+        repo = Repo(str(repo_path))
+        assert repo.active_branch.name == "main"
+        assert repo.head.commit.hexsha == merge_sha
+
+        # The feature file should be on main now.
+        assert (repo_path / "feature.py").exists()
+
+    def test_merge_to_base_missing_base_branch(self, tmp_path):
+        """merge_to_base raises if base branch doesn't exist."""
+        from acp.gitops.merge import merge_to_base
+
+        repo_path, _ = self._setup_repo(tmp_path)
+
+        with pytest.raises(RuntimeError, match="base branch"):
+            merge_to_base(repo_path, "agent/task_001", "nonexistent")
+
+    def test_merge_to_base_missing_task_branch(self, tmp_path):
+        """merge_to_base raises if task branch doesn't exist."""
+        from acp.gitops.merge import merge_to_base
+
+        repo_path, _ = self._setup_repo(tmp_path)
+
+        with pytest.raises(RuntimeError, match="task branch"):
+            merge_to_base(repo_path, "nonexistent", "main")
+
+    def test_merge_to_base_conflict(self, tmp_path):
+        """merge_to_base aborts on conflict and raises."""
+        from acp.gitops.merge import merge_to_base
+
+        repo_path, _ = self._setup_repo(tmp_path)
+
+        # Create a conflicting change on main.
+        repo = Repo(str(repo_path))
+        (repo_path / "feature.py").write_text("print('conflict')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "conflicting change on main")
+
+        # Now merge should fail.
+        with pytest.raises(RuntimeError, match="Auto-merge failed"):
+            merge_to_base(repo_path, "agent/task_001", "main")
+
+        # Verify main was not modified by the failed merge.
+        assert (repo_path / "feature.py").read_text() == "print('conflict')\n"
+
+
+# --------------------------------------------------------------------------- #
+# 3. Auto-approve node
+# --------------------------------------------------------------------------- #
+
+
+class TestAutoApproveNode:
+    """auto_approve_node writes auto.approved event."""
+
+    def _make_config(self, **kwargs) -> RepoConfig:
+        review = ReviewSection(
+            autonomous_mode=kwargs.get("autonomous_mode", False),
+            auto_merge_on_pass=kwargs.get("auto_merge_on_pass", False),
+        )
+        return RepoConfig(
+            repo=RepoSection(
+                name="test",
+                path=Path("/tmp/test"),
+                default_branch="main",
+            ),
+            review=review,
+        )
+
+    def test_auto_approve_writes_event(self, tmp_path):
+        """auto_approve_node writes auto.approved when enabled."""
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
+        from acp.store import TaskStore
+
+        cfg = self._make_config(autonomous_mode=True)
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test request",
+            status=TaskStatus.PASSED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+
+        ctx = NodeContext(store=store, events=events)
+        state = {"config": cfg, "task": task}
+
+        result = auto_approve_node(state, ctx)
+
+        assert result.get("auto_approved") is True
+        assert result.get("status") == TaskStatus.APPROVED
+
+        all_events = events.read_all()
+        assert len(all_events) == 1
+        assert all_events[0].type == EventType.AUTO_APPROVED
+        assert all_events[0].payload["approver"] == "ACP-Autonomous-Bot"
+
+    def test_auto_approve_noop_when_disabled(self, tmp_path):
+        """auto_approve_node is a no-op when autonomous_mode is False."""
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
+        from acp.store import TaskStore
+
+        cfg = self._make_config(autonomous_mode=False)
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test request",
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        events = EventWriter("task_001", run_dir)
+
+        ctx = NodeContext(store=store, events=events)
+        state = {"config": cfg, "task": task}
+
+        result = auto_approve_node(state, ctx)
+
+        assert result == {}
+        assert len(events.read_all()) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 4. Auto-merge node
+# --------------------------------------------------------------------------- #
+
+
+class TestAutoMergeNode:
+    """auto_merge_node merges and writes auto.merged event."""
+
+    def test_auto_merge_writes_event(self, tmp_path):
+        """auto_merge_node writes auto.merged on success."""
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.store import TaskStore
+
+        # Set up a real repo.
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test", path=repo_path, default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge_on_pass=True,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+        }
+
+        result = auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is True
+        assert "merge_commit_sha" in result
+
+        all_events = events.read_all()
+        assert any(e.type == EventType.AUTO_MERGED for e in all_events)
+
+    def test_auto_merge_noop_when_disabled(self, tmp_path):
+        """auto_merge_node is a no-op when auto_merge_on_pass is False."""
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.store import TaskStore
+
+        cfg = RepoConfig(
+            repo=RepoSection(name="test", path=Path("/tmp")),
+            review=ReviewSection(auto_merge_on_pass=False),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=Path("/tmp"),
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        events = EventWriter("task_001", run_dir)
+
+        ctx = NodeContext(store=store, events=events)
+        state = {"config": cfg, "task": task}
+
+        result = auto_merge_node(state, ctx)
+        assert result == {}
+
+    def test_auto_merge_conflict_downgrades_to_needs_review(
+        self, tmp_path,
+    ):
+        """auto_merge_node downgrades to NEEDS_REVIEW on conflict."""
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.store import TaskStore
+
+        # Set up a repo with a conflict.
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "file.py").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+
+        # Task branch changes file.py.
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "file.py").write_text("# task\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "task change")
+
+        # Main changes the same file.
+        repo.git.checkout("main")
+        (repo_path / "file.py").write_text("# main\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "main change")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test", path=repo_path, default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge_on_pass=True,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+        }
+
+        result = auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+
+
+# --------------------------------------------------------------------------- #
+# 5. Graph routing
+# --------------------------------------------------------------------------- #
+
+
+class TestGraphRouting:
+    """Routing functions handle autonomous mode."""
+
+    def test_route_after_write_report_autonomous(self):
+        from acp.graph.workflow import _route_after_write_report
+
+        cfg = MagicMock()
+        cfg.review.autonomous_mode = True
+        state = {"status": TaskStatus.PASSED, "config": cfg}
+        assert _route_after_write_report(state) == "auto_approve"
+
+    def test_route_after_write_report_non_autonomous(self):
+        from acp.graph.workflow import _route_after_write_report
+
+        cfg = MagicMock()
+        cfg.review.autonomous_mode = False
+        state = {"status": TaskStatus.PASSED, "config": cfg}
+        assert _route_after_write_report(state) == "done"
+
+    def test_route_after_auto_approve_to_merge(self):
+        from acp.graph.workflow import _route_after_auto_approve
+
+        cfg = MagicMock()
+        cfg.review.auto_merge_on_pass = True
+        state = {
+            "status": TaskStatus.APPROVED,
+            "config": cfg,
+        }
+        assert _route_after_auto_approve(state) == "auto_merge"
+
+    def test_route_after_auto_approve_to_done(self):
+        from acp.graph.workflow import _route_after_auto_approve
+
+        cfg = MagicMock()
+        cfg.review.auto_merge_on_pass = False
+        state = {
+            "status": TaskStatus.APPROVED,
+            "config": cfg,
+        }
+        assert _route_after_auto_approve(state) == "done"
+
+    def test_route_after_auto_merge_success(self):
+        from acp.graph.workflow import _route_after_auto_merge
+
+        state = {"status": TaskStatus.APPROVED}
+        assert _route_after_auto_merge(state) == "done"
+
+    def test_route_after_auto_merge_conflict(self):
+        from acp.graph.workflow import _route_after_auto_merge
+
+        state = {"status": TaskStatus.NEEDS_REVIEW}
+        assert _route_after_auto_merge(state) == "needs_review"
+
+
+# --------------------------------------------------------------------------- #
+# 6. Circuit breaker
+# --------------------------------------------------------------------------- #
+
+
+class TestCircuitBreaker:
+    """Circuit breaker stops repair loop on repeated failures."""
+
+    def test_circuit_breaker_triggers_on_repeat(self):
+        """When the same fingerprint repeats N times, stop repairing."""
+        from acp.graph.workflow import _route_after_tests
+        from acp.models import CommandResult
+
+        cfg = MagicMock()
+        cfg.agent.max_repair_attempts = 10  # high cap
+        cfg.agent.repair_repeat_breaker = 3  # break after 3 repeats
+
+        # Simulate a failing command.
+        failing_result = CommandResult(
+            command="pytest",
+            cwd=Path("/tmp"),
+            exit_code=1,
+            stdout_path=Path("/tmp/out"),
+            stderr_path=Path("/tmp/err"),
+            duration_seconds=1.0,
+            skipped=False,
+        )
+
+        # 3 identical fingerprints → breaker triggers.
+        state = {
+            "config": cfg,
+            "command_results": [failing_result],
+            "repair_attempts": 3,
+            "repair_fingerprints": ["abc123", "abc123", "abc123"],
+        }
+        assert _route_after_tests(state) == "capture_diff"
+
+    def test_circuit_breaker_does_not_trigger_on_varied(self):
+        """Different fingerprints don't trigger the breaker."""
+        from acp.graph.workflow import _route_after_tests
+        from acp.models import CommandResult
+
+        cfg = MagicMock()
+        cfg.agent.max_repair_attempts = 10
+        cfg.agent.repair_repeat_breaker = 3
+
+        failing_result = CommandResult(
+            command="pytest",
+            cwd=Path("/tmp"),
+            exit_code=1,
+            stdout_path=Path("/tmp/out"),
+            stderr_path=Path("/tmp/err"),
+            duration_seconds=1.0,
+            skipped=False,
+        )
+
+        state = {
+            "config": cfg,
+            "command_results": [failing_result],
+            "repair_attempts": 3,
+            "repair_fingerprints": ["abc", "def", "ghi"],
+        }
+        assert _route_after_tests(state) == "repair_plan"
+
+    def test_circuit_breaker_disabled(self):
+        """When repair_repeat_breaker=0, never break."""
+        from acp.graph.workflow import _route_after_tests
+        from acp.models import CommandResult
+
+        cfg = MagicMock()
+        cfg.agent.max_repair_attempts = 10
+        cfg.agent.repair_repeat_breaker = 0
+
+        failing_result = CommandResult(
+            command="pytest",
+            cwd=Path("/tmp"),
+            exit_code=1,
+            stdout_path=Path("/tmp/out"),
+            stderr_path=Path("/tmp/err"),
+            duration_seconds=1.0,
+            skipped=False,
+        )
+
+        state = {
+            "config": cfg,
+            "command_results": [failing_result],
+            "repair_attempts": 5,
+            "repair_fingerprints": ["x"] * 5,
+        }
+        assert _route_after_tests(state) == "repair_plan"
+
+
+# --------------------------------------------------------------------------- #
+# 7. TESTS_MISSING repair prompt
+# --------------------------------------------------------------------------- #
+
+
+class TestTestsMissingPrompt:
+    """Repair prompt includes test-writing instructions when TESTS_MISSING."""
+
+    def test_write_repair_prompt_tests_missing(self, tmp_path):
+        from acp.agents.base import write_repair_prompt
+        from acp.config import RepoConfig, RepoSection
+
+        cfg = RepoConfig(
+            repo=RepoSection(name="test", path=tmp_path),
+        )
+        prompt_path = write_repair_prompt(
+            original_request="add a feature",
+            worktree_path=tmp_path / "worktree",
+            artifact_dir=tmp_path / "artifacts",
+            repo_config=cfg,
+            failures=[],
+            attempt=1,
+            max_attempts=3,
+            tests_missing=True,
+        )
+
+        content = prompt_path.read_text()
+        assert "write" in content.lower()
+        assert "test" in content.lower()
+        assert "unit tests" in content.lower()
+
+    def test_write_repair_prompt_no_tests_missing(self, tmp_path):
+        from acp.agents.base import write_repair_prompt
+        from acp.config import RepoConfig, RepoSection
+
+        cfg = RepoConfig(
+            repo=RepoSection(name="test", path=tmp_path),
+        )
+        prompt_path = write_repair_prompt(
+            original_request="add a feature",
+            worktree_path=tmp_path / "worktree",
+            artifact_dir=tmp_path / "artifacts",
+            repo_config=cfg,
+            failures=[
+                {
+                    "command": "pytest",
+                    "exit_code": 1,
+                    "stdout": "FAIL",
+                    "stderr": "",
+                }
+            ],
+            attempt=1,
+            max_attempts=3,
+            tests_missing=False,
+        )
+
+        content = prompt_path.read_text()
+        assert "Fix the root cause" in content
+        assert "Do NOT delete, skip, or weaken" in content
+
+
+# --------------------------------------------------------------------------- #
+# 8. Evidence classification
+# --------------------------------------------------------------------------- #
+
+
+class TestAutoEventEvidenceClassification:
+    """auto.approved and auto.merged are post-run events."""
+
+    def test_auto_approved_does_not_break_verify(self, tmp_path):
+        """auto.approved after evidence.finalized doesn't break verify."""
+        from acp.events import EventWriter
+        from acp.evidence.manifest import (
+            build_evidence_manifest,
+            compute_artifact_content_hash,
+            verify_evidence_manifest,
+            _sha256_file,
+        )
+
+        run_dir = tmp_path / "run"
+        artifacts_dir = run_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "test.txt").write_text("test")
+        (artifacts_dir / "final_report.md").write_text("# Report\n")
+
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "executor": {
+                "network_policy": "locked_down",
+                "clone_mode": True,
+            },
+        })
+        real_hash = compute_artifact_content_hash(run_dir)
+        events.write(EventType.EVIDENCE_FINALIZED, {
+            "artifact_content_hash": real_hash,
+        })
+        report_hash = _sha256_file(
+            artifacts_dir / "final_report.md",
+        )
+        events.write(EventType.EVIDENCE_REPORT_BOUND, {
+            "report_hash": report_hash,
+        })
+        # auto.approved AFTER finalization.
+        events.write(EventType.AUTO_APPROVED, {
+            "approver": "ACP-Autonomous-Bot",
+        })
+
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events,
+        )
+        manifest_path = run_dir / "evidence_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = verify_evidence_manifest(run_dir, deep=False)
+        assert result is True
+
+    def test_auto_merged_does_not_break_verify(self, tmp_path):
+        """auto.merged after evidence.finalized doesn't break verify."""
+        from acp.events import EventWriter
+        from acp.evidence.manifest import (
+            build_evidence_manifest,
+            compute_artifact_content_hash,
+            verify_evidence_manifest,
+            _sha256_file,
+        )
+
+        run_dir = tmp_path / "run"
+        artifacts_dir = run_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "test.txt").write_text("test")
+        (artifacts_dir / "final_report.md").write_text("# Report\n")
+
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+        events.write(EventType.SANDBOX_CONFIGURED, {
+            "sandbox_name": "acp-test",
+            "executor": {
+                "network_policy": "locked_down",
+                "clone_mode": True,
+            },
+        })
+        real_hash = compute_artifact_content_hash(run_dir)
+        events.write(EventType.EVIDENCE_FINALIZED, {
+            "artifact_content_hash": real_hash,
+        })
+        report_hash = _sha256_file(
+            artifacts_dir / "final_report.md",
+        )
+        events.write(EventType.EVIDENCE_REPORT_BOUND, {
+            "report_hash": report_hash,
+        })
+        events.write(EventType.AUTO_APPROVED, {
+            "approver": "ACP-Autonomous-Bot",
+        })
+        events.write(EventType.AUTO_MERGED, {
+            "merge_commit_sha": "abc123",
+        })
+
+        manifest = build_evidence_manifest(
+            run_dir=run_dir, events_writer=events,
+        )
+        manifest_path = run_dir / "evidence_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = verify_evidence_manifest(run_dir, deep=False)
+        assert result is True
+
+
+# --------------------------------------------------------------------------- #
+# 9. derive_status_from_events handles auto.approved
+# --------------------------------------------------------------------------- #
+
+
+class TestDeriveStatusAutoApproved:
+    """derive_status_from_events treats auto.approved as approved."""
+
+    def test_auto_approved_maps_to_approved(self):
+        from acp.evidence.manifest import derive_status_from_events
+        from acp.models import Event
+
+        events = [
+            Event(
+                event_id="evt_001",
+                task_id="t1",
+                type=EventType.TASK_CREATED,
+                prev_hash="GENESIS",
+                hash="h1",
+            ),
+            Event(
+                event_id="evt_002",
+                task_id="t1",
+                type=EventType.TASK_COMPLETED,
+                prev_hash="h1",
+                hash="h2",
+            ),
+            Event(
+                event_id="evt_003",
+                task_id="t1",
+                type=EventType.AUTO_APPROVED,
+                prev_hash="h2",
+                hash="h3",
+            ),
+        ]
+        assert derive_status_from_events(events) == "approved"

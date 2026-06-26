@@ -81,6 +81,15 @@ class ACPState(TypedDict, total=False):
     sandbox_remote: str         # sandbox-acp-<task_id> on the host
     sandbox_metadata: dict[str, Any]  # recorded in sandbox.started event
 
+    # --- v0.6.0: Autonomous mode ---------------------------------------- #
+    # Whether autonomous mode was active for this run.
+    auto_approved: bool             # True if auto.approved was written
+    auto_merged: bool               # True if auto.merged was written
+    merge_commit_sha: str           # SHA of the merge commit (if any)
+    # Circuit breaker: fingerprints of previous repair failure signatures.
+    # Used to detect when the agent is repeating the same fix.
+    repair_fingerprints: list[str]
+
 
 def initial_state(
     *,

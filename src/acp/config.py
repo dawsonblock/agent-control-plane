@@ -52,6 +52,14 @@ class AgentSection(BaseModel):
     timeout_seconds: int = 1800
     max_repair_attempts: int = 1
     command_template: str = ""  # used by M2's CLIAgent
+    # v0.6.0: Autonomous mode repair loop settings.
+    # When dynamic_test_generation is True, the repair prompt instructs
+    # the agent to write tests if the RiskEngine flags TESTS_MISSING.
+    dynamic_test_generation: bool = True
+    # Circuit breaker: if the agent produces the same failure signature
+    # this many times in a row, the repair loop stops even if attempts
+    # remain. Prevents hallucination loops. 0 disables the breaker.
+    repair_repeat_breaker: int = 3
 
 
 class CommandsSection(BaseModel):
@@ -84,6 +92,15 @@ class ReviewSection(BaseModel):
     # verified detection (checks if a key is live before flagging).
     # Falls back to the regex scanner when TruffleHog is not installed.
     use_trufflehog: bool = True
+    # v0.6.0: Autonomous mode — bypasses human approval for tasks that
+    # pass all gates (tests green, no secrets, no hard blocks). An
+    # auto.approved event is written to the hash-chained event log.
+    # Default False — must be explicitly opted in.
+    autonomous_mode: bool = False
+    # v0.6.0: Auto-merge — after auto-approval, merge the task branch
+    # into the default branch. Requires autonomous_mode=True.
+    # Default False — must be explicitly opted in.
+    auto_merge_on_pass: bool = False
 
 
 class ContextSection(BaseModel):

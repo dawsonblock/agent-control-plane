@@ -26,24 +26,26 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.5.16 alpha — Executor evidence binding + status semantics
+## Current scope: v0.6.0 alpha — Autonomous mode
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
 binds the complete evidence record — artifacts, task metadata, the
 human-facing report, and the evidence policy — to the signed event log.
-v0.5.16 adds executor config verification (sandbox.configured events are
-verified for network_policy and clone_mode), separates `TaskStatus.REJECTED`
-from `TaskStatus.ARCHIVED` (rejection is a first-class human decision), and
-adds a real sbx E2E smoke test behind an opt-in marker.
 
-> **Note:** The Docker Sandboxes (`docker_sbx`) executor backend is
-> **experimental**. It has been hardened with verifier semantics, event
-> ordering, and network policy enforcement, but has not yet been validated
-> end-to-end with a real `sbx` installation. The `worktree` backend is the
-> stable, trusted execution path. Run `ACP_RUN_REAL_SBX=1 pytest
-> tests/test_sbx_real_e2e.py` to validate the sbx backend on a machine with
-> Docker Sandboxes installed.
+v0.6.0 introduces **Autonomous Mode** — an opt-in configuration that
+bypasses human approval for tasks that pass all gates (tests green, no
+secrets, no hard blocks). When enabled, the workflow writes `auto.approved`
+and `auto.merged` events to the same hash-chained event log, preserving
+the cryptographic evidence trail. The repair loop is enhanced with dynamic
+test generation (instructs the agent to write tests when TESTS_MISSING is
+flagged) and a circuit breaker (stops the loop when the agent repeats the
+same failure).
+
+> **Warning:** Autonomous mode removes the human firewall. Only enable it
+> with `docker_sbx` executor (isolated microVM), `block_secret_leaks: true`,
+> and `network_policy: locked_down`. Auto-merge (`auto_merge_on_pass: true`)
+> merges the task branch into the default branch without human review.
 
 ACP is under active hardening and should be used for controlled dogfooding,
 not production autonomous operation.
@@ -69,7 +71,8 @@ This repository currently implements:
 | **v0.5.13** | Docker Sandboxes executor backend: `SbxExecutor` runs the coding agent inside an isolated microVM via `sbx run --clone`; clone mode enforced (ACP refuses non-clone); network policy recorded (locked_down/balanced, never open); `sandbox.started`/`sandbox.stopped` events bind executor metadata to signed event log; `capture_diff_from_remote` fetches sandbox remote and diffs agent's private clone; sandbox cleanup (stop/remove) on run completion; `ExecutorSection` in repo config | Stable |
 | **v0.5.14** | Pure-projection vault notes: `rerender_vault_note` rebuilds the note from scratch from the event log (no more in-place frontmatter editing or 3-way transactional rollback); TruffleHog integration: `scan_diff` uses TruffleHog for verified secret detection when installed (checks if keys are live before flagging), falls back to regex scanner; `use_trufflehog` config in `ReviewSection`; `review_diff` accepts `worktree_path` for TruffleHog scanning | Stable |
 | **v0.5.15** | Sandbox evidence semantics: verifier classifies sandbox events as post-run (fixes critical `acp verify` failure on `sandbox.stopped`); `sandbox.configured` at validation, `sandbox.started` after actual launch, `sandbox.failed` on runtime failure (intention vs fact); network policy strict enum (`locked_down`\|`balanced`, rejects arbitrary strings); `--network` flag passed to `sbx` command; non-main branch support (`cfg.repo.default_branch`); artifact ignore policy consistent (fast and deep verify agree on `__pycache__`/`*.pyc`); persisted `DigestCache` (`digest_cache.json`, deep mode ignores cache) | Stable |
-| **v0.5.16** | Executor evidence binding + status semantics: verifier checks `sandbox.configured` event payload for network_policy (not open) and clone_mode (True); `TaskStatus.REJECTED` separated from `TaskStatus.ARCHIVED` (rejection is a first-class human decision, not a cleanup state); `derive_status_from_events` returns "rejected" not "archived"; real sbx E2E smoke test behind `ACP_RUN_REAL_SBX=1` opt-in marker; Docker Sandboxes marked experimental in README | Current |
+| **v0.5.16** | Executor evidence binding + status semantics: verifier checks `sandbox.configured` event payload for network_policy (not open) and clone_mode (True); `TaskStatus.REJECTED` separated from `TaskStatus.ARCHIVED` (rejection is a first-class human decision, not a cleanup state); `derive_status_from_events` returns "rejected" not "archived"; real sbx E2E smoke test behind `ACP_RUN_REAL_SBX=1` opt-in marker; Docker Sandboxes marked experimental in README | Stable |
+| **v0.6.0** | Autonomous mode: `review.autonomous_mode` + `review.auto_merge_on_pass` config (opt-in, default False); `auto.approved` + `auto.merged` events in hash-chained log; `gitops/merge.py` with `merge_to_base` (--no-ff merge, abort on conflict); `auto_approve_node` + `auto_merge_node` in LangGraph; graph routing: `write_report → auto_approve → auto_merge → done` (PASSED + autonomous); enhanced repair loop: `dynamic_test_generation` (TESTS_MISSING → agent writes tests), `repair_repeat_breaker` circuit breaker (stops loop on repeated failures); `auto.approved`/`auto.merged` classified as post-run events in verifier; `derive_status_from_events` treats `auto.approved` as approved | Current |
 | **Experimental** | `DurableTaskStore` — implemented as library code, not yet integrated into the workflow | Experimental |
 
 Everything downstream — Haystack retrieval (M6), Graphiti memory (M7), skills governance (M8), Agent File registry (M9), FastAPI (M10), React UI (M11) — is deliberately deferred.

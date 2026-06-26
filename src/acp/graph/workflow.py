@@ -43,6 +43,8 @@ from acp.agents.registry import build_agent as _default_build_agent
 from acp.events import EventWriter
 from acp.graph.nodes import (
     NodeContext,
+    auto_approve_node,
+    auto_merge_node,
     build_context_node,
     capture_diff_node,
     check_repo,
@@ -109,13 +111,47 @@ def _needs_review(state: dict[str, Any]) -> bool:
 
 
 def _route_after_write_report(state: dict[str, Any]) -> str:
-    """Route after write_report: vault note already written for all statuses."""
+    """Route after write_report: vault note already written for all statuses.
+
+    v0.6.0: When autonomous_mode is enabled and the task PASSED, route
+    through auto_approve → auto_merge → done instead of going straight
+    to done. This bypasses human approval while preserving the evidence
+    trail (auto.approved and auto.merged events are hash-chained).
+    """
     st = state.get("status")
     if st == TaskStatus.PASSED:
+        cfg = state.get("config")
+        if cfg is not None and cfg.review.autonomous_mode:
+            return "auto_approve"
         return "done"
     if st == TaskStatus.NEEDS_REVIEW:
         return "needs_review"
     return "failed"
+
+
+def _route_after_auto_approve(state: dict[str, Any]) -> str:
+    """Route after auto_approve: merge if enabled, else done.
+
+    If auto_merge_on_pass is True, route to auto_merge. Otherwise, route
+    straight to done (the task is already approved).
+    If auto_approve downgraded to NEEDS_REVIEW (shouldn't happen, but
+    guard against it), route to needs_review.
+    """
+    st = state.get("status")
+    if st == TaskStatus.NEEDS_REVIEW:
+        return "needs_review"
+    cfg = state.get("config")
+    if cfg is not None and cfg.review.auto_merge_on_pass:
+        return "auto_merge"
+    return "done"
+
+
+def _route_after_auto_merge(state: dict[str, Any]) -> str:
+    """Route after auto_merge: done on success, needs_review on failure."""
+    st = state.get("status")
+    if st == TaskStatus.NEEDS_REVIEW:
+        return "needs_review"
+    return "done"
 
 
 def _route_after_check(state: dict[str, Any]) -> str:
@@ -134,6 +170,11 @@ def _route_after_tests(state: dict[str, Any]) -> str:
     to mask that as a pass and skip repair accidentally). When
     ``max_repair_attempts`` is 0, or attempts are exhausted, a failing test
     falls straight through to capture_diff → review → FAILED report.
+
+    v0.6.0: Circuit breaker — if ``repair_repeat_breaker`` > 0 and the
+    agent has produced the same failure signature that many times in a
+    row, the loop stops even if attempts remain. This prevents
+    hallucination loops where the agent keeps making the same mistake.
     """
     cfg = state.get("config")
     results = state.get("command_results", [])
@@ -145,6 +186,17 @@ def _route_after_tests(state: dict[str, Any]) -> str:
         return "capture_diff"
     attempts = int(state.get("repair_attempts", 0))
     if attempts < cfg.agent.max_repair_attempts:
+        # v0.6.0: Circuit breaker — check if the agent is repeating
+        # the same failure. If the same fingerprint appears N times in
+        # a row, stop repairing and let it fall through to review.
+        breaker = getattr(cfg.agent, "repair_repeat_breaker", 0)
+        if breaker > 0 and attempts >= breaker:
+            fingerprints = state.get("repair_fingerprints", [])
+            if len(fingerprints) >= breaker:
+                # Check if the last N fingerprints are all the same.
+                recent = fingerprints[-breaker:]
+                if len(set(recent)) == 1:
+                    return "capture_diff"
         return "repair_plan"
     return "capture_diff"
 
@@ -197,6 +249,9 @@ def build_workflow(
     # M4 repair loop.
     g.add_node("repair_plan", _wrap(repair_plan_node))
     g.add_node("run_repair", _wrap(run_repair_agent_node))
+    # v0.6.0: Autonomous mode nodes.
+    g.add_node("auto_approve", _wrap(auto_approve_node))
+    g.add_node("auto_merge", _wrap(auto_merge_node))
 
     # --- entry + linear happy path -------------------------------------- #
     g.add_edge(START, "create_task")
@@ -221,7 +276,15 @@ def build_workflow(
     g.add_edge("review_diff", "write_report")
 
     # write_report → done (PASSED) OR needs_review OR failed
+    # v0.6.0: When autonomous_mode is True and PASSED, routes through
+    # auto_approve → auto_merge → done instead of straight to done.
     g.add_conditional_edges("write_report", _route_after_write_report)
+
+    # v0.6.0: Autonomous mode edges.
+    # auto_approve → auto_merge (if auto_merge_on_pass) OR done
+    g.add_conditional_edges("auto_approve", _route_after_auto_approve)
+    # auto_merge → done (success) OR needs_review (merge conflict)
+    g.add_conditional_edges("auto_merge", _route_after_auto_merge)
 
     # Terminal nodes.
     g.add_edge("done", END)

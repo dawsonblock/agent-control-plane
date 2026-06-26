@@ -117,6 +117,7 @@ def write_repair_prompt(
     failures: list[dict[str, object]],
     attempt: int,
     max_attempts: int,
+    tests_missing: bool = False,
 ) -> Path:
     """Write a repair prompt to ``artifacts/repair_prompt_<attempt>.txt``.
 
@@ -125,6 +126,10 @@ def write_repair_prompt(
     captured stdout/stderr, and an explicit instruction to fix the failing
     tests (not delete or skip them). Each attempt is a separate artifact so
     the evidence trail shows exactly what each repair round was told.
+
+    v0.6.0: When ``tests_missing`` is True, the prompt instructs the agent
+    to write new tests covering its changes (dynamic test generation),
+    rather than only fixing failing commands.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = artifact_dir / f"repair_prompt_{attempt}.txt"
@@ -142,6 +147,19 @@ def write_repair_prompt(
         )
     failures_section = "\n".join(failure_blocks) if failure_blocks else "(none captured)"
 
+    if tests_missing:
+        tests_instruction = (
+            "  - Your code changes look functionally correct, but validation\n"
+            "    failed because you did not write accompanying unit tests.\n"
+            "    Design and implement tests covering your new behavior.\n"
+            "    The tests must pass when run by the control plane.\n"
+        )
+    else:
+        tests_instruction = (
+            "  - Fix the root cause so the failing commands above pass.\n"
+            "  - Do NOT delete, skip, or weaken tests to make them pass.\n"
+        )
+
     body = f"""You are operating inside an isolated git worktree. A previous run
 of your task produced failing tests. Repair attempt {attempt} of {max_attempts}.
 
@@ -158,9 +176,7 @@ Failing command output (the signal to fix):
 {failures_section}
 
 Instructions:
-  - Fix the root cause so the failing commands above pass.
-  - Do NOT delete, skip, or weaken tests to make them pass.
-  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
+{tests_instruction}  - Do NOT touch the {repo.default_branch} branch or files outside this worktree.
   - Keep the change minimal and scoped to the failure.
   - If the failure cannot be fixed without a larger change, stop and report.
 

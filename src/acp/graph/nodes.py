@@ -871,6 +871,112 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
 
 
 # --------------------------------------------------------------------------- #
+# v0.6.0: Autonomous mode nodes.
+#
+# When review.autonomous_mode is True and the task passes all gates, these
+# nodes bypass human approval and optionally merge the task branch into the
+# default branch. The auto.approved and auto.merged events are written to
+# the same hash-chained event log as all other events.
+# --------------------------------------------------------------------------- #
+
+
+def auto_approve_node(
+    state: dict[str, Any], ctx: NodeContext,
+) -> dict[str, Any]:
+    """Bypass human review by programmatically approving the task.
+
+    Only fires when ``config.review.autonomous_mode`` is True. Writes an
+    ``auto.approved`` event with the approver set to ``ACP-Autonomous-Bot``.
+    The task status is set to ``APPROVED`` and persisted.
+
+    If autonomous mode is not enabled, this node is a no-op — the graph
+    routes to ``done`` instead.
+    """
+    cfg = state.get("config")
+    if cfg is None or not cfg.review.autonomous_mode:
+        return {}
+
+    task = state["task"]
+
+    ctx.events.write(
+        EventType.AUTO_APPROVED,
+        {
+            "approver": "ACP-Autonomous-Bot",
+            "reason": "All gates passed in autonomous mode",
+            "gate_outcome": "passed",
+        },
+    )
+
+    task.status = TaskStatus.APPROVED
+    task.touch()
+    ctx.store.save(task)
+
+    return {"status": TaskStatus.APPROVED, "auto_approved": True}
+
+
+def auto_merge_node(
+    state: dict[str, Any], ctx: NodeContext,
+) -> dict[str, Any]:
+    """Merge the task branch into the default branch.
+
+    Only fires when ``config.review.auto_merge_on_pass`` is True (and
+    implicitly ``autonomous_mode`` is True, since the graph only routes
+    here after auto_approve). Writes an ``auto.merged`` event with the
+    merge commit SHA.
+
+    If the merge fails (conflicts, diverged base), the task is downgraded
+    to ``NEEDS_REVIEW`` so a human can resolve it manually. The merge
+    failure is recorded in the event log.
+    """
+    cfg = state.get("config")
+    if cfg is None or not cfg.review.auto_merge_on_pass:
+        return {}
+
+    task = state["task"]
+    repo_path = state.get("repo_path")
+    if repo_path is None:
+        return {}
+
+    try:
+        from acp.gitops.merge import merge_to_base
+
+        merge_sha = merge_to_base(
+            repo_path=Path(repo_path),
+            task_branch=task.task_branch,
+            base_branch=cfg.repo.default_branch,
+        )
+
+        ctx.events.write(
+            EventType.AUTO_MERGED,
+            {
+                "task_branch": task.task_branch,
+                "base_branch": cfg.repo.default_branch,
+                "merge_commit_sha": merge_sha,
+            },
+        )
+
+        return {"auto_merged": True, "merge_commit_sha": merge_sha}
+    except Exception as exc:  # noqa: BLE001
+        # Merge failed — downgrade to NEEDS_REVIEW for human resolution.
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {
+                "node": "auto_merge",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+        task.status = TaskStatus.NEEDS_REVIEW
+        task.touch()
+        ctx.store.save(task)
+        return {
+            "status": TaskStatus.NEEDS_REVIEW,
+            "auto_merged": False,
+            "error": f"auto_merge: {exc}",
+        }
+
+
+# --------------------------------------------------------------------------- #
 # M4 repair loop nodes.
 #
 # Routed to from run_tests when tests fail and attempts remain. The loop is:
@@ -891,6 +997,11 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     ``_route_after_tests``) when tests still fail after the cap is reached,
     so "exhausted" means "another repair was needed but the cap blocked it,"
     not "this was the last allowed attempt."
+
+    v0.6.0: When ``cfg.agent.dynamic_test_generation`` is True and the
+    review result flags TESTS_MISSING (behavior changed but no test files),
+    the repair prompt instructs the agent to write new tests instead of
+    only fixing failing commands.
     """
     cfg = state["config"]
     task = state["task"]
@@ -901,6 +1012,19 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     ctx.store.save(task)
 
     failures = extract_failures(state.get("command_results", []))
+
+    # v0.6.0: Detect TESTS_MISSING from the review result. If the
+    # RiskEngine flagged this and dynamic_test_generation is enabled,
+    # the repair prompt instructs the agent to write tests.
+    tests_missing = False
+    if cfg.agent.dynamic_test_generation:
+        review = state.get("review_result")
+        if review is not None and hasattr(review, "concerns"):
+            tests_missing = any(
+                "tests_missing" in c.lower() or "no test files" in c.lower()
+                for c in review.concerns
+            )
+
     prompt_path = write_repair_prompt(
         original_request=state["user_request"],
         worktree_path=state["worktree_path"],
@@ -909,6 +1033,7 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         failures=failures,
         attempt=attempts,
         max_attempts=max_attempts,
+        tests_missing=tests_missing,
     )
 
     ctx.events.write(
@@ -918,16 +1043,37 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "max_attempts": max_attempts,
             "failures": len(failures),
             "prompt_path": str(prompt_path),
+            "tests_missing": tests_missing,
         },
     )
 
     history = list(state.get("repair_history", []))
-    history.append({"attempt": attempts, "prompt_path": str(prompt_path)})
+    history.append({
+        "attempt": attempts,
+        "prompt_path": str(prompt_path),
+        "tests_missing": tests_missing,
+    })
+
+    # v0.6.0: Compute a fingerprint of the current failure signature.
+    # The circuit breaker in _route_after_tests uses this to detect when
+    # the agent is repeating the same fix. The fingerprint is a hash of
+    # the failing command names + exit codes (not stdout/stderr, which
+    # may vary slightly even for the same root cause).
+    import hashlib
+    fp_input = "|".join(
+        f"{f['command']}:{f['exit_code']}" for f in failures
+    )
+    fingerprint = hashlib.sha256(
+        fp_input.encode()
+    ).hexdigest()[:16] if fp_input else "no_failures"
+    fingerprints = list(state.get("repair_fingerprints", []))
+    fingerprints.append(fingerprint)
 
     return {
         "repair_attempts": attempts,
         "repair_history": history,
         "prompt_path": prompt_path,
+        "repair_fingerprints": fingerprints,
     }
 
 

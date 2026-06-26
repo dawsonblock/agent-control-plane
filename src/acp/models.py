@@ -88,6 +88,11 @@ class EventType(str, Enum):
     SANDBOX_STARTED = "sandbox.started"
     SANDBOX_FAILED = "sandbox.failed"
     SANDBOX_STOPPED = "sandbox.stopped"
+    # v0.6.0: Autonomous mode — programmatic approval + merge.
+    # auto.approved = gates passed in autonomous mode, no human click
+    # auto.merged   = task branch merged into default branch
+    AUTO_APPROVED = "auto.approved"
+    AUTO_MERGED = "auto.merged"
 
 
 class RiskLevel(str, Enum):

@@ -276,6 +276,8 @@ def derive_status_from_events(events: list[Any]) -> str | None:
     for evt in events:
         if evt.type == EventType.HUMAN_APPROVED:
             has_approved = True
+        elif evt.type == EventType.AUTO_APPROVED:
+            has_approved = True  # auto.approved is equivalent
         elif evt.type == EventType.HUMAN_REJECTED:
             has_rejected = True
         elif evt.type == EventType.TASK_COMPLETED:
@@ -338,7 +340,11 @@ def build_evidence_manifest(
     # sandbox cleanup) are NOT included in the run manifest's chain head.
     # This keeps the run manifest immutable while post-run events are
     # verified separately.
-    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    lifecycle_types = {
+        "human.approved", "human.rejected", "memory.promoted",
+        # v0.6.0: Autonomous mode lifecycle events.
+        "auto.approved", "auto.merged",
+    }
     sandbox_types = {
         "sandbox.configured", "sandbox.started",
         "sandbox.failed", "sandbox.stopped",
@@ -409,7 +415,10 @@ def build_lifecycle_manifest(
     """
     run_dir = Path(run_dir)
     all_events = events_writer.read_all()
-    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    lifecycle_types = {
+        "human.approved", "human.rejected", "memory.promoted",
+        "auto.approved", "auto.merged",
+    }
     lifecycle_events = [e for e in all_events if e.type.value in lifecycle_types]
 
     manifest: dict[str, Any] = {
@@ -488,7 +497,10 @@ def verify_lifecycle_manifest(run_dir: Path) -> bool:
     if not events_path.is_file():
         return False
     from acp.models import Event
-    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    lifecycle_types = {
+        "human.approved", "human.rejected", "memory.promoted",
+        "auto.approved", "auto.merged",
+    }
     actual_lifecycle: list[Event] = []
     for line in events_path.read_text().splitlines():
         if not line.strip():
@@ -663,7 +675,10 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
         return False
 
     # Detect lifecycle + post-run events.
-    lifecycle_types = {"human.approved", "human.rejected", "memory.promoted"}
+    lifecycle_types = {
+        "human.approved", "human.rejected", "memory.promoted",
+        "auto.approved", "auto.merged",
+    }
     # v0.5.15: Sandbox events are executor lifecycle events, not run-phase
     # events. They happen after evidence.finalized (cleanup) or before the
     # agent runs (configured). The run manifest's event_chain_head covers
