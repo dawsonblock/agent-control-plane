@@ -347,3 +347,188 @@ def get_temporal_relationships(
             await client.close()
 
     return asyncio.run(_get_relationships())
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.0 (Phase 4.1): Semantic memory garbage collection
+# --------------------------------------------------------------------------- #
+
+
+def find_superseded_nodes(
+    group_id: str = "",
+    *,
+    older_than_days: int = 90,
+) -> list[dict[str, Any]]:
+    """Find Graphiti nodes that have been superseded for longer than the threshold.
+
+    Graphiti creates SUPERSEDES edges when a newer fact replaces an older
+    one. Over time, these superseded nodes accumulate in FalkorDB and bloat
+    the knowledge graph. This function identifies nodes that:
+
+      1. Have an incoming SUPERSEDES edge (they were superseded)
+      2. The supersede happened more than ``older_than_days`` ago
+
+    Returns a list of dicts with ``node_id``, ``superseded_at``, and
+    ``days_superseded`` fields. This is the dry-run half of pruning —
+    the actual deletion is done by :func:`prune_superseded_nodes`.
+
+    Raises:
+        ImportError: If ``graphiti-core[falkordb]`` is not installed.
+        Exception: If FalkorDB is not running.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    async def _find() -> list[dict[str, Any]]:
+        client = _get_graphiti_client(group_id=group_id)
+        try:
+            # Graphiti's driver exposes the underlying FalkorDB graph.
+            # We query for nodes with an incoming SUPERSEDES edge whose
+            # valid_at (the supersede timestamp) is older than the cutoff.
+            driver = getattr(client, "driver", None)
+            if driver is None:
+                return []
+
+            # Use the driver's raw query capability if available.
+            # FalkorDB supports Cypher-like queries via the graph driver.
+            gid = group_id or "default"
+            # Query for superseded nodes. The exact query depends on the
+            # Graphiti schema, but the general pattern is:
+            # MATCH (n)<-[r:SUPERSEDES]-(m) WHERE r.valid_at < cutoff
+            # RETURN n, r.valid_at
+            #
+            # We use a best-effort approach: if the driver doesn't expose
+            # a raw query interface, we fall back to searching all edges
+            # and filtering client-side.
+            try:
+                # Try the driver's query method (Graphiti >= 0.5).
+                results = await driver.execute_query(
+                    "MATCH (n)<-[r:SUPERSEDES]-(m) "
+                    "WHERE r.valid_at IS NOT NULL "
+                    "RETURN n.uuid AS node_id, r.valid_at AS superseded_at",
+                    graph_id=gid,
+                )
+            except (AttributeError, TypeError):
+                # Fallback: search all edges and filter for SUPERSEDES.
+                # This is slower but works with older Graphiti versions.
+                all_edges = await client.search(
+                    "SUPERSEDES", group_id=gid, num_results=1000,
+                )
+                results = []
+                for edge in all_edges:
+                    expired = getattr(edge, "expired_at", None)
+                    if expired is None:
+                        continue
+                    results.append({
+                        "node_id": getattr(edge, "source_node_id", ""),
+                        "superseded_at": str(expired),
+                    })
+
+            superseded: list[dict[str, Any]] = []
+            for row in results:
+                if isinstance(row, dict):
+                    node_id = row.get("node_id", "")
+                    superseded_at_str = row.get("superseded_at", "")
+                else:
+                    # Graphiti may return objects instead of dicts.
+                    node_id = getattr(row, "node_id", str(row))
+                    superseded_at_str = getattr(row, "superseded_at", "")
+
+                # Parse the timestamp and check if it's old enough.
+                try:
+                    if isinstance(superseded_at_str, str):
+                        sup_time = datetime.fromisoformat(
+                            superseded_at_str.replace("Z", "+00:00")
+                        )
+                    else:
+                        sup_time = superseded_at_str
+                    if sup_time.tzinfo is None:
+                        sup_time = sup_time.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue  # can't parse timestamp — skip
+
+                if sup_time < cutoff:
+                    days = (datetime.now(timezone.utc) - sup_time).days
+                    superseded.append({
+                        "node_id": str(node_id),
+                        "superseded_at": superseded_at_str if isinstance(superseded_at_str, str) else str(superseded_at_str),
+                        "days_superseded": days,
+                    })
+            return superseded
+        finally:
+            await client.close()
+
+    return asyncio.run(_find())
+
+
+def prune_superseded_nodes(
+    group_id: str = "",
+    *,
+    older_than_days: int = 90,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Prune superseded nodes from the Graphiti/FalkorDB knowledge graph.
+
+    Identifies nodes that have been superseded for more than
+    ``older_than_days`` and deletes them from FalkorDB. This prevents
+    the knowledge graph from growing unboundedly as facts are updated
+    over time.
+
+    Args:
+        group_id: Optional Graphiti group ID for multi-tenant isolation.
+        older_than_days: Only prune nodes superseded more than this many
+            days ago (default: 90).
+        dry_run: When True (default), only report what would be pruned
+            without actually deleting anything. When False, delete the
+            nodes from FalkorDB.
+
+    Returns:
+        A dict with:
+        - ``dry_run``: whether this was a dry run
+        - ``found``: number of superseded nodes found
+        - ``pruned``: number of nodes actually deleted (0 if dry_run)
+        - ``nodes``: list of node dicts (node_id, superseded_at, days)
+        - ``older_than_days``: the threshold used
+
+    Raises:
+        ImportError: If ``graphiti-core[falkordb]`` is not installed.
+        Exception: If FalkorDB is not running.
+    """
+    nodes = find_superseded_nodes(
+        group_id=group_id, older_than_days=older_than_days
+    )
+
+    pruned = 0
+    if not dry_run and nodes:
+        async def _prune() -> int:
+            client = _get_graphiti_client(group_id=group_id)
+            try:
+                driver = getattr(client, "driver", None)
+                if driver is None:
+                    return 0
+                gid = group_id or "default"
+                count = 0
+                for node in nodes:
+                    try:
+                        await driver.execute_query(
+                            "MATCH (n) WHERE n.uuid = $node_id DETACH DELETE n",
+                            {"node_id": node["node_id"]},
+                            graph_id=gid,
+                        )
+                        count += 1
+                    except Exception:  # noqa: BLE001
+                        pass  # best-effort — continue pruning others
+                return count
+            finally:
+                await client.close()
+
+        pruned = asyncio.run(_prune())
+
+    return {
+        "dry_run": dry_run,
+        "found": len(nodes),
+        "pruned": pruned,
+        "nodes": nodes,
+        "older_than_days": older_than_days,
+    }
