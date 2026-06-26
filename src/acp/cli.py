@@ -1259,5 +1259,265 @@ def cleanup(
         console.print(f"\n[dim]Nothing to clean for task {task_id}.[/]")
 
 
+# --------------------------------------------------------------------------- #
+# v0.6.2 (M7): acp memory — Graphiti temporal memory promotion.
+# --------------------------------------------------------------------------- #
+
+memory_app = typer.Typer(
+    name="memory",
+    help="Manage temporal memory (Graphiti + FalkorDB).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("promote")
+def memory_promote(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    vault_root: Path = typer.Option(
+        Path("vault"),
+        "--vault-root",
+        help="Root directory of the Obsidian vault (default: vault).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    task_id: str = typer.Option(
+        "",
+        "--task",
+        "-t",
+        help="Promote a specific task (default: scan all eligible notes).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be promoted without actually ingesting.",
+    ),
+) -> None:
+    """Promote approved vault notes to Graphiti temporal memory.
+
+    Scans ``vault/tasks/`` for notes that are:
+      - ``approved: true``
+      - ``memory_status: active``
+      - ``graphiti_ingested: false``
+
+    And ingests them into FalkorDB via Graphiti. After ingestion, the
+    note's frontmatter is updated to ``graphiti_ingested: true`` and a
+    ``memory.promoted`` event is written to the event log.
+
+    Requires:
+      - ``uv sync --extra memory`` (graphiti-core[falkordb])
+      - FalkorDB running: ``docker run -p 6379:6379 falkordb/falkordb``
+      - ``OPENAI_API_KEY`` env var (for Graphiti's LLM entity extraction)
+    """
+    from acp.memory.promotion_rules import (
+        get_promotion_metadata,
+        should_promote_to_graphiti,
+    )
+    from acp.vault.frontmatter import parse_frontmatter
+
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    group_id = cfg.memory.graphiti_group_id
+    tasks_dir = vault_root / "tasks"
+
+    if not tasks_dir.is_dir():
+        console.print(f"[red]✗[/] vault tasks directory not found: {tasks_dir}")
+        raise typer.Exit(code=1)
+
+    # Collect candidate notes.
+    if task_id:
+        _require_valid_task_id(task_id)
+        candidates = [tasks_dir / f"{task_id}.md"]
+    else:
+        candidates = sorted(tasks_dir.glob("*.md"))
+
+    if not candidates:
+        console.print(f"[dim]No vault notes found in {tasks_dir}[/]")
+        return
+
+    # Filter to eligible notes.
+    store = TaskStore(runs_root=runs_root)
+    eligible: list[tuple[Task, Path, dict]] = []
+
+    for note_path in candidates:
+        if not note_path.is_file():
+            continue
+        try:
+            content = note_path.read_text(encoding="utf-8")
+            fm, _ = parse_frontmatter(content)
+        except (ValueError, OSError):
+            continue
+
+        tid = fm.task_id or note_path.stem
+        try:
+            task = store.load(tid)
+        except Exception:
+            console.print(f"[dim]skip {tid}: task.json not found[/]")
+            continue
+
+        if should_promote_to_graphiti(task, fm, note_path):
+            meta = get_promotion_metadata(task, fm, note_path)
+            eligible.append((task, note_path, meta))
+
+    if not eligible:
+        console.print("[dim]No eligible notes to promote.[/]")
+        return
+
+    # Show what we'll promote.
+    console.print(f"[bold]Found {len(eligible)} eligible note(s):[/]")
+    for task, note_path, meta in eligible:
+        flags = []
+        if meta["is_known_failure"]:
+            flags.append("[yellow]known-failure[/]")
+        if meta["needs_secondary_review"]:
+            flags.append("[red]high-risk[/]")
+        flag_str = f" {' '.join(flags)}" if flags else ""
+        console.print(
+            f"  {task.task_id} — {task.user_request[:60]}"
+            f"{flag_str}"
+        )
+
+    if dry_run:
+        console.print("\n[dim]--dry-run: no ingestion performed.[/]")
+        return
+
+    # Ingest each eligible note.
+    try:
+        from acp.memory.graphiti_client import ingest_task_to_graphiti
+    except ImportError as exc:
+        console.print(
+            f"[red]✗[/] graphiti-core not installed: {exc}\n"
+            f"  Install with: uv sync --extra memory"
+        )
+        raise typer.Exit(code=1) from exc
+
+    promoted = 0
+    failed = 0
+
+    for task, note_path, meta in eligible:
+        tid = task.task_id
+        try:
+            content = note_path.read_text(encoding="utf-8")
+            fm, _ = parse_frontmatter(content)
+
+            result = ingest_task_to_graphiti(
+                task=task,
+                frontmatter=fm,
+                vault_note_path=note_path,
+                graphiti_group_id=group_id,
+            )
+
+            # Write memory.promoted event to the event log.
+            run_dir = store.run_dir(tid)
+            if run_dir.is_dir():
+                events = EventWriter(tid, run_dir)
+                events.write(
+                    EventType.MEMORY_PROMOTED,
+                    {
+                        "task_id": tid,
+                        "episode_id": result.get("episode_id", ""),
+                        "nodes_created": result.get("nodes_created", 0),
+                        "edges_created": result.get("edges_created", 0),
+                        "graphiti_group_id": group_id,
+                    },
+                )
+
+            console.print(
+                f"[green]✓[/] {tid}: ingested "
+                f"({result.get('nodes_created', 0)} nodes, "
+                f"{result.get('edges_created', 0)} edges)"
+            )
+            promoted += 1
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]✗[/] {tid}: ingestion failed — {exc}")
+            failed += 1
+
+    console.print(
+        f"\n[bold]Promoted {promoted} note(s)"
+        + (f", {failed} failed" if failed else "")
+        + ".[/]"
+    )
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str = typer.Argument(
+        ...,
+        help="Natural language query (e.g., 'authentication login changes').",
+    ),
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    num_results: int = typer.Option(
+        10,
+        "--num-results",
+        "-n",
+        help="Maximum number of results (default: 10).",
+    ),
+) -> None:
+    """Search Graphiti temporal memory for facts.
+
+    Queries FalkorDB for active, non-superseded facts related to the
+    query. Results show what the system "remembers" about the codebase.
+
+    Requires:
+      - ``uv sync --extra memory`` (graphiti-core[falkordb])
+      - FalkorDB running: ``docker run -p 6379:6379 falkordb/falkordb``
+    """
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    group_id = cfg.memory.graphiti_group_id
+
+    try:
+        from acp.memory.graphiti_client import search_graphiti_facts
+    except ImportError as exc:
+        console.print(
+            f"[red]✗[/] graphiti-core not installed: {exc}\n"
+            f"  Install with: uv sync --extra memory"
+        )
+        raise typer.Exit(code=1) from exc
+
+    try:
+        results = search_graphiti_facts(
+            query, group_id=group_id, num_results=num_results,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/] search failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not results:
+        console.print("[dim]No facts found.[/]")
+        return
+
+    console.print(f"[bold]Found {len(results)} fact(s):[/]")
+    for i, fact in enumerate(results, 1):
+        console.print(f"\n  [bold]#{i}[/]")
+        console.print(f"  fact: {fact.get('fact', '?')}")
+        console.print(f"  source: {fact.get('source_node', '?')}")
+        console.print(f"  target: {fact.get('target_node', '?')}")
+        if fact.get("valid_at"):
+            console.print(f"  valid_at: {fact['valid_at']}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

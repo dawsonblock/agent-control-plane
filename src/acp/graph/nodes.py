@@ -973,7 +973,48 @@ def auto_approve_node(
     task.touch()
     ctx.store.save(task)
 
-    return {"status": TaskStatus.APPROVED, "auto_approved": True}
+    # v0.6.2 (M7): Auto-promote to Graphiti if configured.
+    # When memory.promote_reports_by_default is True, the auto-approved
+    # task is immediately ingested into temporal memory. This is the
+    # autonomous equivalent of `acp memory promote --task <id>`.
+    # Best-effort: if Graphiti isn't installed or FalkorDB isn't running,
+    # the approval still stands — memory promotion can be done manually
+    # later via `acp memory promote`.
+    memory_promoted = False
+    if getattr(cfg.memory, "promote_reports_by_default", False):
+        try:
+            from acp.memory.graphiti_client import ingest_task_to_graphiti
+            from acp.memory.promotion_rules import should_promote_to_graphiti
+            from acp.vault.frontmatter import parse_frontmatter
+
+            vault_note_path = state.get("vault_note_path")
+            if vault_note_path and Path(vault_note_path).is_file():
+                content = Path(vault_note_path).read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(content)
+                if should_promote_to_graphiti(task, fm, Path(vault_note_path)):
+                    result = ingest_task_to_graphiti(
+                        task=task,
+                        frontmatter=fm,
+                        vault_note_path=Path(vault_note_path),
+                        graphiti_group_id=cfg.memory.graphiti_group_id,
+                    )
+                    ctx.events.write(
+                        EventType.MEMORY_PROMOTED,
+                        {
+                            "task_id": task.task_id,
+                            "episode_id": result.get("episode_id", ""),
+                            "nodes_created": result.get("nodes_created", 0),
+                            "edges_created": result.get("edges_created", 0),
+                            "auto_promoted": True,
+                        },
+                    )
+                    memory_promoted = True
+        except ImportError:
+            pass  # memory extra not installed — skip silently
+        except Exception:  # noqa: BLE001
+            pass  # FalkorDB not running or LLM error — don't block approval
+
+    return {"status": TaskStatus.APPROVED, "auto_approved": True, "memory_promoted": memory_promoted}
 
 
 def auto_merge_node(

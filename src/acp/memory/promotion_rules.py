@@ -1,11 +1,20 @@
-"""Memory promotion rules — deferred until M7.
+"""Memory promotion rules (M7).
 
-M7 will implement the logic for promoting approved vault notes into Graphiti
-temporal memory. Until then, ``should_promote_to_graphiti`` always returns
-``False`` and ``get_promotion_priority`` raises ``NotImplementedError``.
+Rules engine that determines whether an approved vault note should be
+promoted to Graphiti temporal memory. The rules enforce safety properties:
 
-This prevents accidental memory ingestion before the infrastructure exists.
-See docs/roadmap.md.
+  1. **Human firewall**: Only ``approved: true`` + ``memory_status: active``
+     notes are eligible.
+  2. **No failed tasks as successes**: ``TaskStatus.FAILED`` tasks can only
+     be ingested as "known failures" (with a ``known_failure`` tag), never
+     as "successful features."
+  3. **High-risk gating**: If a task has ``RiskLevel.HIGH`` but was approved
+     anyway, the system flags it for secondary review before promotion.
+  4. **No re-ingestion**: Notes with ``graphiti_ingested: true`` are skipped.
+
+The rules engine is pure — it takes data in and returns a decision. It does
+not perform any side effects. The caller (CLI or auto_approve_node) is
+responsible for the actual ingestion.
 """
 
 from __future__ import annotations
@@ -13,64 +22,202 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from acp.models import Task
+from acp.models import Task, TaskStatus
+from acp.vault.frontmatter import Frontmatter
+
+
+# --------------------------------------------------------------------------- #
+# Promotion priority levels
+# --------------------------------------------------------------------------- #
+
+PRIORITY_LOW = 0       # No urgency — promote when convenient
+PRIORITY_NORMAL = 1    # Standard approved task — promote on next cycle
+PRIORITY_HIGH = 2      # High-risk approved task — flag for secondary review
+PRIORITY_URGENT = 3    # Failed task with known failure — promote as cautionary
+
+# Tasks that should NEVER be promoted.
+PROMOTION_BLOCKED = -1
+
+
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
 
 
 def should_promote_to_graphiti(
-    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
+    task: Task,
+    frontmatter: dict[str, Any] | Frontmatter,
+    vault_note_path: Path,
 ) -> bool:
     """Determine if a task should be promoted to Graphiti.
 
-    Always returns ``False`` until M7 — the promotion infrastructure does
-    not exist yet.
+    Returns ``True`` only if ALL of the following are true:
+      - The note is approved (``approved: true``)
+      - The note is active (``memory_status: "active"``)
+      - The note has not already been ingested (``graphiti_ingested: false``)
+      - The vault note file exists on disk
+
+    This is the **gate** — the caller should check this before calling
+    :func:`ingest_task_to_graphiti`.
+
+    Args:
+        task: The task object.
+        frontmatter: The parsed frontmatter (dict or Frontmatter).
+        vault_note_path: Path to the vault note .md file.
+
+    Returns:
+        ``True`` if the task should be promoted, ``False`` otherwise.
     """
-    return False
+    fm = _normalize_frontmatter(frontmatter)
+
+    # File must exist.
+    if not vault_note_path.is_file():
+        return False
+
+    # Human firewall: must be approved + active.
+    if not fm.approved:
+        return False
+    if fm.memory_status != "active":
+        return False
+
+    # No re-ingestion.
+    if fm.graphiti_ingested:
+        return False
+
+    return True
 
 
 def get_promotion_priority(
-    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
+    task: Task,
+    frontmatter: dict[str, Any] | Frontmatter,
+    vault_note_path: Path,
 ) -> int:
     """Get the promotion priority for a task.
 
-    Raises:
-        NotImplementedError: Always — M7 deferred. See docs/roadmap.md.
-    """
-    raise NotImplementedError(
-        "Promotion priority is not implemented until M7. "
-        "See docs/roadmap.md."
-    )
-
-
-def get_promotion_exclusions(
-    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
-) -> list[str]:
-    """Get reasons why a task should NOT be promoted to Graphiti.
+    Priority determines the order and urgency of promotion:
+      - ``PROMOTION_BLOCKED`` (-1): Should not be promoted (check exclusions).
+      - ``PRIORITY_LOW`` (0): No urgency.
+      - ``PRIORITY_NORMAL`` (1): Standard approved task.
+      - ``PRIORITY_HIGH`` (2): High-risk task — flag for secondary review.
+      - ``PRIORITY_URGENT`` (3): Failed task — promote as known failure.
 
     Args:
-        task: The task to evaluate.
-        frontmatter: The frontmatter from the vault note.
+        task: The task object.
+        frontmatter: The parsed frontmatter.
         vault_note_path: Path to the vault note.
 
     Returns:
-        List of exclusion reasons.
-    Raises:
-        NotImplementedError: Always — M7 deferred. See docs/roadmap.md.
+        Priority level (int). ``PROMOTION_BLOCKED`` if the task should
+        not be promoted at all.
     """
-    raise NotImplementedError(
-        "Promotion exclusions are not implemented until M7. "
-        "See docs/roadmap.md."
-    )
+    fm = _normalize_frontmatter(frontmatter)
+
+    # If it shouldn't be promoted at all, return blocked.
+    if not should_promote_to_graphiti(task, frontmatter, vault_note_path):
+        return PROMOTION_BLOCKED
+
+    # Failed tasks are promoted as "known failures" with urgent priority
+    # so the system remembers what went wrong.
+    if task.status == TaskStatus.FAILED:
+        return PRIORITY_URGENT
+
+    # High-risk tasks that were approved anyway get high priority
+    # so they're flagged for secondary review before promotion.
+    risk = (fm.risk or "").lower()
+    if risk == "high":
+        return PRIORITY_HIGH
+
+    # Standard approved task.
+    return PRIORITY_NORMAL
+
+
+def get_promotion_exclusions(
+    task: Task,
+    frontmatter: dict[str, Any] | Frontmatter,
+    vault_note_path: Path,
+) -> list[str]:
+    """Get reasons why a task should NOT be promoted to Graphiti.
+
+    Returns a list of human-readable exclusion reasons. If the list is
+    empty, the task is eligible for promotion (subject to the priority
+    rules).
+
+    Args:
+        task: The task object.
+        frontmatter: The parsed frontmatter.
+        vault_note_path: Path to the vault note.
+
+    Returns:
+        List of exclusion reason strings. Empty if no exclusions.
+    """
+    fm = _normalize_frontmatter(frontmatter)
+    exclusions: list[str] = []
+
+    if not vault_note_path.is_file():
+        exclusions.append(f"vault note not found: {vault_note_path}")
+        return exclusions  # No point checking further
+
+    if not fm.approved:
+        exclusions.append("note is not approved (approved=false)")
+    if fm.memory_status != "active":
+        exclusions.append(f"memory_status is '{fm.memory_status}', not 'active'")
+    if fm.graphiti_ingested:
+        exclusions.append("already ingested into Graphiti (graphiti_ingested=true)")
+
+    return exclusions
 
 
 def get_promotion_metadata(
-    task: Task, frontmatter: dict[str, Any], vault_note_path: Path
+    task: Task,
+    frontmatter: dict[str, Any] | Frontmatter,
+    vault_note_path: Path,
 ) -> dict[str, Any]:
     """Get metadata for promoting a task to Graphiti.
 
-    Raises:
-        NotImplementedError: Always — M7 deferred. See docs/roadmap.md.
+    Returns a dict with all the information needed for the ingestion:
+      - ``eligible``: Whether the task should be promoted
+      - ``priority``: Promotion priority level
+      - ``exclusions``: List of exclusion reasons (empty if eligible)
+      - ``task_id``: The task ID
+      - ``repo_name``: The repo name
+      - ``risk``: The risk level
+      - ``is_known_failure``: Whether this is a failed task (promoted as cautionary)
+      - ``needs_secondary_review``: Whether this is a high-risk task needing review
+
+    Args:
+        task: The task object.
+        frontmatter: The parsed frontmatter.
+        vault_note_path: Path to the vault note.
+
+    Returns:
+        Metadata dict for the promotion decision.
     """
-    raise NotImplementedError(
-        "Promotion metadata is not implemented until M7. "
-        "See docs/roadmap.md."
-    )
+    fm = _normalize_frontmatter(frontmatter)
+    eligible = should_promote_to_graphiti(task, frontmatter, vault_note_path)
+    priority = get_promotion_priority(task, frontmatter, vault_note_path)
+    exclusions = get_promotion_exclusions(task, frontmatter, vault_note_path)
+
+    return {
+        "eligible": eligible,
+        "priority": priority,
+        "exclusions": exclusions,
+        "task_id": task.task_id,
+        "repo_name": task.repo_name,
+        "risk": fm.risk,
+        "is_known_failure": task.status == TaskStatus.FAILED,
+        "needs_secondary_review": (fm.risk or "").lower() == "high",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Internal helpers
+# --------------------------------------------------------------------------- #
+
+
+def _normalize_frontmatter(
+    fm: dict[str, Any] | Frontmatter,
+) -> Frontmatter:
+    """Accept either a dict or Frontmatter and return a Frontmatter."""
+    if isinstance(fm, dict):
+        return Frontmatter(**fm)
+    return fm

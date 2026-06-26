@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-control-plane"
-version = "0.6.1"
+version = "0.6.2"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -56,6 +56,14 @@ dev = [
 rag = [
     "haystack-ai>=2.0,<3",
     "sentence-transformers>=3.0,<5",
+]
+# v0.6.2 (M7): Graphiti temporal memory via FalkorDB.
+# Optional — install with: uv sync --extra memory
+# Requires a running FalkorDB instance: docker run -p 6379:6379 falkordb/falkordb
+# Graphiti also needs an LLM for entity extraction — set OPENAI_API_KEY or
+# configure a custom LLM client (see src/acp/memory/graphiti_client.py).
+memory = [
+    "graphiti-core[falkordb]>=0.5,<1",
 ]
 
 [project.scripts]
