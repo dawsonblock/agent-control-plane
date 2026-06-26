@@ -107,6 +107,22 @@ class EventType(str, Enum):
     # mission.completed = all steps in a mission finished (approved or aborted)
     MISSION_CREATED = "mission.created"
     MISSION_COMPLETED = "mission.completed"
+    # v0.7.0+: Forward-declared event types for upcoming layers.
+    # These are defined now (Layer 0 schema) so downstream features can
+    # emit and verify them without waiting for a models.py change.
+    # Phase 1.1: SQLite becomes primary task state truth.
+    TASK_STORE_MIGRATED = "task.store_migrated"
+    # Phase 1.3: Secret hard-block in review_diff.
+    REVIEW_SECRET_HARD_BLOCK = "review.secret_hard_block"
+    # Phase 2.1: Jailed executor (gVisor/OpenHands).
+    EXECUTOR_JAILS_CREATED = "executor.jails_created"
+    EXECUTOR_JAILED_RUN_FINISHED = "executor.jailed_run_finished"
+    # Phase 3.1: HTTP/SSE MCP transport.
+    FEDERATION_SERVER_CONNECTED = "federation.server_connected"
+    # Phase 3.2: Sub-task spawning (agent-to-agent).
+    TASK_SUBTASK_SPAWNED = "task.subtask_spawned"
+    # Phase 4.1: Semantic memory garbage collection.
+    MEMORY_PRUNED = "memory.pruned"
 
 
 class RiskLevel(str, Enum):

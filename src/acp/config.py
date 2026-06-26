@@ -251,7 +251,7 @@ class ExecutorSection(BaseModel):
     @field_validator("backend")
     @classmethod
     def _validate_backend(cls, v: str) -> str:
-        allowed = ("worktree", "docker_sbx")
+        allowed = ("worktree", "docker_sbx", "gvisor", "openhands")
         if v not in allowed:
             raise ValueError(
                 f"executor.backend='{v}' is not valid. "
@@ -325,6 +325,74 @@ class MissionSection(BaseModel):
         return v.expanduser().resolve()
 
 
+class ProxySection(BaseModel):
+    """Egress proxy settings (v0.7.0+, Phase 2.2).
+
+    When configured, all agent network traffic is routed through a local
+    ACP-managed MITM proxy. The proxy logs all external domains accessed
+    by the agent, producing a ``network_egress.json`` artifact for the
+    review gate.
+
+    - ``enabled``: when True, route agent traffic through the proxy.
+    - ``proxy_port``: local port for the MITM proxy (default 8080).
+    - ``allowed_domains``: allowlist of domains the agent may access.
+      Any domain not in this list is flagged in the egress log and
+      triggers a review gate hard-block.
+    - ``log_artifact``: filename for the egress log artifact, written
+      into the run's ``artifacts/`` directory (default:
+      ``network_egress.json``).
+    """
+
+    enabled: bool = False
+    proxy_port: int = 8080
+    allowed_domains: list[str] = Field(default_factory=list)
+    log_artifact: str = "network_egress.json"
+
+    @field_validator("proxy_port")
+    @classmethod
+    def _validate_port(cls, v: int) -> int:
+        if v <= 0 or v > 65535:
+            raise ValueError("proxy.proxy_port must be between 1 and 65535")
+        return v
+
+
+class RerankingSection(BaseModel):
+    """RAG re-ranking settings (v0.7.0+, Phase 4.2).
+
+    When enabled, a Cross-Encoder re-ranking step is inserted into the
+    Haystack retrieval pipeline after the initial vector search. This
+    improves the signal-to-noise ratio of chunks retrieved from
+    ``vault/tasks/`` by re-scoring them against the specific error/request.
+
+    - ``enabled``: when True, insert a cross-encoder re-ranker.
+    - ``model``: the cross-encoder model name (default:
+      ``cross-encoder/ms-marco-MiniLM-L-6-v2``).
+    - ``top_k_before_rerank``: how many chunks to retrieve from the
+      vector store before re-ranking (default: 20).
+    - ``top_k_after_rerank``: how many chunks to keep after re-ranking
+      (default: 5).
+    """
+
+    enabled: bool = False
+    model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    top_k_before_rerank: int = 20
+    top_k_after_rerank: int = 5
+
+    @field_validator("top_k_before_rerank")
+    @classmethod
+    def _validate_k_before(cls, v: int) -> int:
+        if v <= 0 or v > 100:
+            raise ValueError("reranking.top_k_before_rerank must be between 1 and 100")
+        return v
+
+    @field_validator("top_k_after_rerank")
+    @classmethod
+    def _validate_k_after(cls, v: int) -> int:
+        if v <= 0 or v > 50:
+            raise ValueError("reranking.top_k_after_rerank must be between 1 and 50")
+        return v
+
+
 class EvidenceSection(BaseModel):
     """Evidence integrity settings (v0.5.6).
 
@@ -384,6 +452,8 @@ class RepoConfig(BaseModel):
     skills: SkillsSection = Field(default_factory=SkillsSection)
     federation: FederationSection = Field(default_factory=FederationSection)
     mission: MissionSection = Field(default_factory=MissionSection)
+    proxy: ProxySection = Field(default_factory=ProxySection)
+    reranking: RerankingSection = Field(default_factory=RerankingSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None
