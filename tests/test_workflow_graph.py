@@ -36,7 +36,7 @@ def _config(
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=max_repair_attempts),
         commands=CommandsSection(lint='echo "lint ok"', test=test_cmd),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
     )
 
 

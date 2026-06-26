@@ -35,7 +35,7 @@ def _config(repo_path: Path, **evidence_kwargs) -> RepoConfig:
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=0),
         commands=CommandsSection(test='echo ok'),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
         evidence=EvidenceSection(**evidence_kwargs) if evidence_kwargs else EvidenceSection(),
     )
 

@@ -147,15 +147,31 @@ def _skipped(name: str, command: str, cwd: Path, artifact_dir: Path) -> CommandR
 
 
 def all_passed(results: list[CommandResult]) -> bool:
-    """True iff no non-skipped command failed. (Skipped commands don't count.)
+    """True iff at least one non-skipped command ran AND all non-skipped passed.
 
-    Note: returns ``True`` for an empty/all-skipped list. That is mathematically
-    correct but operationally ambiguous — "no failures" is not the same as
-    "validation ran and passed". Prefer :func:`validation_ran` +
-    :func:`validation_passed` (or :func:`validation_status`) in new code so
-    "skipped" is never represented as a flavor of "passed".
+    .. deprecated::
+        This function previously returned ``True`` for an empty/all-skipped
+        list, which is operationally ambiguous — "no failures" is not the
+        same as "validation ran and passed". It now returns ``False`` for
+        empty/all-skipped lists and emits a ``DeprecationWarning``.
+
+        Prefer :func:`validation_ran` + :func:`validation_passed` (or
+        :func:`validation_status`) in new code so "skipped" is never
+        represented as a flavor of "passed".
     """
-    return all(r.passed for r in results if not r.skipped)
+    import warnings
+
+    warnings.warn(
+        "all_passed() is deprecated — use validation_status() or "
+        "validation_passed() + validation_ran() instead. "
+        "all_passed() will be removed in a future version.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    ran = [r for r in results if not r.skipped]
+    if not ran:
+        return False
+    return all(r.passed for r in ran)
 
 
 def validation_ran(results: list[CommandResult]) -> bool:

@@ -31,7 +31,7 @@ from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import evaluate_final_gates, GateOutcome
 from acp.store import TaskStore
-from acp.testing.runner import all_passed, run_commands, validation_status
+from acp.testing.runner import validation_passed, run_commands, validation_status
 from acp.vault.obsidian_writer import write_vault_note
 
 console = Console()
@@ -222,7 +222,7 @@ class EvidenceLoop:
             timeout_seconds=cmd_timeout,
             event_writer=events,
         )
-        tests_pass = all_passed(command_results)
+        tests_pass = validation_passed(command_results)
         console.print(
             f"[{'green' if tests_pass else 'red'}]{'✓' if tests_pass else '✗'}[/] "
             f"commands: {sum(1 for r in command_results if not r.skipped)} ran"

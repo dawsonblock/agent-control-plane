@@ -20,6 +20,7 @@ services).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +49,8 @@ from acp.store import TaskStore
 from acp.testing.parsers import extract_failures
 from acp.testing.runner import run_commands, validation_status
 from acp.vault.obsidian_writer import write_vault_note
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -978,6 +981,11 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
             },
         )
     except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sandbox cleanup failed (sandbox=%s): %s — "
+            "orphaned sandbox may remain",
+            sandbox_name, exc,
+        )
         ctx.events.write(
             EventType.NODE_FAILED,
             {"node": "sandbox_cleanup", "message": str(exc)},

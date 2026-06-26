@@ -13,11 +13,14 @@ sandboxing (containers, seccomp, etc.) is a future concern.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from git import Repo
 
 from acp.gitops.branches import create_branch
+
+logger = logging.getLogger(__name__)
 
 
 def is_clean(repo_path: Path) -> bool:
@@ -73,9 +76,14 @@ def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -
             repo.git.worktree("remove", "-f", str(worktree_path))
         else:
             repo.git.worktree("remove", str(worktree_path))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         # The worktree dir may have been removed out-of-band — that's fine.
-        pass
+        # But log it so orphaned worktrees can be debugged if they accumulate.
+        logger.warning(
+            "worktree remove failed (path=%s, force=%s): %s — "
+            "continuing with prune",
+            worktree_path, force, exc,
+        )
     # Always prune to clean up stale worktree metadata, even after successful
     # removal. Without this, git may still consider the branch "checked out"
     # in a now-removed worktree, blocking branch deletion.

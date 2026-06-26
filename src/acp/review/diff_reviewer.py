@@ -36,7 +36,7 @@ from acp.gitops.diff import DiffCapture
 from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
 from acp.review.secret_scanner import scan_diff
-from acp.testing.runner import all_passed, validation_ran, validation_status
+from acp.testing.runner import validation_passed, validation_ran, validation_status
 
 # --- path heuristics (lowercase substring matches) ------------------------- #
 
@@ -116,7 +116,10 @@ def _evaluate(
 ) -> ReviewResult:
     engine = RiskEngine()
     paths_lower = [p.lower() for p in diff.changed_files]
-    tests_pass = all_passed(command_results)
+    # tests_pass should be True when no validation ran (the NO_VALIDATION
+    # signal handles that case with MEDIUM risk). It should only be False
+    # when validation actually ran and a command failed.
+    tests_pass = validation_passed(command_results) if validation_ran(command_results) else True
 
     # --- secret scanning (HARD BLOCK) ------------------------------------- #
     # v0.5.14: Use TruffleHog for verified detection when available.

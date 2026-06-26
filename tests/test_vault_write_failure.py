@@ -27,7 +27,7 @@ def _config(repo_path: Path) -> RepoConfig:
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=0),
         commands=CommandsSection(lint='echo "lint ok"', test='echo "tests passed"'),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
     )
 
 

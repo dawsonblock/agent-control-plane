@@ -17,12 +17,15 @@ Two public functions:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from acp.events import EventWriter
 from acp.models import EventType
 from acp.store import TaskStore
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,8 +74,11 @@ def rerender_vault_note_from_state(
         if review_path.is_file():
             try:
                 review = ReviewResult.model_validate_json(review_path.read_text())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to parse review.json for vault note re-render: %s — "
+                    "using default review (low risk, merge)", exc,
+                )
 
         # Build a minimal diff capture for frontmatter stats.
         diff = DiffCapture(
@@ -94,8 +100,11 @@ def rerender_vault_note_from_state(
                     insertions=ins,
                     deletions=dels,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to parse diff stat for vault note re-render: %s — "
+                    "using empty diff", exc,
+                )
 
         rerender_vault_note(
             note_path=note_path,
@@ -240,8 +249,11 @@ def record_lifecycle_event(
         try:
             from acp.reports.writer import rerender_report_from_run
             rerender_report_from_run(run_dir)
-        except Exception:  # noqa: BLE001
-            pass  # report re-render is best-effort
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "report re-render failed during lifecycle event: %s — "
+                "final_report.md may be stale", exc,
+            )
 
         # 4. Write the evidence.report_bound event to events.jsonl.
         report_hash = compute_report_hash(run_dir)
@@ -285,8 +297,11 @@ def record_lifecycle_event(
             write_lifecycle_manifest(
                 run_dir=run_dir, events_writer=events, report_hash=report_hash
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lifecycle manifest write failed: %s — "
+                "evidence manifest may be stale", exc,
+            )
 
     except Exception:
         # --- Full rollback: restore ALL evidence files --------------------- #
@@ -309,15 +324,15 @@ def record_lifecycle_event(
         if durable_tx_active and durable_db is not None:
             try:
                 durable_db.rollback_transaction()
-            except Exception:  # noqa: BLE001
-                pass  # best-effort; connection close will also undo
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("durable store rollback failed: %s", exc)
 
         # 5. Close the durable connection.
         if durable_db is not None:
             try:
                 durable_db.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("durable store close failed: %s", exc)
 
         if durable_mode == "required":
             raise ACPError(
@@ -331,7 +346,7 @@ def record_lifecycle_event(
     if durable_db is not None:
         try:
             durable_db.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("durable store close failed after success: %s", exc)
 
     return durable_warning

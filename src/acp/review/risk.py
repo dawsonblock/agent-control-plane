@@ -89,15 +89,24 @@ class RiskEngine:
         return [s.category.value for s in self.signals]
 
     def recommend(self, *, tests_pass: bool, require_human_approval: bool) -> Recommendation:
-        """Map (risk, hard_block, test outcome) → advisory recommendation.
+        """Map (risk, hard_block, test outcome, approval) → advisory recommendation.
 
         Always advisory — a human makes the final merge call — but a hard
-        block always yields REJECT.
+        block always yields REJECT. When ``require_human_approval`` is True,
+        the recommendation is never MERGE — the task must be reviewed by a
+        human even if all signals are LOW and tests pass. This prevents
+        autonomous mode from auto-merging changes that policy requires a
+        human to approve.
         """
         if self.hard_block:
             return Recommendation.REJECT
         if self.level == RiskLevel.HIGH or not tests_pass:
             return Recommendation.REJECT
         if self.level == RiskLevel.MEDIUM:
+            return Recommendation.REVISE
+        # LOW risk + tests pass. If human approval is required, return
+        # REVISE (needs review) instead of MERGE so the gate doesn't
+        # auto-merge without a human decision.
+        if require_human_approval:
             return Recommendation.REVISE
         return Recommendation.MERGE

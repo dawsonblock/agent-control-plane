@@ -102,11 +102,18 @@ def test_validation_status_three_states() -> None:
     assert validation_status([_cmd(0, skipped=True), _cmd(1)]) == "failed"
 
 
-def test_all_passed_still_true_for_empty_for_back_compat() -> None:
-    # all_passed([]) is still True (mathematically vacuous); the new helpers
-    # exist so callers don't *interpret* that as "validation passed".
-    assert all_passed([]) is True
-    assert all_passed([_cmd(0, skipped=True)]) is True
+def test_all_passed_returns_false_for_empty() -> None:
+    """all_passed([]) now returns False — 'no validation ran' is not 'passed'.
+
+    Previously this returned True (mathematically vacuous), which was
+    operationally ambiguous. The function is now deprecated; use
+    validation_passed() or validation_status() instead.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert all_passed([]) is False
+        assert all_passed([_cmd(0, skipped=True)]) is False
 
 
 # --------------------------------------------------------------------------- #

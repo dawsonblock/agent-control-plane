@@ -40,6 +40,7 @@ def _config_for(repo_path: Path) -> RepoConfig:
         review=ReviewSection(
             max_changed_files=20,
             max_added_lines=1000,
+            require_human_approval=False,
         ),
     )
 

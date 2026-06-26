@@ -48,11 +48,17 @@ def test_recommend_merge_low_pass() -> None:
     assert rec == Recommendation.MERGE
 
 
-def test_recommend_merge_low_pass_regardless_of_approval_flag() -> None:
-    """Current implementation doesn't check require_human_approval at the engine level."""
+def test_recommend_revise_when_human_approval_required() -> None:
+    """When require_human_approval=True and risk is LOW with passing tests,
+    the recommendation is REVISE (needs human review) — not MERGE.
+
+    This prevents autonomous mode from auto-merging changes that policy
+    requires a human to approve. The engine now respects the
+    require_human_approval flag at the engine level.
+    """
     engine = RiskEngine()
     rec = engine.recommend(tests_pass=True, require_human_approval=True)
-    assert rec == Recommendation.MERGE
+    assert rec == Recommendation.REVISE
 
 
 def test_recommend_reject_on_hard_block() -> None:
