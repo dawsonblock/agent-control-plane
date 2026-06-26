@@ -794,13 +794,33 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # add review concerns so the human reviewer is alerted. The review
     # gate handles risk escalation based on the concerns — we don't
     # fail the node here.
+    #
+    # When proxy.enabled is True but no egress artifact was written
+    # (e.g., the MITM proxy wasn't actually started, or the agent made
+    # no network requests), we write an empty artifact so the review
+    # gate knows the proxy was configured but observed no traffic.
     egress_violation_domains: list[str] = []
     if cfg.proxy.enabled:
-        from acp.egress import has_egress_violations, analyze_egress_log
+        from acp.egress import (
+            EgressLogger,
+            has_egress_violations,
+            analyze_egress_log,
+        )
         artifacts_dir = state["artifacts_dir"]
+        egress_artifact_path = artifacts_dir / cfg.proxy.log_artifact
+        if not egress_artifact_path.is_file():
+            # No egress artifact was written (MITM proxy not started or
+            # no traffic). Write an empty artifact so the review gate
+            # can distinguish "proxy enabled but no traffic" from
+            # "proxy not configured".
+            EgressLogger().write_artifact(
+                artifacts_dir,
+                allowed_domains=cfg.proxy.allowed_domains,
+                log_filename=cfg.proxy.log_artifact,
+            )
         if has_egress_violations(artifacts_dir, cfg.proxy.log_artifact):
             violations = analyze_egress_log(
-                artifacts_dir / cfg.proxy.log_artifact,
+                egress_artifact_path,
                 cfg.proxy.allowed_domains,
             )
             if violations:

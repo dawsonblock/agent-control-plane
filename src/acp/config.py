@@ -104,6 +104,13 @@ class AgentSection(BaseModel):
             raise ValueError("agent.max_repair_attempts must be between 0 and 20")
         return v
 
+    @field_validator("max_subtasks")
+    @classmethod
+    def _validate_max_subtasks(cls, v: int) -> int:
+        if v < 0 or v > 100:
+            raise ValueError("agent.max_subtasks must be between 0 and 100")
+        return v
+
     @field_validator("agents_dir")
     @classmethod
     def _absolute_agents(cls, v: Path | None) -> Path | None:
@@ -304,6 +311,15 @@ class FederationServerConfig(BaseModel):
             raise ValueError(
                 f"federation transport='{v}' is not valid. "
                 f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, v: int) -> int:
+        if v <= 0 or v > 86400:
+            raise ValueError(
+                "federation.timeout_seconds must be between 1 and 86400 (24h)"
             )
         return v
 

@@ -522,8 +522,12 @@ def prune_superseded_nodes(
                             graph_id=gid,
                         )
                         count += 1
-                    except Exception:  # noqa: BLE001
-                        pass  # best-effort — continue pruning others
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to prune superseded node %s: %s",
+                            node.get("node_id", "?"), exc,
+                        )
+                        # Continue pruning other nodes — best-effort.
                 return count
             finally:
                 await client.close()

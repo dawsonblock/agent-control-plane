@@ -82,6 +82,9 @@ class ContextBuilder:
             return []
 
         # Determine how many chunks to retrieve before re-ranking.
+        # When re-ranking is enabled, use top_k_before_rerank from the config.
+        # The top_k parameter is used as a fallback when re-ranking is disabled
+        # or when top_k_before_rerank is not set.
         retrieval_k = top_k
         if (
             self.reranking_config

@@ -397,16 +397,26 @@ class SSETransport:
         """Parse an SSE response stream and extract the first JSON-RPC result.
 
         SSE events are delimited by blank lines. Each event has ``data:``
-        lines whose concatenation forms the event payload. We parse the
+        lines whose concatenation forms the event payload. Comment lines
+        (starting with ``:``) and other field lines (``event:``, ``id:``,
+        ``retry:``) are ignored per the SSE specification. We parse the
         first event with a JSON payload and return it.
         """
-        for block in raw.split("\n\n"):
+        import re
+        # Split on blank lines — handle \n\n, \r\n\r\n, and \r\r per SSE spec.
+        for block in re.split(r"\r\n\r\n|\r\r|\n\n", raw):
             data_lines = []
             for line in block.splitlines():
+                if line.startswith(":"):
+                    # SSE comment line — ignore per spec.
+                    continue
                 if line.startswith("data: "):
                     data_lines.append(line[6:])
                 elif line.startswith("data:"):
-                    data_lines.append(line[5:])
+                    # Handle "data:" with no content after it (empty data line).
+                    data_lines.append(line[5:] if len(line) > 5 else "")
+                # Other SSE fields (event:, id:, retry:) are ignored —
+                # we only care about the data payload.
             if data_lines:
                 payload = "\n".join(data_lines)
                 try:
