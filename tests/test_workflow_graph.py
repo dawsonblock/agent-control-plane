@@ -210,6 +210,10 @@ def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_
     # Both produced the same artifact set.
     g_arts = {p.name for p in g_store.artifacts_dir(g_result["task_id"]).iterdir() if p.is_file()}
     l_arts = {p.name for p in (l_result.run_dir / "artifacts").iterdir() if p.is_file()}
+    # v0.6.1 (M6): When the rag extra is installed, the graph path produces
+    # an extra context_bundle.md artifact (the legacy loop predates M6).
+    # This is expected — remove it from the comparison when present.
+    g_arts.discard("context_bundle.md")
     assert g_arts == l_arts, (
         f"graph and legacy artifact sets differ:\n"
         f"  graph only: {g_arts - l_arts}\n  legacy only: {l_arts - g_arts}"

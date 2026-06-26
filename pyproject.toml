@@ -51,9 +51,11 @@ dev = [
 # v0.6.0 (M6): Local Haystack RAG context retrieval.
 # Optional — install with: uv sync --extra rag
 # Uses sentence-transformers for local, air-gapped embeddings (no API calls).
+# Note: haystack-ai 2.30+ requires sentence-transformers 3.0+ (the
+# `local_files_only` parameter was added in 3.0.0).
 rag = [
     "haystack-ai>=2.0,<3",
-    "sentence-transformers>=2.2,<3",
+    "sentence-transformers>=3.0,<5",
 ]
 
 [project.scripts]
