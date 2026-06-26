@@ -1519,5 +1519,89 @@ def memory_search(
             console.print(f"  valid_at: {fact['valid_at']}")
 
 
+# --------------------------------------------------------------------------- #
+# v0.6.5 (M10): acp serve — FastAPI HTTP control layer.
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def serve(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address (default: 127.0.0.1 — localhost only).",
+    ),
+    port: int = typer.Option(
+        8000,
+        "--port",
+        "-p",
+        help="Port to listen on (default: 8000).",
+    ),
+    reload: bool = typer.Option(
+        False,
+        "--reload",
+        help="Enable auto-reload for development.",
+    ),
+) -> None:
+    """Start the ACP HTTP API server.
+
+    Exposes the ACP workflow as a local HTTP API. Requires the ``api``
+    optional dependency group::
+
+        uv sync --extra api
+
+    Endpoints:
+      POST /tasks/run          — run a coding task
+      GET  /tasks              — list all tasks
+      GET  /tasks/{id}         — get task status
+      POST /tasks/{id}/approve — approve a vault note
+      POST /tasks/{id}/reject  — reject a vault note
+      GET  /tasks/{id}/events  — get event log
+      GET  /tasks/{id}/report  — get report content
+      GET  /memory/search      — search temporal memory
+      GET  /health             — health check
+
+    The server binds to 127.0.0.1 (localhost) by default. Do NOT expose
+    to the network without authentication — this API can run arbitrary
+    code via POST /tasks/run.
+    """
+    try:
+        from acp.api.server import state as server_state
+    except ImportError as exc:
+        console.print(
+            f"[red]✗[/] FastAPI not installed: {exc}\n"
+            f"  Install with: uv sync --extra api"
+        )
+        raise typer.Exit(code=1) from exc
+
+    # Validate the config loads before starting the server.
+    try:
+        load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    server_state.set_config(str(config))
+
+    console.print(f"[bold]ACP API server[/] · config={config}")
+    console.print(f"  listening on http://{host}:{port}")
+    console.print(f"  docs at http://{host}:{port}/docs")
+    console.print(f"  [dim]Ctrl+C to stop[/]")
+
+    import uvicorn
+    uvicorn.run(
+        "acp.api.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
