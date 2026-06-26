@@ -47,6 +47,12 @@ review:
   warn_on_auth_changes: true
   warn_on_database_changes: true
   require_human_approval: true
+  # v0.6.0: Autonomous mode — bypasses human approval for tasks that pass
+  # all gates. Auto-merge merges the task branch into the default branch.
+  # Both are opt-in (default False). Only enable with docker_sbx executor
+  # and block_secret_leaks: true.
+  # autonomous_mode: false     # true = auto-approve on PASSED (no human click)
+  # auto_merge: false          # true = merge task branch into default branch
 
 context:
   include:
@@ -110,12 +116,4 @@ executor:
   # clone_mode: true           # MUST be true (ACP refuses non-clone mode)
   # network_policy: locked_down  # locked_down | balanced (strict enum, never open)
   # remove_after_run: false    # true = remove sandbox after run; false = keep
-
-# v0.6.0: Autonomous mode — bypasses human approval for tasks that pass
-# all gates. Auto-merge merges the task branch into the default branch.
-# Both are opt-in (default False). Only enable with docker_sbx executor
-# and block_secret_leaks: true.
-review:
-  # autonomous_mode: false     # true = auto-approve on PASSED (no human click)
-  # auto_merge: false  # true = merge task branch into default branch
 

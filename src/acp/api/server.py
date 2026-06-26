@@ -135,7 +135,7 @@ state = ServerState()
 app = FastAPI(
     title="Agent Control Plane",
     description="Local HTTP API for the ACP workflow",
-    version="0.6.5",
+    version="0.6.6",
 )
 
 
@@ -147,7 +147,7 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Health check."""
-    return {"status": "ok", "version": "0.6.5"}
+    return {"status": "ok", "version": "0.6.6"}
 
 
 @app.post("/config")

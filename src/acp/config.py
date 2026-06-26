@@ -269,6 +269,13 @@ def load_repo_config(path: str | Path) -> RepoConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"repo config must be a mapping at top level: {path}")
 
+    # Drop explicit None values for sections that have defaults — YAML
+    # configs commonly write `review: None` or `skills:` to indicate
+    # "use the default", but Pydantic rejects None for non-Optional fields.
+    for key in list(raw.keys()):
+        if raw[key] is None:
+            raw.pop(key)
+
     cfg = RepoConfig.model_validate(raw)
     cfg.source_path = path
     return cfg
