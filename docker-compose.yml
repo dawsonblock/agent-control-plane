@@ -6,14 +6,16 @@
 #   acp memory promote --config configs/repos/example.repo.yaml
 #
 # FalkorDB is a Redis-compatible graph database. ACP connects to it on
-# localhost:6379 (the default Redis port). Data persists in a Docker
-# volume so temporal memories survive container restarts.
+# localhost:6379 (the default Redis port). Port 3000 exposes the FalkorDB
+# web UI for visual inspection of the knowledge graph. Data persists in
+# a Docker volume so temporal memories survive container restarts.
 
 services:
   falkordb:
     image: falkordb/falkordb:latest
     ports:
       - "6379:6379"
+      - "3000:3000"
     volumes:
       - falkordb-data:/data
     restart: unless-stopped

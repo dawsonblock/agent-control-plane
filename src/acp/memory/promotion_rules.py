@@ -11,6 +11,12 @@ promoted to Graphiti temporal memory. The rules enforce safety properties:
   3. **High-risk gating**: If a task has ``RiskLevel.HIGH`` but was approved
      anyway, the system flags it for secondary review before promotion.
   4. **No re-ingestion**: Notes with ``graphiti_ingested: true`` are skipped.
+  5. **ADR priority boost**: Architectural Decision Records (``type: decision``)
+     get urgent priority — they constrain all future work and must be
+     persisted first.
+  6. **Reject recommendation exclusion**: If the automated review
+     recommendation was ``reject``, the note is excluded even if a human
+     approved it — the reviewer overrode the safety net, so we flag it.
 
 The rules engine is pure — it takes data in and returns a decision. It does
 not perform any side effects. The caller (CLI or auto_approve_node) is
@@ -121,6 +127,12 @@ def get_promotion_priority(
     if task.status == TaskStatus.FAILED:
         return PRIORITY_URGENT
 
+    # Architectural Decision Records (ADRs) get top priority — these
+    # are the most important facts to persist in the knowledge graph
+    # because they constrain all future work on the repo.
+    if fm.type == "decision":
+        return PRIORITY_URGENT
+
     # High-risk tasks that were approved anyway get high priority
     # so they're flagged for secondary review before promotion.
     risk = (fm.risk or "").lower()
@@ -163,6 +175,8 @@ def get_promotion_exclusions(
         exclusions.append(f"memory_status is '{fm.memory_status}', not 'active'")
     if fm.graphiti_ingested:
         exclusions.append("already ingested into Graphiti (graphiti_ingested=true)")
+    if (fm.recommendation or "").lower() == "reject":
+        exclusions.append("automated review recommendation was 'reject'")
 
     return exclusions
 
@@ -180,9 +194,18 @@ def get_promotion_metadata(
       - ``exclusions``: List of exclusion reasons (empty if eligible)
       - ``task_id``: The task ID
       - ``repo_name``: The repo name
+      - ``repo``: The repo name (alias for Graphiti node attributes)
+      - ``branch_edited``: The task branch
       - ``risk``: The risk level
+      - ``risk_level``: The risk level (alias for Graphiti node attributes)
       - ``is_known_failure``: Whether this is a failed task (promoted as cautionary)
       - ``needs_secondary_review``: Whether this is a high-risk task needing review
+      - ``is_adr``: Whether this is an architectural decision record (type=decision)
+      - ``files_changed``: Number of files changed (from frontmatter)
+      - ``insertions``: Lines inserted (from frontmatter)
+      - ``deletions``: Lines deleted (from frontmatter)
+      - ``created_at``: Creation date (from frontmatter)
+      - ``sources``: Evidence source files (from frontmatter)
 
     Args:
         task: The task object.
@@ -203,9 +226,18 @@ def get_promotion_metadata(
         "exclusions": exclusions,
         "task_id": task.task_id,
         "repo_name": task.repo_name,
+        "repo": task.repo_name,
+        "branch_edited": task.task_branch,
         "risk": fm.risk,
+        "risk_level": fm.risk or "unknown",
         "is_known_failure": task.status == TaskStatus.FAILED,
         "needs_secondary_review": (fm.risk or "").lower() == "high",
+        "is_adr": fm.type == "decision",
+        "files_changed": fm.files_changed or 0,
+        "insertions": fm.insertions or 0,
+        "deletions": fm.deletions or 0,
+        "created_at": fm.created or "",
+        "sources": fm.sources,
     }
 
 

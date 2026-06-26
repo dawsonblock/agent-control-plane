@@ -214,6 +214,26 @@ class TestGetPromotionPriority:
 
         assert get_promotion_priority(task, fm, note_path) == PROMOTION_BLOCKED
 
+    def test_adr_gets_urgent_priority(self, tmp_path):
+        """Architectural Decision Records (type=decision) get PRIORITY_URGENT."""
+        task = _make_task(status=TaskStatus.PASSED)
+        fm = _make_frontmatter(risk="low")
+        fm["type"] = "decision"
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        assert get_promotion_priority(task, fm, note_path) == PRIORITY_URGENT
+
+    def test_adr_overrides_high_risk(self, tmp_path):
+        """ADR priority overrides even high-risk classification."""
+        task = _make_task(status=TaskStatus.PASSED)
+        fm = _make_frontmatter(risk="high")
+        fm["type"] = "decision"
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        assert get_promotion_priority(task, fm, note_path) == PRIORITY_URGENT
+
 
 class TestGetPromotionExclusions:
     """get_promotion_exclusions — reasons why not to promote."""
@@ -253,6 +273,17 @@ class TestGetPromotionExclusions:
         exclusions = get_promotion_exclusions(task, fm, note_path)
         assert any("not found" in e for e in exclusions)
 
+    def test_exclusion_reject_recommendation(self, tmp_path):
+        """Notes with recommendation='reject' are excluded."""
+        task = _make_task()
+        fm = _make_frontmatter()
+        fm["recommendation"] = "reject"
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        exclusions = get_promotion_exclusions(task, fm, note_path)
+        assert any("reject" in e for e in exclusions)
+
 
 class TestGetPromotionMetadata:
     """get_promotion_metadata — combined metadata dict."""
@@ -290,6 +321,50 @@ class TestGetPromotionMetadata:
         meta = get_promotion_metadata(task, fm, note_path)
         assert meta["is_known_failure"] is True
         assert meta["priority"] == PRIORITY_URGENT
+
+    def test_metadata_richer_fields(self, tmp_path):
+        """Metadata includes branch, files_changed, insertions, deletions, etc."""
+        task = _make_task(status=TaskStatus.PASSED)
+        fm = _make_frontmatter(risk="medium")
+        fm["files_changed"] = 5
+        fm["insertions"] = 100
+        fm["deletions"] = 20
+        fm["created"] = "2026-06-26"
+        fm["sources"] = ["diff.patch", "review.json"]
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        meta = get_promotion_metadata(task, fm, note_path)
+        assert meta["branch_edited"] == task.task_branch
+        assert meta["files_changed"] == 5
+        assert meta["insertions"] == 100
+        assert meta["deletions"] == 20
+        assert meta["created_at"] == "2026-06-26"
+        assert meta["sources"] == ["diff.patch", "review.json"]
+        assert meta["risk_level"] == "medium"
+        assert meta["repo"] == task.repo_name
+
+    def test_metadata_adr_flag(self, tmp_path):
+        """ADR notes (type=decision) are flagged in metadata."""
+        task = _make_task(status=TaskStatus.PASSED)
+        fm = _make_frontmatter(risk="low")
+        fm["type"] = "decision"
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        meta = get_promotion_metadata(task, fm, note_path)
+        assert meta["is_adr"] is True
+        assert meta["priority"] == PRIORITY_URGENT
+
+    def test_metadata_not_adr(self, tmp_path):
+        """Standard task reports are not flagged as ADRs."""
+        task = _make_task(status=TaskStatus.PASSED)
+        fm = _make_frontmatter(risk="low")
+        note_path = tmp_path / "note.md"
+        note_path.write_text("content")
+
+        meta = get_promotion_metadata(task, fm, note_path)
+        assert meta["is_adr"] is False
 
 
 # --------------------------------------------------------------------------- #
