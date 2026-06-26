@@ -417,12 +417,17 @@ def find_superseded_nodes(
                 )
                 results = []
                 for edge in all_edges:
-                    expired = getattr(edge, "expired_at", None)
-                    if expired is None:
+                    # Graphiti uses 'valid_at' on SUPERSEDES edges to record
+                    # when the superseding relationship became effective.
+                    valid_at = getattr(edge, "valid_at", None)
+                    if valid_at is None:
+                        # Fall back to 'expired_at' for older Graphiti versions.
+                        valid_at = getattr(edge, "expired_at", None)
+                    if valid_at is None:
                         continue
                     results.append({
                         "node_id": getattr(edge, "source_node_id", ""),
-                        "superseded_at": str(expired),
+                        "superseded_at": str(valid_at),
                     })
 
             superseded: list[dict[str, Any]] = []

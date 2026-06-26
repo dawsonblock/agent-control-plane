@@ -221,14 +221,22 @@ def analyze_egress_log(
     ]
 
 
-def has_egress_violations(artifacts_dir: Path) -> bool:
+def has_egress_violations(
+    artifacts_dir: Path,
+    log_filename: str = "network_egress.json",
+) -> bool:
     """Check if a run's artifacts directory has egress violations.
 
     Used by the review gate to determine if the egress proxy detected
     any policy violations. Returns False if the egress log doesn't exist
     (proxy was not enabled) or if there are no violations.
+
+    Args:
+        artifacts_dir: The run's artifacts directory.
+        log_filename: The egress log filename (default: "network_egress.json").
+            Should match ``proxy.log_artifact`` in the repo config.
     """
-    egress_log = Path(artifacts_dir) / "network_egress.json"
+    egress_log = Path(artifacts_dir) / log_filename
     if not egress_log.is_file():
         return False
 

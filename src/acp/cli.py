@@ -1424,11 +1424,11 @@ def migrate_to_sqlite(
         f"{cfg.evidence.durable_store}"
     )
 
-    # Emit task.store_migrated events for each imported task.
-    # We write a single summary event to a migration log.
-    migration_log = Path(runs_root) / "migration_events.jsonl"
-    events = EventWriter("__migration__", Path(runs_root))
-    events.relocate("__migration__", Path(runs_root))
+    # Emit task.store_migrated event. EventWriter writes to
+    # run_dir / "events.jsonl", so we use a dedicated migration directory.
+    migration_dir = Path(runs_root) / ".migration"
+    migration_dir.mkdir(parents=True, exist_ok=True)
+    events = EventWriter("__migration__", migration_dir)
     events.write(
         EventType.TASK_STORE_MIGRATED,
         {
@@ -1441,7 +1441,7 @@ def migrate_to_sqlite(
 
     console.print(
         f"[green]✓[/] task.store_migrated event written to "
-        f"{migration_log}"
+        f"{migration_dir / 'events.jsonl'}"
     )
     console.print(
         "\n[dim]Set evidence.task_store_primary: \"sqlite\" in the "

@@ -75,6 +75,7 @@ class SecretFinding:
     kind: str          # provider label or "high_entropy_assignment"
     snippet: str       # redacted excerpt for the report (never the full secret)
     line_no: int       # line in the patch where it appeared
+    entropy: float = 0.0  # bits/char for high_entropy_assignment; 0.0 otherwise
 
 
 def scan_patch(patch: str) -> list[SecretFinding]:
@@ -119,6 +120,7 @@ def scan_patch(patch: str) -> list[SecretFinding]:
                             kind="high_entropy_assignment",
                             snippet=f"{value[:6]}…{value[-2:]} (entropy {ent:.1f})",
                             line_no=idx,
+                            entropy=ent,
                         )
                     )
 
@@ -325,6 +327,8 @@ def detect_hard_block_secrets(patch: str) -> list[SecretFinding]:
 
     High-entropy assignment findings are included when the entropy is
     particularly high (>= 4.0 bits/char), indicating a very likely secret.
+    The threshold is higher than the scan threshold (3.5) to reduce false
+    positives for the hard-block path.
     """
     findings = scan_patch(patch)
     hard_blocks: list[SecretFinding] = []
@@ -332,14 +336,8 @@ def detect_hard_block_secrets(patch: str) -> list[SecretFinding]:
         if f.kind in _HARD_BLOCK_KINDS:
             hard_blocks.append(f)
         elif f.kind == "high_entropy_assignment":
-            # Extract the entropy value from the snippet to check threshold.
-            # Snippet format: "abcdef…xy (entropy 4.2)"
-            if "entropy" in f.snippet:
-                try:
-                    ent_str = f.snippet.split("entropy ")[1].rstrip(")")
-                    ent = float(ent_str)
-                    if ent >= 4.0:
-                        hard_blocks.append(f)
-                except (IndexError, ValueError):
-                    pass  # can't parse — don't hard-block on uncertainty
+            # Use the entropy field directly (set during scan) instead of
+            # parsing the snippet string, which is fragile.
+            if f.entropy >= 4.0:
+                hard_blocks.append(f)
     return hard_blocks

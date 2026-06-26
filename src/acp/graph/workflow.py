@@ -40,6 +40,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from acp.agents.base import AgentProtocol
 from acp.agents.registry import build_agent as _default_build_agent
+from acp.config import DurableMode
 from acp.events import EventWriter
 from acp.graph.nodes import (
     NodeContext,
@@ -366,7 +367,24 @@ def run_workflow(
     will include ``parent_artifact_hash`` — the sha256 of the preceding
     step's ``diff.patch`` — proving sequential generation.
     """
-    store = TaskStore(runs_root=runs_root)
+    # v0.7.0 (Phase 1.1): Wire SQLite-as-primary if configured.
+    # Only initialize the durable task store when durable_mode is not
+    # DISABLED — respecting the operator's explicit choice to skip SQLite.
+    evidence_cfg = getattr(config, "evidence", None)
+    durable_task_store = None
+    if (
+        evidence_cfg
+        and evidence_cfg.durable_store
+        and evidence_cfg.durable_mode != DurableMode.DISABLED
+    ):
+        from acp.evidence.durable_task_store import DurableTaskStore
+        durable_task_store = DurableTaskStore(evidence_cfg.durable_store)
+        durable_task_store.init()
+    store = TaskStore(
+        runs_root=runs_root,
+        durable_store=durable_task_store,
+        primary=evidence_cfg.task_store_primary if evidence_cfg else "json",
+    )
     # Ensure vault_root exists — the workflow writes a vault note at the end
     # and the vault directory must be present by then.
     Path(vault_root).mkdir(parents=True, exist_ok=True)
@@ -379,7 +397,6 @@ def run_workflow(
     # that is exactly the kind of integrity gap this control plane exists to
     # prevent. A missing key file, a malformed key, or an unavailable
     # `cryptography` package all raise EvidenceConfigError (fail closed).
-    evidence_cfg = getattr(config, "evidence", None)
     if evidence_cfg and evidence_cfg.signing_key_path:
         from acp.errors import EvidenceConfigError
         try:
@@ -461,9 +478,11 @@ def run_workflow(
         state["parent_task_id"] = parent_task_id
     result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
 
-    # Close the durable store if it was opened.
+    # Close the durable stores if they were opened.
     if durable_store is not None:
         durable_store.close()
+    if durable_task_store is not None:
+        durable_task_store.close()
 
     # Surface durable-store failures to the caller. The JSONL log is canonical,
     # so the run can succeed, but the operator must know the durable index is

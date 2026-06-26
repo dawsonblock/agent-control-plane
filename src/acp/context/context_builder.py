@@ -23,6 +23,7 @@ This module requires the ``rag`` optional dependency group::
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,8 @@ from haystack.components.retrievers.in_memory import InMemoryEmbeddingRetriever
 
 from acp.config import ContextSection, RerankingSection
 from acp.context.haystack_indexer import HaystackIndexer
+
+logger = logging.getLogger(__name__)
 
 
 class ContextBuilder:
@@ -157,14 +160,22 @@ class ContextBuilder:
         except ImportError:
             # If sentence-transformers isn't available, return the
             # original docs without re-ranking (graceful degradation).
+            logger.warning(
+                "Re-ranking skipped: sentence-transformers not installed. "
+                "Install with: uv sync --extra rag"
+            )
             return docs[:top_k]
 
         try:
             model = CrossEncoder(model_name)
             pairs = [(query, d["content"]) for d in docs]
             scores = model.predict(pairs)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # Model loading or prediction failed — degrade gracefully.
+            logger.warning(
+                "Re-ranking failed (model=%s): %s. Using original retrieval order.",
+                model_name, exc,
+            )
             return docs[:top_k]
 
         # Attach rerank scores and sort by them (descending).

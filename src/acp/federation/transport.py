@@ -217,10 +217,13 @@ class HTTPTransport:
 
     def start(self) -> None:
         # HTTP is stateless — "starting" just means we verify the URL
-        # is reachable. We do a lightweight HEAD request.
+        # is reachable. We try a HEAD request first, but some MCP servers
+        # don't support HEAD (return 405). In that case, we fall back to
+        # a GET request. If both fail, the server is unreachable.
         if self._connected:
             return
         import urllib.request
+        import urllib.error
         try:
             req = urllib.request.Request(
                 self.url, method="HEAD",
@@ -228,6 +231,28 @@ class HTTPTransport:
             )
             urllib.request.urlopen(req, timeout=self.timeout_seconds)
             self._connected = True
+        except urllib.error.HTTPError as exc:
+            # 405 Method Not Allowed — server doesn't support HEAD.
+            # Fall back to a GET request to verify connectivity.
+            if exc.code == 405:
+                try:
+                    req = urllib.request.Request(
+                        self.url, method="GET",
+                        headers=self.headers,
+                    )
+                    urllib.request.urlopen(req, timeout=self.timeout_seconds)
+                    self._connected = True
+                    return
+                except Exception as exc2:  # noqa: BLE001
+                    raise MCPError(
+                        f"MCP HTTP server '{self.server_name}' unreachable at "
+                        f"{self.url}: {exc2}"
+                    ) from exc2
+            # Other HTTP errors (4xx, 5xx) — server is reachable but unhealthy.
+            raise MCPError(
+                f"MCP HTTP server '{self.server_name}' unreachable at "
+                f"{self.url}: HTTP {exc.code}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise MCPError(
                 f"MCP HTTP server '{self.server_name}' unreachable at "

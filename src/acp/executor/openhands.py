@@ -42,6 +42,7 @@ See: https://docs.openhands.dev/openhands/usage/cli/headless
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -182,6 +183,10 @@ class OpenHandsExecutor:
         events_path = artifact_dir / "openhands_events.jsonl"
 
         # Build the openhands command.
+        # OpenHands CLI does NOT have a --model flag. Models are configured
+        # via the settings UI, config file, or environment variables with
+        # --override-with-envs. We use the env var approach so the ACP
+        # config's agent field (used as the LLM model name) is respected.
         cmd = [
             "openhands",
             "--headless",
@@ -189,10 +194,12 @@ class OpenHandsExecutor:
             "-f", str(prompt_path),
         ]
 
-        # Pass the model via --model if specified in config.
-        # The agent field is used as the model name for OpenHands.
+        # Pass the model via LLM_MODEL env var with --override-with-envs.
+        # The agent field is used as the LLM model name for OpenHands.
+        env = os.environ.copy()
         if self.config.agent:
-            cmd.extend(["--model", self.config.agent])
+            env["LLM_MODEL"] = self.config.agent
+            cmd.append("--override-with-envs")
 
         # Set the working directory to the repo path (the worktree).
         # OpenHands works in the current directory by default.
@@ -202,6 +209,7 @@ class OpenHandsExecutor:
             proc = subprocess.run(
                 cmd,
                 cwd=str(repo_path),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,

@@ -426,6 +426,17 @@ class RerankingSection(BaseModel):
             raise ValueError("reranking.top_k_after_rerank must be between 1 and 50")
         return v
 
+    @model_validator(mode="after")
+    def _validate_k_ordering(self) -> RerankingSection:
+        """Ensure top_k_before_rerank >= top_k_after_rerank."""
+        if self.top_k_before_rerank < self.top_k_after_rerank:
+            raise ValueError(
+                f"reranking.top_k_before_rerank ({self.top_k_before_rerank}) "
+                f"must be >= top_k_after_rerank ({self.top_k_after_rerank}). "
+                f"Cannot keep more chunks after re-ranking than were retrieved."
+            )
+        return self
+
 
 class EvidenceSection(BaseModel):
     """Evidence integrity settings (v0.5.6).

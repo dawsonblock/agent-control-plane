@@ -599,6 +599,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 timeout_seconds=cfg.agent.timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001
+            executor.cleanup()
             ctx.events.write(
                 EventType.NODE_FAILED,
                 {
@@ -790,25 +791,20 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
     # v0.7.0 (Phase 2.2): Egress proxy violation check. If the proxy
     # was enabled and detected access to domains not in the allowlist,
-    # add a review concern so the human reviewer is alerted.
+    # add review concerns so the human reviewer is alerted. The review
+    # gate handles risk escalation based on the concerns — we don't
+    # fail the node here.
+    egress_violation_domains: list[str] = []
     if cfg.proxy.enabled:
         from acp.egress import has_egress_violations, analyze_egress_log
         artifacts_dir = state["artifacts_dir"]
-        if has_egress_violations(artifacts_dir):
+        if has_egress_violations(artifacts_dir, cfg.proxy.log_artifact):
             violations = analyze_egress_log(
                 artifacts_dir / cfg.proxy.log_artifact,
                 cfg.proxy.allowed_domains,
             )
             if violations:
-                ctx.events.write(
-                    EventType.NODE_FAILED,
-                    {
-                        "node": "review_diff",
-                        "reason": "egress_violation",
-                        "violation_count": len(violations),
-                        "domains": [v.domain for v in violations],
-                    },
-                )
+                egress_violation_domains = [v.domain for v in violations]
 
     review = review_diff(
         diff=state["diff"],
@@ -823,6 +819,12 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     if hasattr(diff, "binary_files") and diff.binary_files:
         for bf in diff.binary_files:
             review.concerns.append(f"binary file changed: {bf}")
+    # v0.7.0 (Phase 2.2): Add egress violations as review concerns.
+    if egress_violation_domains:
+        for domain in egress_violation_domains:
+            review.concerns.append(
+                f"egress violation: agent accessed unauthorized domain '{domain}'"
+            )
     ctx.events.write(
         EventType.REVIEW_COMPLETED,
         {
