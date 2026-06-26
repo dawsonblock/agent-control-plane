@@ -1214,6 +1214,285 @@ def memory_search(
 
 
 # --------------------------------------------------------------------------- #
+# v0.7.0 (M14): acp mission — group tasks into larger epics.
+# --------------------------------------------------------------------------- #
+
+mission_app = typer.Typer(
+    name="mission",
+    help="Manage missions — overarching goals split into sequential task runs.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(mission_app, name="mission")
+
+
+def _require_valid_mission_id(mission_id: str) -> None:
+    """Exit nonzero if ``mission_id`` is not a canonical mission id."""
+    from acp.missions.store import is_valid_mission_id
+    if not is_valid_mission_id(mission_id):
+        console.print(
+            f"[red]✗[/] invalid mission id: {mission_id!r} "
+            f"(expected mission_<YYYYMMDD>_<NNNN>, e.g. mission_20260626_0001)"
+        )
+        raise typer.Exit(code=1)
+
+
+@mission_app.command("create")
+def mission_create(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config (for repo name + path).",
+    ),
+    goal: str = typer.Option(
+        ...,
+        "--goal",
+        "-g",
+        help="The overarching mission goal (e.g. 'Migrate to React 19').",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Optional longer description of the mission.",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+) -> None:
+    """Create a new mission from an overarching goal.
+
+    Writes ``mission.yaml`` and a ``mission.created`` event to
+    ``<missions_dir>/<mission_id>/``. Use ``acp mission split`` to add
+    steps, then spawn tasks for each step.
+    """
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=missions_dir)
+    mission_id = store.next_mission_id()
+
+    try:
+        mission = store.create(
+            mission_id=mission_id,
+            goal=goal,
+            repo_name=cfg.repo.name,
+            repo_path=cfg.repo.path,
+            base_branch=cfg.repo.default_branch,
+            description=description,
+        )
+    except Exception as exc:
+        console.print(f"[red]✗[/] mission creation failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]✓[/] mission {mission_id} created")
+    console.print(f"  goal: {mission.goal}")
+    console.print(f"  repo: {mission.repo_name} (branch: {mission.base_branch})")
+    console.print(f"  dir:  {store.mission_dir(mission_id)}")
+    console.print(f"  event: mission.created written to {store.events_path(mission_id)}")
+    console.print(
+        f"\n[dim]Next: add steps with `acp mission split --mission {mission_id} "
+        f"--step \"...\"`[/]"
+    )
+
+
+@mission_app.command("list")
+def mission_list(
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+) -> None:
+    """List all missions."""
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=missions_dir)
+    if not store.root.is_dir():
+        console.print(f"[dim]No missions directory found at {store.root}[/]")
+        return
+
+    missions = store.list_missions()
+    if not missions:
+        console.print("[dim]No missions found.[/]")
+        return
+
+    console.print(f"[bold]Missions[/] ({len(missions)} total):\n")
+    console.print(f"  {'mission_id':<28}  {'status':<14}  {'steps':<6}  {'goal'}")
+    console.print(f"  {'---':<28}  {'---':<14}  {'---':<6}  {'---'}")
+    for m in missions:
+        completed = sum(1 for s in m.steps if s.status == "completed")
+        step_str = f"{completed}/{len(m.steps)}"
+        color = "green" if m.status.value == "completed" else (
+            "cyan" if m.status.value == "in_progress" else "white"
+        )
+        console.print(
+            f"  {m.mission_id:<28}  [{color}]{m.status.value:<14}[/{color}]  "
+            f"{step_str:<6}  {m.goal[:50]}"
+        )
+
+
+@mission_app.command("show")
+def mission_show(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to show (e.g. mission_20260626_0001).",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+) -> None:
+    """Show details of a specific mission, including its steps."""
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=missions_dir)
+    try:
+        mission = store.load(mission_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        console.print(f"[red]✗[/] cannot load mission: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[bold]Mission {mission.mission_id}[/]")
+    console.print(f"  status:      {mission.status.value}")
+    console.print(f"  goal:        {mission.goal}")
+    if mission.description:
+        console.print(f"  description: {mission.description}")
+    console.print(f"  repo:        {mission.repo_name} (branch: {mission.base_branch})")
+    console.print(f"  created:     {mission.created_at}")
+    if mission.completed_at:
+        console.print(f"  completed:   {mission.completed_at}")
+
+    if not mission.steps:
+        console.print("\n  [dim]No steps yet. Add with `acp mission split`.[/]")
+    else:
+        console.print(f"\n  [bold]Steps[/] ({len(mission.steps)}):")
+        for i, step in enumerate(mission.steps):
+            status_color = {
+                "pending": "dim",
+                "running": "yellow",
+                "completed": "green",
+                "failed": "red",
+            }.get(step.status, "white")
+            task_str = f" → {step.task_id}" if step.task_id else ""
+            console.print(
+                f"    {i + 1}. [{status_color}]{step.status}[/{status_color}] "
+                f"{step.description}{task_str}"
+            )
+
+
+@mission_app.command("split")
+def mission_split(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to add a step to (e.g. mission_20260626_0001).",
+    ),
+    step: str = typer.Option(
+        ...,
+        "--step",
+        "-s",
+        help="Description of the step to add (becomes a task when spawned).",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+) -> None:
+    """Add a step to a mission.
+
+    Each step is a sequential sub-task of the mission. Steps are executed
+    in order — step N+1 can read the artifacts of step N (cross-task
+    artifact sharing). Use ``acp run`` to spawn the actual task for a
+    step once the mission plan is ready.
+    """
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=missions_dir)
+    try:
+        mission = store.add_step(mission_id, step)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        console.print(f"[red]✗[/] failed to add step: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    step_num = len(mission.steps)
+    console.print(f"[green]✓[/] step {step_num} added to mission {mission_id}")
+    console.print(f"  description: {step}")
+    console.print("  status: pending")
+    console.print(
+        f"\n[dim]{step_num} step(s) total. "
+        f"View with `acp mission show --mission {mission_id}`[/]"
+    )
+
+
+@mission_app.command("complete")
+def mission_complete(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to complete (e.g. mission_20260626_0001).",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+) -> None:
+    """Mark a mission as completed.
+
+    All steps must be in a terminal state (completed or failed) before
+    a mission can be completed. Writes a ``mission.completed`` event to
+    the mission's event log.
+    """
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=missions_dir)
+    try:
+        mission = store.complete(mission_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        console.print(f"[red]✗[/] cannot complete: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        console.print(f"[red]✗[/] completion failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    completed = sum(1 for s in mission.steps if s.status == "completed")
+    failed = sum(1 for s in mission.steps if s.status == "failed")
+    console.print(f"[green]✓[/] mission {mission_id} completed")
+    console.print(f"  steps: {completed} completed, {failed} failed, {len(mission.steps)} total")
+    console.print(f"  event: mission.completed written to {store.events_path(mission_id)}")
+
+
+# --------------------------------------------------------------------------- #
 # v0.6.5 (M10): acp serve — FastAPI HTTP control layer.
 # --------------------------------------------------------------------------- #
 

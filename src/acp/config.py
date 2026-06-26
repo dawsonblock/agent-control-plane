@@ -303,6 +303,28 @@ class FederationSection(BaseModel):
     servers: list[FederationServerConfig] = Field(default_factory=list)
 
 
+class MissionSection(BaseModel):
+    """Mission layer settings (v0.7.0 / M14).
+
+    A mission groups sequential task runs toward an overarching goal
+    (e.g. "Migrate to React 19"). When ``missions_dir`` is set, ACP
+    stores mission state under ``<missions_dir>/<mission_id>/``.
+
+    - ``missions_dir``: root directory for mission data. Defaults to
+      ``data/missions`` relative to cwd. Each mission gets a subdirectory
+      containing ``mission.yaml`` (canonical state) and ``events.jsonl``
+      (mission-level event log with ``mission.created`` /
+      ``mission.completed`` events).
+    """
+
+    missions_dir: Path = Path("data/missions")
+
+    @field_validator("missions_dir")
+    @classmethod
+    def _absolute(cls, v: Path) -> Path:
+        return v.expanduser().resolve()
+
+
 class EvidenceSection(BaseModel):
     """Evidence integrity settings (v0.5.6).
 
@@ -361,6 +383,7 @@ class RepoConfig(BaseModel):
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
     skills: SkillsSection = Field(default_factory=SkillsSection)
     federation: FederationSection = Field(default_factory=FederationSection)
+    mission: MissionSection = Field(default_factory=MissionSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

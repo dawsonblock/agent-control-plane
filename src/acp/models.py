@@ -102,6 +102,11 @@ class EventType(str, Enum):
     # federation.tool_called  = a federated tool was called (proxied by ACP)
     FEDERATION_DISCOVERED = "federation.discovered"
     FEDERATION_TOOL_CALLED = "federation.tool_called"
+    # v0.7.0 (M14): Mission layer — group tasks into larger epics.
+    # mission.created   = a new mission was defined from a YAML goal
+    # mission.completed = all steps in a mission finished (approved or aborted)
+    MISSION_CREATED = "mission.created"
+    MISSION_COMPLETED = "mission.completed"
 
 
 class RiskLevel(str, Enum):
@@ -216,6 +221,61 @@ class ReviewResult(BaseModel):
     concerns: list[str] = Field(default_factory=list)
     summary: str = ""
     hard_block: bool = False  # True → auto-reject regardless of risk wording
+
+
+# --------------------------------------------------------------------------- #
+# Mission layer (v0.7.0 / M14)
+# --------------------------------------------------------------------------- #
+
+
+class MissionStatus(str, Enum):
+    """Lifecycle of a mission. A mission groups sequential tasks toward a goal."""
+
+    CREATED = "created"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+
+class MissionStep(BaseModel):
+    """One step in a mission — becomes a single ACP task run when spawned.
+
+    Steps are sequential: step N+1 can read the artifacts of step N (cross-
+    task artifact sharing, Phase 5.2). A step is ``pending`` until ACP
+    spawns a task for it, ``running`` while that task is active, and
+    ``completed``/``failed`` once the task reaches a terminal state.
+    """
+
+    description: str
+    task_id: str = ""  # filled in when acp spawns the task for this step
+    status: str = "pending"  # pending | running | completed | failed
+
+
+class Mission(BaseModel):
+    """A mission — an overarching goal split into sequential task runs.
+
+    A mission is defined from a YAML goal (e.g. "Migrate to React 19").
+    ACP splits it into ordered :class:`MissionStep` entries, each of which
+    becomes a single task run. The mission directory
+    ``data/missions/<mission_id>/`` holds ``mission.yaml`` (canonical
+    state) and ``events.jsonl`` (mission-level event log).
+    """
+
+    mission_id: str
+    goal: str
+    description: str = ""
+    repo_name: str
+    repo_path: Path
+    base_branch: str = "main"
+    steps: list[MissionStep] = Field(default_factory=list)
+    status: MissionStatus = MissionStatus.CREATED
+    created_at: str = Field(default_factory=_utcnow_iso)
+    updated_at: str = Field(default_factory=_utcnow_iso)
+    completed_at: str = ""
+
+    def touch(self) -> None:
+        """Stamp updated_at. Call after any status change."""
+        self.updated_at = _utcnow_iso()
 
 
 # --------------------------------------------------------------------------- #
