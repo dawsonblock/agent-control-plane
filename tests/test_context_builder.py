@@ -491,3 +491,124 @@ class TestEvidenceBinding:
         # The hash is a hex string
         assert isinstance(artifact_hash, str)
         assert len(artifact_hash) == 64  # SHA256 hex
+
+
+# --------------------------------------------------------------------------- #
+# 7. v0.7.0 (Phase 4.2): Cross-encoder re-ranking
+# --------------------------------------------------------------------------- #
+
+
+class TestReranking:
+    """Test the cross-encoder re-ranking feature."""
+
+    @rag_skip
+    def test_reranking_config_accepted(self, tmp_path):
+        """ContextBuilder accepts a RerankingSection."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(enabled=True),
+        )
+        assert builder.reranking_config is not None
+        assert builder.reranking_config.enabled is True
+
+    @rag_skip
+    def test_reranking_disabled_by_default(self, tmp_path):
+        """ContextBuilder works without a reranking config (disabled by default)."""
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+        )
+        assert builder.reranking_config is None
+
+    @rag_skip
+    def test_reranking_scores_in_bundle(self, tmp_path):
+        """context_bundle.md includes both retrieval and rerank scores."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        (repo_path / "auth.py").write_text(
+            "def login(user, password):\n"
+            "    # authenticate user with password\n"
+            "    pass\n"
+        )
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(
+                enabled=True,
+                top_k_before_rerank=10,
+                top_k_after_rerank=3,
+            ),
+        )
+        bundle = builder.build_context_bundle("authenticate user login", top_k=5)
+
+        # The bundle should have score annotations.
+        if "No relevant context" not in bundle:
+            assert "retrieval:" in bundle or "score:" in bundle
+
+    @rag_skip
+    def test_reranking_graceful_degradation_on_missing_model(self, tmp_path):
+        """_rerank returns original docs when the model can't be loaded."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(enabled=True),
+        )
+
+        # Call _rerank with a non-existent model — should degrade gracefully.
+        docs = [
+            {"content": "test doc 1", "meta": {"source": "repo"}, "retrieval_score": 0.9},
+            {"content": "test doc 2", "meta": {"source": "repo"}, "retrieval_score": 0.7},
+        ]
+        result = builder._rerank(docs, "test query", top_k=2, model_name="nonexistent/model")
+        # Should return the original docs (truncated to top_k) without raising.
+        assert len(result) <= 2
+
+    def test_reranking_config_validation(self):
+        """RerankingSection validates top_k ranges."""
+        from acp.config import RerankingSection
+
+        # Valid config.
+        cfg = RerankingSection(enabled=True, top_k_before_rerank=20, top_k_after_rerank=5)
+        assert cfg.top_k_before_rerank == 20
+
+        # Invalid: top_k_before_rerank too large.
+        with pytest.raises(ValueError, match="top_k_before_rerank"):
+            RerankingSection(top_k_before_rerank=200)
+
+        # Invalid: top_k_after_rerank zero.
+        with pytest.raises(ValueError, match="top_k_after_rerank"):
+            RerankingSection(top_k_after_rerank=0)

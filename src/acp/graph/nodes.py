@@ -669,6 +669,25 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.REVIEWING
     ctx.store.save(state["task"])
+
+    # v0.7.0 (Phase 1.3): Fast pre-TruffleHog hard-block scan. If a
+    # known secret pattern or very high-entropy string is detected,
+    # emit review.secret_hard_block BEFORE the full review runs. This
+    # provides an early, cryptographically-bound signal that the diff
+    # contains a likely secret — even before TruffleHog verifies it.
+    if cfg.review.block_secret_leaks:
+        from acp.review.secret_scanner import detect_hard_block_secrets
+        hard_blocks = detect_hard_block_secrets(state["diff"].patch)
+        if hard_blocks:
+            ctx.events.write(
+                EventType.REVIEW_SECRET_HARD_BLOCK,
+                {
+                    "finding_count": len(hard_blocks),
+                    "kinds": sorted({f.kind for f in hard_blocks}),
+                    "line_numbers": [f.line_no for f in hard_blocks],
+                },
+            )
+
     review = review_diff(
         diff=state["diff"],
         command_results=state["command_results"],

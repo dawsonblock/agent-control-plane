@@ -1251,6 +1251,102 @@ def memory_search(
             console.print(f"  valid_at: {fact['valid_at']}")
 
 
+@memory_app.command("prune")
+def memory_prune(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    older_than_days: int = typer.Option(
+        90,
+        "--older-than-days",
+        help="Only prune nodes superseded more than this many days ago (default: 90).",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--no-dry-run",
+        help="When True (default), only report what would be pruned. "
+             "Use --no-dry-run to actually delete nodes.",
+    ),
+) -> None:
+    """Prune superseded nodes from the Graphiti/FalkorDB knowledge graph.
+
+    Over time, Graphiti accumulates superseded facts — old versions of
+    truths that have been replaced by newer ones. This command identifies
+    nodes that have been superseded for more than --older-than-days and
+    optionally deletes them, preventing unbounded knowledge graph growth.
+
+    By default, runs in --dry-run mode (reports only, no deletion).
+    Use --no-dry-run to actually delete nodes.
+
+    Requires:
+      - ``uv sync --extra memory`` (graphiti-core[falkordb])
+      - FalkorDB running: ``docker run -p 6379:6379 falkordb/falkordb``
+    """
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    group_id = cfg.memory.graphiti_group_id
+
+    try:
+        from acp.memory.graphiti_client import prune_superseded_nodes
+    except ImportError as exc:
+        console.print(
+            f"[red]✗[/] graphiti-core not installed: {exc}\n"
+            f"  Install with: uv sync --extra memory"
+        )
+        raise typer.Exit(code=1) from exc
+
+    mode_label = "dry-run" if dry_run else "DELETE"
+    console.print(
+        f"[bold]ACP memory prune[/] · mode={mode_label} · "
+        f"older_than_days={older_than_days}"
+    )
+
+    try:
+        result = prune_superseded_nodes(
+            group_id=group_id,
+            older_than_days=older_than_days,
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/] prune failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    found = result["found"]
+    pruned = result["pruned"]
+    nodes = result["nodes"]
+
+    if found == 0:
+        console.print("[green]✓[/] no superseded nodes found (graph is clean)")
+        return
+
+    console.print(
+        f"[yellow]![/] found {found} superseded node(s) "
+        f"older than {older_than_days} days"
+    )
+    for node in nodes[:20]:  # show first 20
+        console.print(
+            f"  node: {node['node_id']} · "
+            f"superseded {node['days_superseded']} days ago"
+        )
+    if len(nodes) > 20:
+        console.print(f"  ... and {len(nodes) - 20} more")
+
+    if dry_run:
+        console.print(
+            "\n[dim]Dry run — no nodes deleted. "
+            "Use --no-dry-run to actually prune.[/]"
+        )
+    else:
+        console.print(f"\n[green]✓[/] pruned {pruned} node(s) from FalkorDB")
+
+
 # --------------------------------------------------------------------------- #
 # v0.7.0 (M14): acp mission — group tasks into larger epics.
 # --------------------------------------------------------------------------- #

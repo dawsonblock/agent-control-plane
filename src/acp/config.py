@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from acp.models import RiskLevel
 
@@ -272,19 +272,49 @@ class ExecutorSection(BaseModel):
 
 
 class FederationServerConfig(BaseModel):
-    """Configuration for a single MCP server (v0.6.9).
+    """Configuration for a single MCP server (v0.6.9, extended v0.7.0).
 
     - ``name``: server name for identification in events and prompts.
-    - ``command``: the command to spawn the MCP server (e.g.
-      ``["python", "-m", "my_mcp_server"]``).
-    - ``env``: optional environment variables for the server process.
+    - ``transport``: the transport type — ``"stdio"`` (default, v0.6.9),
+      ``"http"`` (v0.7.0 Phase 3.1), or ``"sse"`` (v0.7.0 Phase 3.1).
+    - ``command``: the command to spawn the MCP server (stdio only).
+    - ``url``: the server URL (http/sse only).
+    - ``headers``: optional HTTP headers (http/sse only).
+    - ``env``: optional environment variables for the server process (stdio).
     - ``timeout_seconds``: per-request timeout (default 30).
     """
 
     name: str
-    command: list[str]
+    transport: str = "stdio"
+    command: list[str] = Field(default_factory=list)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = 30
+
+    @field_validator("transport")
+    @classmethod
+    def _validate_transport(cls, v: str) -> str:
+        allowed = ("stdio", "http", "sse")
+        if v not in allowed:
+            raise ValueError(
+                f"federation transport='{v}' is not valid. "
+                f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_transport_fields(self) -> FederationServerConfig:
+        """Ensure the right fields are present for the chosen transport."""
+        if self.transport == "stdio" and not self.command:
+            raise ValueError(
+                f"federation server '{self.name}': stdio transport requires 'command'"
+            )
+        if self.transport in ("http", "sse") and not self.url:
+            raise ValueError(
+                f"federation server '{self.name}': {self.transport} transport requires 'url'"
+            )
+        return self
 
 
 class FederationSection(BaseModel):

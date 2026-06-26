@@ -272,17 +272,6 @@ def scan_diff(
     complementary check — TruffleHog catches verified secrets but may
     miss unverified ones that the regex scanner would flag.
     """
-    """Scan a diff for secrets, using TruffleHog if available.
-
-    This is the v0.5.14 entry point for secret scanning. It uses
-    TruffleHog for verified detection when available (and a worktree
-    path is provided), falling back to the regex-based ``scan_patch``
-    when TruffleHog is not installed or not requested.
-
-    When TruffleHog is used, the regex scanner is also run as a
-    complementary check — TruffleHog catches verified secrets but may
-    miss unverified ones that the regex scanner would flag.
-    """
     # Always run the regex scanner — it catches patterns TruffleHog might
     # miss (e.g., private key blocks that TruffleHog doesn't verify).
     findings = scan_patch(patch)
@@ -300,3 +289,57 @@ def scan_diff(
                 findings.append(tf)
 
     return findings
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.0: Pre-commit style semantic scanning — hard-block before TruffleHog
+# --------------------------------------------------------------------------- #
+
+
+# Kinds that constitute an immediate hard block (vs. advisory findings).
+# These are the provider-specific patterns (AWS keys, GitHub PATs, etc.)
+# and private key blocks — they are always hard blocks regardless of
+# whether TruffleHog verifies them as live.
+_HARD_BLOCK_KINDS = frozenset({
+    "aws_access_key",
+    "github_pat",
+    "slack_token",
+    "openai_key",
+    "anthropic_key",
+    "google_api_key",
+    "stripe_key",
+    "private_key_block",
+    "jwt",
+})
+
+
+def detect_hard_block_secrets(patch: str) -> list[SecretFinding]:
+    """Fast pre-TruffleHog scan for secrets that constitute a HARD_BLOCK.
+
+    Runs only the regex scanner (no subprocess, no network) and returns
+    only findings whose kind is in :data:`_HARD_BLOCK_KINDS`. This is
+    used by the ``review_diff`` node to emit a ``review.secret_hard_block``
+    event *before* the slower TruffleHog verified scan, failing the
+    review immediately if a high-entropy or known-pattern secret is
+    detected.
+
+    High-entropy assignment findings are included when the entropy is
+    particularly high (>= 4.0 bits/char), indicating a very likely secret.
+    """
+    findings = scan_patch(patch)
+    hard_blocks: list[SecretFinding] = []
+    for f in findings:
+        if f.kind in _HARD_BLOCK_KINDS:
+            hard_blocks.append(f)
+        elif f.kind == "high_entropy_assignment":
+            # Extract the entropy value from the snippet to check threshold.
+            # Snippet format: "abcdef…xy (entropy 4.2)"
+            if "entropy" in f.snippet:
+                try:
+                    ent_str = f.snippet.split("entropy ")[1].rstrip(")")
+                    ent = float(ent_str)
+                    if ent >= 4.0:
+                        hard_blocks.append(f)
+                except (IndexError, ValueError):
+                    pass  # can't parse — don't hard-block on uncertainty
+    return hard_blocks

@@ -1,10 +1,9 @@
 """MCP client — discover and call tools from federated MCP servers.
 
 This module implements a minimal MCP client that communicates with MCP
-servers over stdio (the standard MCP transport for local processes).
-It does NOT require the ``mcp`` PyPI package — it uses the JSON-RPC
-protocol directly over subprocess stdin/stdout, keeping ACP's
-dependency surface minimal.
+servers over stdio (the standard MCP transport for local processes),
+HTTP, or SSE. It does NOT require the ``mcp`` PyPI package — it uses
+the JSON-RPC protocol directly, keeping ACP's dependency surface minimal.
 
 MCP protocol reference: https://modelcontextprotocol.io/specification
 
@@ -13,20 +12,27 @@ Supported operations:
   - ``tools/list``: discover available tools
   - ``tools/call``: invoke a tool with arguments
 
-Each MCP server is a subprocess that speaks JSON-RPC 2.0 over
-stdin/stdout. The server is spawned on demand and kept alive for the
-duration of the ACP run.
+v0.6.9: stdio transport only (subprocess stdin/stdout).
+v0.7.0 (Phase 3.1): pluggable transports via :mod:`acp.federation.transport`.
+  - stdio: subprocess over stdin/stdout (original)
+  - http: JSON-RPC over HTTP POST
+  - sse: JSON-RPC over Server-Sent Events
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from acp.federation.transport import (
+    MCPError,
+    Transport,
+    create_transport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,25 +68,24 @@ class MCPToolResult:
     duration_ms: int = 0
 
 
-class MCPError(Exception):
-    """Raised when an MCP server operation fails."""
-
-
 # --------------------------------------------------------------------------- #
-# MCP Client — single server connection over stdio
+# MCP Client — single server connection via pluggable transport
 # --------------------------------------------------------------------------- #
 
 
 class MCPClient:
-    """JSON-RPC 2.0 client for a single MCP server over stdio.
+    """JSON-RPC 2.0 client for a single MCP server.
 
-    The server is a subprocess spawned from a command (e.g.
-    ``["python", "-m", "my_mcp_server"]``). Communication is via
-    newline-delimited JSON-RPC messages on stdin/stdout.
+    v0.6.9: stdio transport only (subprocess stdin/stdout).
+    v0.7.0: accepts any :class:`Transport` implementation (stdio, http, sse).
+
+    The client handles the JSON-RPC protocol (request IDs, method names,
+    response parsing). The transport handles the wire-level details
+    (subprocess pipes, HTTP requests, SSE streams).
 
     Usage::
 
-        client = MCPClient("my-server", ["python", "-m", "my_mcp_server"])
+        client = MCPClient("my-server", transport)
         client.start()
         tools = client.list_tools()
         result = client.call_tool("search", {"query": "auth"})
@@ -90,46 +95,37 @@ class MCPClient:
     def __init__(
         self,
         name: str,
-        command: list[str],
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
-        timeout_seconds: int = 30,
+        transport: Transport,
     ) -> None:
         self.name = name
-        self.command = command
-        self.cwd = cwd
-        self.env = env
-        self.timeout_seconds = timeout_seconds
-        self._proc: subprocess.Popen | None = None
+        self._transport = transport
         self._request_id = 0
         self._initialized = False
 
-    def start(self) -> None:
-        """Spawn the MCP server subprocess and perform the initialize handshake."""
-        if self._proc is not None:
-            return  # already started
-        try:
-            self._proc = subprocess.Popen(
-                self.command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(self.cwd) if self.cwd else None,
-                env=self.env,
-                text=True,
-                bufsize=1,
-            )
-        except FileNotFoundError as exc:
-            raise MCPError(
-                f"MCP server '{self.name}': command not found: {self.command[0]}"
-            ) from exc
+    @classmethod
+    def from_config(
+        cls,
+        config: dict[str, Any],
+        cwd: Path | None = None,
+    ) -> MCPClient:
+        """Create an MCPClient from a server config dict.
 
-        # Perform the MCP initialize handshake.
+        Uses :func:`create_transport` to build the appropriate transport
+        based on the ``transport`` field (default: "stdio").
+        """
+        transport = create_transport(config, cwd=cwd)
+        return cls(name=config.get("name", ""), transport=transport)
+
+    def start(self) -> None:
+        """Start the transport and perform the MCP initialize handshake."""
+        if self._initialized:
+            return
+        self._transport.start()
         try:
             self._send_request("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "acp", "version": "0.6.9"},
+                "clientInfo": {"name": "acp", "version": "0.7.0"},
             })
             self._initialized = True
         except MCPError as exc:
@@ -139,19 +135,14 @@ class MCPClient:
             ) from exc
 
     def stop(self) -> None:
-        """Terminate the MCP server subprocess."""
-        if self._proc is None:
-            return
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
-        finally:
-            self._proc = None
-            self._initialized = False
+        """Stop the transport."""
+        self._transport.stop()
+        self._initialized = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the client is connected and initialized."""
+        return self._initialized and self._transport.is_connected
 
     def list_tools(self) -> list[MCPTool]:
         """Discover available tools from the server.
@@ -225,7 +216,7 @@ class MCPClient:
             )
 
     # ------------------------------------------------------------------ #
-    # Internal: JSON-RPC transport
+    # Internal: JSON-RPC protocol
     # ------------------------------------------------------------------ #
 
     def _send_request(
@@ -233,9 +224,7 @@ class MCPClient:
         method: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Send a JSON-RPC request and read the response."""
-        if self._proc is None or self._proc.poll() is not None:
-            raise MCPError(f"MCP server '{self.name}' is not running")
+        """Send a JSON-RPC request via the transport and return the result."""
         self._request_id += 1
         request = {
             "jsonrpc": "2.0",
@@ -243,41 +232,7 @@ class MCPClient:
             "method": method,
             "params": params,
         }
-        line = json.dumps(request) + "\n"
-        assert self._proc.stdin is not None
-        self._proc.stdin.write(line)
-        self._proc.stdin.flush()
-
-        # Read the response line with a timeout.
-        assert self._proc.stdout is not None
-        # Use a simple readline with poll-based timeout.
-        import select
-        ready, _, _ = select.select(
-            [self._proc.stdout], [], [], self.timeout_seconds,
-        )
-        if not ready:
-            raise MCPError(
-                f"MCP server '{self.name}' timed out after {self.timeout_seconds}s "
-                f"waiting for response to '{method}'"
-            )
-        response_line = self._proc.stdout.readline()
-        if not response_line:
-            raise MCPError(
-                f"MCP server '{self.name}' closed connection during '{method}'"
-            )
-        try:
-            response = json.loads(response_line)
-        except json.JSONDecodeError as exc:
-            raise MCPError(
-                f"MCP server '{self.name}' returned invalid JSON: {exc}"
-            ) from exc
-        if "error" in response:
-            error = response["error"]
-            raise MCPError(
-                f"MCP server '{self.name}' error on '{method}': "
-                f"{error.get('message', error)}"
-            )
-        return response.get("result", {})
+        return self._transport.send_request(request)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,31 +266,52 @@ class FederationManager:
 
         Each dict has:
           - ``name``: server name (for identification in events/prompts)
+          - ``transport``: "stdio" (default), "http", or "sse"
           - ``command``: list of strings — the command to spawn the server
-          - ``env``: optional dict of environment variables
+            (stdio only)
+          - ``url``: server URL (http/sse only)
+          - ``headers``: optional HTTP headers (http/sse only)
+          - ``env``: optional dict of environment variables (stdio)
           - ``timeout_seconds``: optional per-request timeout (default 30)
         """
         self._clients: dict[str, MCPClient] = {}
+        self._transport_types: dict[str, str] = {}
         for s in servers:
             name = s.get("name", "")
-            command = s.get("command", [])
-            if not name or not command:
+            if not name:
                 continue
-            self._clients[name] = MCPClient(
-                name=name,
-                command=list(command),
-                cwd=cwd,
-                env=s.get("env"),
-                timeout_seconds=s.get("timeout_seconds", 30),
-            )
+            transport_type = s.get("transport", "stdio")
+            # For stdio, command is required. For http/sse, url is required.
+            if transport_type == "stdio" and not s.get("command"):
+                continue
+            if transport_type in ("http", "sse") and not s.get("url"):
+                continue
+            try:
+                self._clients[name] = MCPClient.from_config(s, cwd=cwd)
+                self._transport_types[name] = transport_type
+            except MCPError as exc:
+                logger.warning("Failed to create MCP client '%s': %s", name, exc)
 
-    def start_all(self) -> None:
-        """Start all configured MCP servers."""
+    def start_all(self) -> dict[str, dict[str, Any]]:
+        """Start all configured MCP servers.
+
+        Returns a dict mapping server name → connection metadata for
+        servers that connected successfully. This metadata is intended
+        to be used by the caller to emit ``federation.server_connected``
+        events.
+        """
+        connected: dict[str, dict[str, Any]] = {}
         for client in self._clients.values():
             try:
                 client.start()
+                transport_type = self._transport_types.get(client.name, "stdio")
+                connected[client.name] = {
+                    "transport": transport_type,
+                    "server_name": client.name,
+                }
             except MCPError as exc:
                 logger.warning("Failed to start MCP server '%s': %s", client.name, exc)
+        return connected
 
     def stop_all(self) -> None:
         """Stop all MCP servers."""
