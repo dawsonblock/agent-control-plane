@@ -20,6 +20,7 @@ under ``data/missions/``, never under ``data/runs/``, so ``acp verify``
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -246,3 +247,49 @@ class MissionStore:
             },
         )
         return mission
+
+    # ------------------------------------------------------------------ #
+    # Cross-task artifact sharing (Phase 5.2)
+    # ------------------------------------------------------------------ #
+
+    def get_parent_task_id(self, mission_id: str, step_index: int) -> str:
+        """Return the task_id of the preceding mission step.
+
+        For step 0, returns "" (no parent). For step N > 0, returns the
+        task_id recorded on step N-1 (or "" if that step hasn't been
+        spawned yet).
+        """
+        if step_index <= 0:
+            return ""
+        mission = self.load(mission_id)
+        if step_index > len(mission.steps):
+            return ""
+        return mission.steps[step_index - 1].task_id
+
+
+def compute_parent_artifact_hash(
+    runs_root: Path | str,
+    parent_task_id: str,
+) -> str | None:
+    """Compute the sha256 of a parent task's diff.patch artifact.
+
+    This is the cross-task artifact binding (Phase 5.2): when Task B is
+    spawned as the next step in a mission, its ``evidence.finalized``
+    event includes this hash, cryptographically proving that Task B was
+    generated with knowledge of Task A's output — even before Task A is
+    merged to main.
+
+    Returns ``None`` if the parent task's diff.patch doesn't exist (e.g.
+    the parent task failed before capturing a diff, or the task_id is
+    empty).
+    """
+    if not parent_task_id:
+        return None
+    diff_patch = Path(runs_root) / parent_task_id / "artifacts" / "diff.patch"
+    if not diff_patch.is_file():
+        return None
+    h = hashlib.sha256()
+    with diff_patch.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()

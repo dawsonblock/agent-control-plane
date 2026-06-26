@@ -148,6 +148,26 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
             finalize_payload["task_json_hash"] = task_json_hash
         if evidence_config_hash is not None:
             finalize_payload["evidence_config_hash"] = evidence_config_hash
+
+        # v0.7.0 (M14): Cross-task artifact sharing. When this task is
+        # part of a mission and has a parent task (the preceding step),
+        # bind the parent's diff.patch hash into evidence.finalized.
+        # This proves Task B was generated with knowledge of Task A's
+        # output, even before Task A is merged to main.
+        parent_task_id = state.get("parent_task_id", "")
+        if parent_task_id:
+            from acp.missions.store import compute_parent_artifact_hash
+            parent_hash = compute_parent_artifact_hash(
+                runs_root=state.get("runs_root", ctx.store.root),
+                parent_task_id=parent_task_id,
+            )
+            if parent_hash is not None:
+                finalize_payload["parent_task_id"] = parent_task_id
+                finalize_payload["parent_artifact_hash"] = parent_hash
+                mission_id = state.get("mission_id", "")
+                if mission_id:
+                    finalize_payload["mission_id"] = mission_id
+
         ctx.events.write(EventType.EVIDENCE_FINALIZED, finalize_payload)
 
         # 5. Rewrite the manifest so its chain head includes evidence.finalized.

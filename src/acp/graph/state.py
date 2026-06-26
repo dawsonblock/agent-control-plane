@@ -91,6 +91,16 @@ class ACPState(TypedDict, total=False):
     # Used to detect when the agent is repeating the same fix.
     repair_fingerprints: list[str]
 
+    # --- v0.7.0 (M14): Mission context — cross-task artifact sharing ---- #
+    # When a task is spawned as part of a mission step, this holds the
+    # context needed to bind the task to the mission and reference the
+    # preceding task's artifacts. The parent_task_id is the task that ran
+    # for the previous mission step; its diff.patch hash is included in
+    # evidence.finalized, proving this task was generated sequentially.
+    mission_id: str                 # the mission this task belongs to
+    mission_step_index: int         # which step in the mission (0-based)
+    parent_task_id: str             # preceding step's task_id ("" for step 0)
+
 
 def initial_state(
     *,

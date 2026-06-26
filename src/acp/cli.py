@@ -91,8 +91,24 @@ def run(
         "--runs-root",
         help="Root directory of run data (default: data/runs).",
     ),
+    mission_id: str = typer.Option(
+        "",
+        "--mission",
+        help="Mission id to link this task to (e.g. mission_20260626_0001).",
+    ),
+    mission_step: int = typer.Option(
+        -1,
+        "--mission-step",
+        help="Step index (0-based) in the mission this task fulfills.",
+    ),
 ) -> None:
-    """Run one coding task in an isolated worktree and write an evidence report."""
+    """Run one coding task in an isolated worktree and write an evidence report.
+
+    When --mission and --mission-step are provided, the task is linked to
+    a mission step. The evidence.finalized event will include the hash of
+    the preceding step's diff.patch, proving sequential generation (M14
+    cross-task artifact sharing).
+    """
     try:
         cfg = load_repo_config(config)
     except FileNotFoundError as exc:
@@ -102,6 +118,25 @@ def run(
         f"[bold]ACP run[/] · repo={cfg.repo.name} · "
         f"agent={cfg.agent.default} · task={task!r}"
     )
+
+    # v0.7.0 (M14): Resolve mission context for cross-task artifact sharing.
+    parent_task_id = ""
+    if mission_id:
+        from acp.missions.store import MissionStore, is_valid_mission_id
+        if not is_valid_mission_id(mission_id):
+            console.print(f"[red]✗[/] invalid mission id: {mission_id!r}")
+            raise typer.Exit(code=1)
+        store = MissionStore(missions_dir=cfg.mission.missions_dir)
+        try:
+            parent_task_id = store.get_parent_task_id(mission_id, mission_step)
+        except FileNotFoundError:
+            console.print(f"[red]✗[/] mission not found: {mission_id}")
+            raise typer.Exit(code=1) from None
+        console.print(
+            f"  mission: {mission_id} (step {mission_step})"
+            + (f" → parent: {parent_task_id}" if parent_task_id else "")
+        )
+
     try:
         from acp.graph.workflow import run_workflow
         result = run_workflow(
@@ -109,6 +144,9 @@ def run(
             user_request=task,
             runs_root=runs_root,
             vault_root=vault,
+            mission_id=mission_id,
+            mission_step_index=mission_step,
+            parent_task_id=parent_task_id,
         )
         status = result.get("status")
         report_path = result.get("report_path")

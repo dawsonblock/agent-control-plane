@@ -347,6 +347,9 @@ def run_workflow(
     vault_root: Path | str,
     agent_factory: Callable[[Any], AgentProtocol] | None = None,
     task_id: str | None = None,
+    mission_id: str = "",
+    mission_step_index: int = -1,
+    parent_task_id: str = "",
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
 
@@ -357,6 +360,11 @@ def run_workflow(
     When ``config.evidence.signing_key_path`` is set, events are Ed25519-signed.
     When ``config.evidence.durable_store`` is set, events are dual-written to
     a SQLite database in addition to the JSONL log.
+
+    v0.7.0 (M14): When ``mission_id`` and ``parent_task_id`` are provided,
+    the task is linked to a mission step. The ``evidence.finalized`` event
+    will include ``parent_artifact_hash`` — the sha256 of the preceding
+    step's ``diff.patch`` — proving sequential generation.
     """
     store = TaskStore(runs_root=runs_root)
     # Ensure vault_root exists — the workflow writes a vault note at the end
@@ -446,6 +454,11 @@ def run_workflow(
     }
     if task_id is not None:
         state["preallocated_task_id"] = task_id
+    # v0.7.0 (M14): Mission context for cross-task artifact sharing.
+    if mission_id:
+        state["mission_id"] = mission_id
+        state["mission_step_index"] = mission_step_index
+        state["parent_task_id"] = parent_task_id
     result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
 
     # Close the durable store if it was opened.

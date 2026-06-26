@@ -9,6 +9,7 @@ Tests the mission feature:
   5. Event hash chain — mission events form a valid tamper-evident chain
   6. CLI acp mission — create, list, show, split, complete commands
   7. Mission ID validation — rejects path-shaped ids
+  8. Cross-task artifact sharing — parent diff.patch hash binding
 """
 
 from __future__ import annotations
@@ -614,3 +615,153 @@ def test_is_valid_mission_id():
     assert not is_valid_mission_id("mission_2026062_0001")
     assert not is_valid_mission_id("")
     assert not is_valid_mission_id("mission_20260626_0001/")
+
+
+# --------------------------------------------------------------------------- #
+# 8. Cross-task artifact sharing (Phase 5.2)
+# --------------------------------------------------------------------------- #
+
+
+def test_get_parent_task_id_step_zero(tmp_path):
+    """Step 0 has no parent — returns empty string."""
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+    assert store.get_parent_task_id(mid, 0) == ""
+
+
+def test_get_parent_task_id_with_preceding_step(tmp_path):
+    """Step N returns the task_id of step N-1."""
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+    store.add_step(mid, "Step B")
+    store.mark_step_running(mid, 0, "task_20260626_0001")
+    assert store.get_parent_task_id(mid, 1) == "task_20260626_0001"
+
+
+def test_get_parent_task_id_no_task_spawned(tmp_path):
+    """Returns empty string if the preceding step hasn't spawned a task yet."""
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+    store.add_step(mid, "Step B")
+    # Step 0 exists but no task_id assigned yet.
+    assert store.get_parent_task_id(mid, 1) == ""
+
+
+def test_compute_parent_artifact_hash_exists(tmp_path):
+    """compute_parent_artifact_hash returns sha256 of the parent's diff.patch."""
+    from acp.missions.store import compute_parent_artifact_hash
+    import hashlib
+
+    runs_root = tmp_path / "runs"
+    parent_dir = runs_root / "task_20260626_0001" / "artifacts"
+    parent_dir.mkdir(parents=True)
+    diff_content = b"diff --git a/foo.py b/foo.py\n+print('hello')\n"
+    (parent_dir / "diff.patch").write_bytes(diff_content)
+
+    result = compute_parent_artifact_hash(runs_root, "task_20260626_0001")
+    assert result is not None
+    assert result == hashlib.sha256(diff_content).hexdigest()
+
+
+def test_compute_parent_artifact_hash_missing(tmp_path):
+    """compute_parent_artifact_hash returns None when diff.patch doesn't exist."""
+    from acp.missions.store import compute_parent_artifact_hash
+
+    runs_root = tmp_path / "runs"
+    # No task directory at all.
+    assert compute_parent_artifact_hash(runs_root, "task_20260626_0001") is None
+
+
+def test_compute_parent_artifact_hash_empty_id(tmp_path):
+    """compute_parent_artifact_hash returns None for empty parent_task_id."""
+    from acp.missions.store import compute_parent_artifact_hash
+
+    assert compute_parent_artifact_hash(tmp_path, "") is None
+
+
+def test_finalize_evidence_includes_parent_hash(tmp_path):
+    """evidence.finalized event includes parent_artifact_hash when mission context is set."""
+    from acp.missions.store import compute_parent_artifact_hash
+    from acp.events import EventWriter
+    from acp.models import EventType
+
+    # Create a parent task with a diff.patch artifact.
+    runs_root = tmp_path / "runs"
+    parent_artifacts = runs_root / "task_20260626_0001" / "artifacts"
+    parent_artifacts.mkdir(parents=True)
+    diff_content = b"diff --git a/foo.py b/foo.py\n+print('hello')\n"
+    (parent_artifacts / "diff.patch").write_bytes(diff_content)
+
+    # Create a child task run dir with a minimal event log.
+    child_dir = runs_root / "task_20260626_0002"
+    child_dir.mkdir(parents=True)
+    (child_dir / "artifacts").mkdir()
+    events = EventWriter("task_20260626_0002", child_dir)
+
+    # Simulate what finalize_evidence does: compute parent hash and write
+    # evidence.finalized with it in the payload.
+    parent_hash = compute_parent_artifact_hash(runs_root, "task_20260626_0001")
+    assert parent_hash is not None
+
+    payload = {
+        "task_id": "task_20260626_0002",
+        "artifact_content_hash": "abc123",
+        "parent_task_id": "task_20260626_0001",
+        "parent_artifact_hash": parent_hash,
+        "mission_id": "mission_20260626_0001",
+    }
+    events.write(EventType.EVIDENCE_FINALIZED, payload)
+
+    # Verify the event was written with the parent hash.
+    all_events = events.read_all()
+    finalized = [e for e in all_events if e.type == EventType.EVIDENCE_FINALIZED]
+    assert len(finalized) == 1
+    assert finalized[0].payload["parent_task_id"] == "task_20260626_0001"
+    assert finalized[0].payload["parent_artifact_hash"] == parent_hash
+    assert finalized[0].payload["mission_id"] == "mission_20260626_0001"
+
+
+def test_finalize_evidence_no_parent_hash_without_mission(tmp_path):
+    """evidence.finalized event has no parent_artifact_hash when no mission context is set."""
+    from acp.events import EventWriter
+    from acp.models import EventType
+
+    runs_root = tmp_path / "runs"
+    task_dir = runs_root / "task_20260626_0001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "artifacts").mkdir()
+    events = EventWriter("task_20260626_0001", task_dir)
+
+    # No mission context — no parent hash.
+    payload = {
+        "task_id": "task_20260626_0001",
+        "artifact_content_hash": "abc123",
+    }
+    events.write(EventType.EVIDENCE_FINALIZED, payload)
+
+    all_events = events.read_all()
+    finalized = [e for e in all_events if e.type == EventType.EVIDENCE_FINALIZED]
+    assert len(finalized) == 1
+    assert "parent_artifact_hash" not in finalized[0].payload
+    assert "parent_task_id" not in finalized[0].payload
