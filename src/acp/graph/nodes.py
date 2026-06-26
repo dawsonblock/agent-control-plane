@@ -355,20 +355,82 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
 
 
 def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
-    """M1/M3: build the prompt only. M6 will prepend a Haystack context bundle."""
+    """M6: Build context bundle via Haystack RAG, fallback to M1 prompt-only.
+
+    When the ``rag`` optional dependency group is installed
+    (``uv sync --extra rag``), this node:
+
+      1. Instantiates :class:`ContextBuilder` with the repo path, vault root,
+         and context config.
+      2. Builds a Markdown context bundle from the top-K retrieved chunks.
+      3. Writes it to ``artifacts/context_bundle.md`` (automatically hash-chained
+         and signed by the evidence engine).
+      4. Passes the bundle path to ``write_prompt`` so the agent sees it.
+
+    When the ``rag`` extra is NOT installed, it gracefully falls back to the
+    M1 behavior (no context bundle, prompt-only). The ``context.built`` event
+    records ``haystack: False`` in this case so the evidence trail is honest
+    about what context the agent received.
+    """
     cfg = state["config"]
+
+    context_bundle_path = None
+    haystack_active = False
+    retrieved_count = 0
+
+    try:
+        from acp.context.context_builder import ContextBuilder
+
+        # 1. Instantiate the RAG engine
+        builder = ContextBuilder(
+            repo_path=state["repo_path"],
+            vault_root=state["vault_root"],
+            context_config=cfg.context,
+        )
+
+        # 2. Build the markdown context bundle
+        bundle_content = builder.build_context_bundle(state["user_request"])
+
+        # 3. Write it to the artifacts directory so it becomes verifiable evidence
+        artifact_dir = state["artifacts_dir"]
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        context_bundle_path = artifact_dir / "context_bundle.md"
+        context_bundle_path.write_text(bundle_content)
+
+        haystack_active = True
+        # Count the retrieved chunks for the event payload
+        retrieved_count = bundle_content.count("## [")
+
+    except ImportError:
+        # The `rag` extra isn't installed. Gracefully fall back to no-context.
+        pass
+
+    # 4. Write the agent prompt (passing the bundle path if RAG succeeded)
     prompt_path = write_prompt(
         user_request=state["user_request"],
         worktree_path=state["worktree_path"],
         artifact_dir=state["artifacts_dir"],
         repo_config=cfg,
-        context_bundle_path=None,
+        context_bundle_path=context_bundle_path,
     )
+
+    # 5. Record the transition in the cryptographic event log
     ctx.events.write(
         EventType.CONTEXT_BUILT,
-        {"prompt_path": str(prompt_path), "haystack": False},
+        {
+            "prompt_path": str(prompt_path),
+            "haystack": haystack_active,
+            "retrieved_documents": retrieved_count,
+            "context_bundle_path": (
+                str(context_bundle_path) if context_bundle_path else None
+            ),
+        },
     )
-    return {"prompt_path": prompt_path}
+
+    return {
+        "prompt_path": prompt_path,
+        "context_bundle_path": context_bundle_path,
+    }
 
 
 def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:

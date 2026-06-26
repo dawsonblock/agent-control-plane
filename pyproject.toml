@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-control-plane"
-version = "0.6.0"
+version = "0.6.1"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -47,6 +47,13 @@ crypto = [
 dev = [
     "pytest>=8.2,<9",
     "cryptography>=43,<46",
+]
+# v0.6.0 (M6): Local Haystack RAG context retrieval.
+# Optional — install with: uv sync --extra rag
+# Uses sentence-transformers for local, air-gapped embeddings (no API calls).
+rag = [
+    "haystack-ai>=2.0,<3",
+    "sentence-transformers>=2.2,<3",
 ]
 
 [project.scripts]
