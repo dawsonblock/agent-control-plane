@@ -12,7 +12,6 @@ from acp.models import (
     ReviewResult,
     RiskLevel,
     Task,
-    TaskStatus,
 )
 from acp.vault.frontmatter import build_frontmatter
 

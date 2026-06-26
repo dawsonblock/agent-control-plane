@@ -21,23 +21,18 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from acp.cli import app
 from acp.config import AgentSection, CommandsSection, DurableMode, EvidenceSection, RepoConfig, RepoSection, ReviewSection
 from acp.evidence.manifest import (
-    compute_report_hash,
-    compute_task_json_hash,
     read_evidence_config,
     verify_evidence_manifest,
 )
-from acp.events import EventWriter
 from acp.graph.workflow import run_workflow
-from acp.models import Event, EventType, TaskStatus
+from acp.models import Event, EventType
 from acp.store import TaskStore
 
 

@@ -35,7 +35,7 @@ from acp.config import RepoConfig
 from acp.gitops.diff import DiffCapture
 from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
-from acp.review.secret_scanner import scan_diff, scan_patch
+from acp.review.secret_scanner import scan_diff
 from acp.testing.runner import all_passed, validation_ran, validation_status
 
 # --- path heuristics (lowercase substring matches) ------------------------- #

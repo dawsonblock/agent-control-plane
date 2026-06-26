@@ -96,7 +96,6 @@ def _rerender_vault_note_from_state(
         review_path = run_dir / "artifacts" / "review.json"
         review = ReviewResult(risk="low", recommendation="merge")
         if review_path.is_file():
-            import json
             try:
                 review = ReviewResult.model_validate_json(review_path.read_text())
             except Exception:  # noqa: BLE001
@@ -136,7 +135,7 @@ def _rerender_vault_note_from_state(
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[yellow]![/] vault note re-render failed: {exc}")
-        console.print(f"    event log is authoritative; note may be stale")
+        console.print("    event log is authoritative; note may be stale")
 
 
 # --------------------------------------------------------------------------- #
@@ -571,10 +570,10 @@ def _verify_impl(
             import json as _json
             task_json_id = _json.loads(task_json_path.read_text()).get("task_id")
         except Exception:
-            console.print(f"[red]✗[/] task.json is malformed — cannot read task_id")
+            console.print("[red]✗[/] task.json is malformed — cannot read task_id")
             all_ok = False
     else:
-        console.print(f"[yellow]![/] task.json not found — cannot verify task_id binding")
+        console.print("[yellow]![/] task.json not found — cannot verify task_id binding")
         all_ok = False
     if task_json_id is not None and task_json_id != task_id:
         console.print(f"[red]✗[/] task ID mismatch: CLI='{task_id}' vs task.json='{task_json_id}'")
@@ -603,12 +602,12 @@ def _verify_impl(
             all_ok = False
             has_malformed_events = True
         elif not events:
-            console.print(f"[red]✗[/] event log is empty")
+            console.print("[red]✗[/] event log is empty")
             all_ok = False
         elif verify_event_chain(events):
             console.print(f"[green]✓[/] event chain valid ({len(events)} events, head={events[-1].hash[:16]}...)")
         else:
-            console.print(f"[red]✗[/] event chain INVALID — log has been tampered with")
+            console.print("[red]✗[/] event chain INVALID — log has been tampered with")
             all_ok = False
 
         # Check every event's task_id matches the CLI task_id.
@@ -657,10 +656,10 @@ def _verify_impl(
         if has_evidence_finalized:
             # v0.5.10+ run — the manifest is required evidence. Its absence
             # means the evidence set has been tampered with.
-            console.print(f"[red]✗[/] evidence manifest not found — required for runs with evidence.finalized")
+            console.print("[red]✗[/] evidence manifest not found — required for runs with evidence.finalized")
             all_ok = False
         else:
-            console.print(f"[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
+            console.print("[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
     else:
         try:
             import json as _json
@@ -672,7 +671,7 @@ def _verify_impl(
                 )
                 all_ok = False
         except Exception:
-            console.print(f"[red]✗[/] evidence manifest is malformed JSON")
+            console.print("[red]✗[/] evidence manifest is malformed JSON")
             all_ok = False
 
         if verify_evidence_manifest(run_dir, deep=deep):
@@ -683,8 +682,8 @@ def _verify_impl(
             )
         else:
             console.print(
-                f"[red]✗[/] evidence manifest INVALID — artifacts, report, task.json, "
-                f"event log, or manifest_hash don't match"
+                "[red]✗[/] evidence manifest INVALID — artifacts, report, task.json, "
+                "event log, or manifest_hash don't match"
             )
             all_ok = False
 
@@ -693,11 +692,11 @@ def _verify_impl(
     # misleading, since it only applies to the parsed subset, not the full log.
     if public_key is not None:
         if not events_path.is_file():
-            console.print(f"[red]✗[/] cannot verify signatures without event log")
+            console.print("[red]✗[/] cannot verify signatures without event log")
             all_ok = False
         elif has_malformed_events:
             console.print(
-                f"[red]✗[/] signature verification skipped because event log is malformed"
+                "[red]✗[/] signature verification skipped because event log is malformed"
             )
             all_ok = False
         else:
@@ -707,15 +706,15 @@ def _verify_impl(
                     console.print(f"[red]✗[/] public key must be exactly 32 bytes, got {len(pk_bytes)}")
                     all_ok = False
                 elif not events:
-                    console.print(f"[red]✗[/] cannot verify signatures on empty event log")
+                    console.print("[red]✗[/] cannot verify signatures on empty event log")
                     all_ok = False
                 elif verify_event_signatures(events, pk_bytes):
                     console.print(f"[green]✓[/] Ed25519 signatures valid ({len(events)} events signed)")
                 else:
-                    console.print(f"[red]✗[/] Ed25519 signature verification FAILED")
+                    console.print("[red]✗[/] Ed25519 signature verification FAILED")
                     all_ok = False
             except ImportError:
-                console.print(f"[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto")
+                console.print("[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto")
             except Exception as exc:
                 console.print(f"[red]✗[/] signature verification error: {exc}")
                 all_ok = False
@@ -728,21 +727,21 @@ def _verify_impl(
     if has_lifecycle:
         if not lifecycle_path.is_file():
             console.print(
-                f"[red]✗[/] lifecycle manifest not found — required when lifecycle "
-                f"events (approve/reject/promote) exist in the event log"
+                "[red]✗[/] lifecycle manifest not found — required when lifecycle "
+                "events (approve/reject/promote) exist in the event log"
             )
             all_ok = False
         elif verify_lifecycle_manifest(run_dir):
-            console.print(f"[green]✓[/] lifecycle manifest valid")
+            console.print("[green]✓[/] lifecycle manifest valid")
         else:
-            console.print(f"[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
+            console.print("[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
             all_ok = False
     elif lifecycle_path.is_file():
         # Lifecycle manifest exists but no lifecycle events — verify it's valid.
         if verify_lifecycle_manifest(run_dir):
-            console.print(f"[green]✓[/] lifecycle manifest valid")
+            console.print("[green]✓[/] lifecycle manifest valid")
         else:
-            console.print(f"[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
+            console.print("[red]✗[/] lifecycle manifest INVALID — lifecycle events don't match")
             all_ok = False
 
     # Report final approval state if present.
@@ -754,9 +753,9 @@ def _verify_impl(
         )
         rejected = any(e.type == _ET.HUMAN_REJECTED for e in events)
         if approved:
-            console.print(f"[dim]Final approval state: approved[/]")
+            console.print("[dim]Final approval state: approved[/]")
         elif rejected:
-            console.print(f"[dim]Final approval state: rejected[/]")
+            console.print("[dim]Final approval state: rejected[/]")
 
     # 5. Durable store consistency check — when --check-durable is passed
     # or when durable_mode=required, verify that the SQLite store contains
@@ -923,7 +922,6 @@ def approve(
     notes cannot be approved again.
     """
     from acp.vault.approval import can_approve
-    from acp.vault.obsidian_writer import rerender_vault_note
 
     _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
@@ -994,9 +992,9 @@ def approve(
 
     console.print(f"[green]✓[/] task {task_id} approved by {approver or 'unknown'}")
     console.print(f"  vault note: {note_path}")
-    console.print(f"  memory_status: active")
+    console.print("  memory_status: active")
     console.print(f"  event: human.approved written to {store.events_path(task_id)}")
-    console.print(f"  lifecycle evidence written — `acp verify` remains valid")
+    console.print("  lifecycle evidence written — `acp verify` remains valid")
 
 
 @app.command()
@@ -1038,9 +1036,6 @@ def reject(
     written first; if that fails, the vault note is untouched. The note is
     then re-rendered from the event log + report.
     """
-    from acp.vault.approval import can_approve
-    from acp.vault.obsidian_writer import rerender_vault_note
-
     _require_valid_task_id(task_id)
     store = TaskStore(runs_root=runs_root)
     run_dir = store.run_dir(task_id)
@@ -1058,17 +1053,17 @@ def reject(
     # Cannot reject an already-approved, already-rejected, or archived task.
     if task.status == TaskStatus.APPROVED:
         console.print(
-            f"[red]✗[/] task is already approved — cannot reject after approval."
+            "[red]✗[/] task is already approved — cannot reject after approval."
         )
         raise typer.Exit(code=1)
     if task.status == TaskStatus.REJECTED:
         console.print(
-            f"[red]✗[/] task is already rejected — cannot reject again."
+            "[red]✗[/] task is already rejected — cannot reject again."
         )
         raise typer.Exit(code=1)
     if task.status == TaskStatus.ARCHIVED:
         console.print(
-            f"[red]✗[/] task is already archived — cannot reject again."
+            "[red]✗[/] task is already archived — cannot reject again."
         )
         raise typer.Exit(code=1)
 
@@ -1114,9 +1109,9 @@ def reject(
 
     console.print(f"[green]✓[/] task {task_id} rejected by {rejecter or 'unknown'}")
     console.print(f"  vault note: {note_path}")
-    console.print(f"  memory_status: archived")
+    console.print("  memory_status: archived")
     console.print(f"  event: human.rejected written to {store.events_path(task_id)}")
-    console.print(f"  lifecycle evidence written — `acp verify` remains valid")
+    console.print("  lifecycle evidence written — `acp verify` remains valid")
 
 
 @app.command("list")
@@ -1592,7 +1587,7 @@ def serve(
     console.print(f"[bold]ACP API server[/] · config={config}")
     console.print(f"  listening on http://{host}:{port}")
     console.print(f"  docs at http://{host}:{port}/docs")
-    console.print(f"  [dim]Ctrl+C to stop[/]")
+    console.print("  [dim]Ctrl+C to stop[/]")
 
     import uvicorn
     uvicorn.run(

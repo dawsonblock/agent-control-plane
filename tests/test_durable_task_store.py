@@ -12,10 +12,8 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 
 from acp.evidence.durable_task_store import DurableTaskStore
 from acp.models import Task, TaskStatus

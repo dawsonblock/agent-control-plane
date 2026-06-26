@@ -20,9 +20,8 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
 
-from acp.agents.base import AgentProtocol, AgentResult
+from acp.agents.base import AgentResult
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter
 from acp.graph.state import initial_state

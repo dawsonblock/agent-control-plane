@@ -20,7 +20,7 @@ from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, R
 from acp.events import EventWriter
 from acp.graph.nodes import NodeContext
 from acp.graph.state import ACPState
-from acp.graph.workflow import build_workflow, node_error_handler
+from acp.graph.workflow import node_error_handler
 from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 

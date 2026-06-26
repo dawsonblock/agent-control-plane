@@ -14,7 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -25,7 +24,6 @@ from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture
 from acp.models import (
     EventType,
-    MemoryStatus,
     Recommendation,
     ReviewResult,
     RiskLevel,

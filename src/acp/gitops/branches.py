@@ -23,7 +23,7 @@ def create_branch(repo_path: Path, base_branch: str, branch_name: str) -> str:
     if branch_name in [h.name for h in repo.heads]:
         raise FileExistsError(f"branch already exists: {branch_name}")
     base_commit = repo.heads[base_branch].commit
-    new_head = repo.create_head(branch_name, commit=base_commit)
+    repo.create_head(branch_name, commit=base_commit)
     return base_commit.hexsha
 
 

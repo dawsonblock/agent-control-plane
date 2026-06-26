@@ -25,9 +25,8 @@ from pathlib import Path
 import yaml
 
 from acp.gitops.diff import DiffCapture
-from acp.models import EventType, MemoryStatus, ReviewResult, Task, TaskStatus
+from acp.models import EventType, MemoryStatus, ReviewResult, Task
 from acp.vault.frontmatter import (
-    Frontmatter,
     build_frontmatter,
     parse_frontmatter,
 )

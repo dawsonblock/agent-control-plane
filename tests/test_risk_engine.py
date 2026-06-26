@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from acp.models import Recommendation, RiskLevel
-from acp.review.risk import RiskCategory, RiskEngine, RiskSignal
+from acp.review.risk import RiskCategory, RiskEngine
 
 
 def test_empty_engine_is_low_risk() -> None:

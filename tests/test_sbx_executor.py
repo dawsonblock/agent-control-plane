@@ -15,15 +15,12 @@ Tests the 8 acceptance criteria from the v0.5.13 spec:
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from acp.config import ExecutorSection, RepoConfig, RepoSection
-from acp.executor.sbx import SandboxInfo, SbxExecutor, SbxNotInstalledError
+from acp.config import ExecutorSection
+from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.gitops.diff import capture_diff_from_remote
 from acp.models import EventType
 
@@ -244,7 +241,7 @@ class TestDiffFromSandboxRemote:
 
         # Simulate the sandbox remote: create a bare repo and push a branch.
         remote_path = tmp_path / "sandbox-remote"
-        remote_repo = Repo.init(str(remote_path), bare=True)
+        Repo.init(str(remote_path), bare=True)
 
         # Add the bare repo as a remote named "sandbox-acp-test".
         repo.create_remote("sandbox-acp-test", str(remote_path))
@@ -294,7 +291,7 @@ class TestDiffFromSandboxRemote:
 
         # Create a bare remote and push main to it (no changes).
         remote_path = tmp_path / "sandbox-remote"
-        remote_repo = Repo.init(str(remote_path), bare=True)
+        Repo.init(str(remote_path), bare=True)
         repo.create_remote("sandbox-acp-test", str(remote_path))
         repo.git.push("sandbox-acp-test", "main:refs/heads/main")
         repo.git.fetch("sandbox-acp-test")

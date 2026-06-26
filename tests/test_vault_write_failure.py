@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter

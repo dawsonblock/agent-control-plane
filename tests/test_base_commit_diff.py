@@ -16,7 +16,7 @@ from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, R
 from acp.events import EventWriter
 from acp.graph.state import initial_state
 from acp.graph.workflow import build_workflow
-from acp.models import EventType, TaskStatus
+from acp.models import EventType
 from acp.store import TaskStore
 
 

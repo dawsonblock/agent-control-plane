@@ -232,7 +232,6 @@ def scan_with_trufflehog(
         verified = obj.get("Verified", False)
         raw_secret = obj.get("Raw", "")
         source_meta = obj.get("SourceMetadata", {})
-        source_name = source_meta.get("SourceName", "")
         line_no = 0
 
         # Extract line number from source metadata if available.

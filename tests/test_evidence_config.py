@@ -24,7 +24,6 @@ from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfi
 from acp.events import verify_event_signatures
 from acp.evidence.durable_store import DurableEventStore
 from acp.graph.workflow import run_workflow
-from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 
 

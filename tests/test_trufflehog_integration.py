@@ -18,13 +18,11 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from acp.config import ReviewSection
 from acp.review.secret_scanner import (
     SecretFinding,
     scan_diff,
-    scan_patch,
     scan_with_trufflehog,
     trufflehog_installed,
 )

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from acp.gitops.diff import DiffCapture
-from acp.models import Recommendation, ReviewResult, RiskLevel, Task, TaskStatus
+from acp.models import Recommendation, ReviewResult, RiskLevel, Task
 from acp.vault.obsidian_writer import write_vault_note
 
 

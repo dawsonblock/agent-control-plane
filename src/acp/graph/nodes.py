@@ -39,7 +39,7 @@ from acp.evidence.manifest import (
     write_evidence_manifest,
 )
 from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
-from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean, remove_worktree
+from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean
 from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff

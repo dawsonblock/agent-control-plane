@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,7 +27,7 @@ from acp.events import EventWriter, verify_event_chain
 from acp.models import EventType, Task, TaskStatus
 from acp.store import TaskStore
 from acp.vault.approval import approve_vault_note, can_approve, reject_vault_note
-from acp.vault.frontmatter import build_frontmatter, parse_frontmatter
+from acp.vault.frontmatter import parse_frontmatter
 from acp.gitops.diff import DiffCapture
 from acp.models import Recommendation, ReviewResult, RiskLevel
 

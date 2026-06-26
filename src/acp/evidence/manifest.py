@@ -158,7 +158,6 @@ def _should_ignore_path(path: Path, relative_to: Path) -> bool:
     and glob patterns (e.g. ``*.pyc``).
     """
     import fnmatch
-    rel = str(path.relative_to(relative_to))
     parts = path.parts
     for pattern in DEFAULT_IGNORE_PATTERNS:
         # Check if any path component matches the pattern.
@@ -689,7 +688,6 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
         "sandbox.failed", "sandbox.stopped",
     }
     post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
-    has_lifecycle = any(e.type.value in lifecycle_types for e in events)
 
     # The manifest's event_chain_head covers the run phase only — up to
     # evidence.finalized. Post-run events (evidence.report_bound, lifecycle,

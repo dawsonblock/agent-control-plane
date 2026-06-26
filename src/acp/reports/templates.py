@@ -335,7 +335,7 @@ def render_failure_report(
     lines.append("")
     lines.append("## Failure")
     lines.append("")
-    lines.append(f"The task failed before producing a diff or review.")
+    lines.append("The task failed before producing a diff or review.")
     lines.append("")
     lines.append(f"**Error:** {error}")
     lines.append("")

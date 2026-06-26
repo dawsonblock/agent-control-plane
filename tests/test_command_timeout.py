@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
-from acp.models import CommandResult
 from acp.testing.runner import run_commands
 
 

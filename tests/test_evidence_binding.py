@@ -29,10 +29,10 @@ from typer.testing import CliRunner
 from acp.cli import app
 from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
 from acp.evidence.durable_store import DurableEventStore
-from acp.evidence.manifest import compute_artifact_content_hash, verify_evidence_manifest, write_evidence_manifest
-from acp.events import EventWriter, verify_event_chain
+from acp.evidence.manifest import verify_evidence_manifest
+from acp.events import EventWriter
 from acp.graph.workflow import run_workflow
-from acp.models import Event, EventType, TaskStatus
+from acp.models import Event, EventType
 from acp.store import TaskStore
 
 
@@ -458,7 +458,7 @@ review: {{}}
 
 def test_diff_ignores_pycache(tmp_path):
     """capture_diff should not include __pycache__/*.pyc files."""
-    from acp.gitops.diff import capture_diff, _matches_ignore_pattern
+    from acp.gitops.diff import _matches_ignore_pattern
 
     # Test the pattern matcher directly.
     assert _matches_ignore_pattern("__pycache__/foo.pyc")
@@ -513,7 +513,7 @@ def test_durable_required_mode_fails_closed(tmp_path):
     store.root.mkdir(parents=True, exist_ok=True)
     run_dir = store.run_dir("task_20260624_0001")
     run_dir.mkdir(parents=True, exist_ok=True)
-    events = EventWriter("task_20260624_0001", run_dir)
+    EventWriter("task_20260624_0001", run_dir)
 
     # Point durable_store at a path inside a file (will fail on init).
     cfg = RepoConfig(
@@ -554,7 +554,7 @@ def test_durable_disabled_mode_never_opens_sqlite(tmp_path):
     )
 
     os.environ["ACP_TEST"] = "1"
-    result = run_workflow(
+    run_workflow(
         config=cfg,
         user_request="test",
         runs_root=tmp_path / "runs",
@@ -904,10 +904,10 @@ def test_durable_required_mode_fails_closed_on_write_failure(tmp_path):
     store.root.mkdir(parents=True, exist_ok=True)
     run_dir = store.run_dir("task_20260624_0001")
     run_dir.mkdir(parents=True, exist_ok=True)
-    events = EventWriter("task_20260624_0001", run_dir)
+    EventWriter("task_20260624_0001", run_dir)
 
     # Initialize the DB first so it exists.
-    with DurableEventStore(db_path) as db:
+    with DurableEventStore(db_path):
         pass
 
     # Now corrupt the DB file so writes will fail.

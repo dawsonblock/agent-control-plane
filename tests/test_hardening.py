@@ -25,9 +25,9 @@ from typer.testing import CliRunner
 from acp.cli import app
 from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter, verify_event_chain, verify_event_signatures
-from acp.evidence.manifest import build_evidence_manifest, verify_evidence_manifest, write_evidence_manifest
+from acp.evidence.manifest import build_evidence_manifest, verify_evidence_manifest
 from acp.graph.workflow import run_workflow
-from acp.models import Event, EventType, Task, TaskStatus
+from acp.models import EventType, Task, TaskStatus
 from acp.store import TaskStore
 
 
@@ -313,7 +313,7 @@ def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_wor
     cfg = _config(disposable_repo.path)
 
     # Build a custom agent factory that returns an agent whose run() returns None.
-    from acp.agents.base import AgentResult, AgentProtocol
+    from acp.agents.base import AgentProtocol
     class NoneAgent(AgentProtocol):
         name = "none-agent"
         def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds):

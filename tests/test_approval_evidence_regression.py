@@ -19,7 +19,6 @@ These pin the exact bugs the verdict called out so they cannot come back:
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -686,7 +685,6 @@ def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_wor
     The finalize step should still re-render the failure report with the
     final event timeline + manifest hash.
     """
-    import json
     from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
     from acp.events import EventWriter
     from acp.graph.state import initial_state
