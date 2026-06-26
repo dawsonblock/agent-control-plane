@@ -457,6 +457,38 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     }
 
 
+def _parse_and_emit_subtasks(
+    state: dict[str, Any],
+    ctx: NodeContext,
+    agent_result: Any,
+) -> None:
+    """v0.7.0 (Phase 3.2): Parse agent stdout for sub-task spawn requests.
+
+    If the agent emitted any ``ACP_SPAWN_SUBTASK:`` lines, parse them and
+    emit ``task.subtask_spawned`` events in the signed event log. This
+    is a no-op when the agent didn't request any sub-tasks.
+    """
+    try:
+        stdout_path = getattr(agent_result, "stdout_path", None)
+        if stdout_path is None or not Path(stdout_path).is_file():
+            return
+        stdout = Path(stdout_path).read_text(encoding="utf-8", errors="replace")
+        if "ACP_SPAWN_SUBTASK" not in stdout:
+            return  # fast path — no spawn requests
+        from acp.subtask import parse_subtask_requests, emit_subtask_events
+        cfg = state["config"]
+        max_subtasks = getattr(cfg.agent, "max_subtasks", 5)
+        result = parse_subtask_requests(
+            stdout,
+            parent_task_id=state["task_id"],
+            max_subtasks=max_subtasks,
+        )
+        if result.requests:
+            emit_subtask_events(result.requests, ctx.events)
+    except Exception:  # noqa: BLE001
+        pass  # best-effort — sub-task parsing must never crash the run
+
+
 def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
@@ -520,6 +552,8 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 "summary": agent_result.summary,
             },
         )
+        # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+        _parse_and_emit_subtasks(state, ctx, agent_result)
         # After the agent finishes, fetch the sandbox remote and create a
         # temporary worktree from it so the existing test runner and diff
         # capture operate on the agent's actual changes.
@@ -569,6 +603,10 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "summary": agent_result.summary,
         },
     )
+
+    # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+    _parse_and_emit_subtasks(state, ctx, agent_result)
+
     return {"agent_result": agent_result}
 
 
@@ -687,6 +725,28 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                     "line_numbers": [f.line_no for f in hard_blocks],
                 },
             )
+
+    # v0.7.0 (Phase 2.2): Egress proxy violation check. If the proxy
+    # was enabled and detected access to domains not in the allowlist,
+    # add a review concern so the human reviewer is alerted.
+    if cfg.proxy.enabled:
+        from acp.egress import has_egress_violations, analyze_egress_log
+        artifacts_dir = state["artifacts_dir"]
+        if has_egress_violations(artifacts_dir):
+            violations = analyze_egress_log(
+                artifacts_dir / cfg.proxy.log_artifact,
+                cfg.proxy.allowed_domains,
+            )
+            if violations:
+                ctx.events.write(
+                    EventType.NODE_FAILED,
+                    {
+                        "node": "review_diff",
+                        "reason": "egress_violation",
+                        "violation_count": len(violations),
+                        "domains": [v.domain for v in violations],
+                    },
+                )
 
     review = review_diff(
         diff=state["diff"],

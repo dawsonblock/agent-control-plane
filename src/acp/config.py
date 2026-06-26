@@ -54,6 +54,10 @@ class AgentSection(BaseModel):
     timeout_seconds: int = 1800
     max_repair_attempts: int = 5
     command_template: str = ""  # used by M2's CLIAgent
+    # v0.7.0 (Phase 3.2): Maximum sub-tasks an agent can spawn per run.
+    # Bounds the number of task.subtask_spawned events to prevent
+    # unbounded spawning. Default: 5.
+    max_subtasks: int = 5
     # v0.6.0: Autonomous mode repair loop settings.
     # When dynamic_test_generation is True, the repair prompt instructs
     # the agent to write tests if the RiskEngine flags TESTS_MISSING.
@@ -448,12 +452,21 @@ class EvidenceSection(BaseModel):
     - ``public_key_path``: path to a file containing a 32-byte raw Ed25519
       public key. Used by ``acp verify`` to check event signatures. Not
       required for signing (only for verification).
+
+    - ``task_store_primary``: v0.7.0 (Phase 1.1) feature flag controlling
+      which store is the primary source of truth for task state.
+      ``"json"`` (default): task.json files are primary, SQLite is a
+      derived index. ``"sqlite"``: SQLite becomes primary, task.json
+      becomes a projection. When ``"sqlite"``, ``durable_store`` must
+      also be set. This flag enables gradual migration — operators can
+      enable it per-repo without changing code.
     """
 
     signing_key_path: Path | None = None
     public_key_path: Path | None = None
     durable_store: Path | None = None
     durable_mode: DurableMode = DurableMode.BEST_EFFORT
+    task_store_primary: str = "json"
 
     @field_validator("signing_key_path", "public_key_path", "durable_store")
     @classmethod
@@ -461,6 +474,27 @@ class EvidenceSection(BaseModel):
         if v is None:
             return None
         return v.expanduser().resolve()
+
+    @field_validator("task_store_primary")
+    @classmethod
+    def _validate_task_store_primary(cls, v: str) -> str:
+        allowed = ("json", "sqlite")
+        if v not in allowed:
+            raise ValueError(
+                f"evidence.task_store_primary='{v}' is not valid. "
+                f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_sqlite_primary_needs_store(self) -> EvidenceSection:
+        """When task_store_primary is 'sqlite', durable_store must be set."""
+        if self.task_store_primary == "sqlite" and self.durable_store is None:
+            raise ValueError(
+                "evidence.task_store_primary='sqlite' requires "
+                "evidence.durable_store to be set."
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- #

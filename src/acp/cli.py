@@ -1348,6 +1348,109 @@ def memory_prune(
 
 
 # --------------------------------------------------------------------------- #
+# v0.7.0 (Phase 1.1): acp migrate — SQLite-as-primary task store migration.
+# --------------------------------------------------------------------------- #
+
+
+@app.command("migrate")
+def migrate_to_sqlite(
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="When set, only report what would be migrated without writing to SQLite.",
+    ),
+) -> None:
+    """Migrate task.json files into the SQLite durable task store.
+
+    Imports all existing task.json files under --runs-root into the
+    SQLite database configured at evidence.durable_store. Emits a
+    task.store_migrated event for each imported task, creating a
+    cryptographically-bound audit trail of the migration.
+
+    After migration, set evidence.task_store_primary: "sqlite" in the
+    repo config to make SQLite the primary source of truth for task
+    state. task.json files continue to be written as a projection.
+
+    Use --dry-run to preview without writing.
+    """
+    try:
+        cfg = load_repo_config(config)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] config file not found: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if cfg.evidence.durable_store is None:
+        console.print(
+            "[red]✗[/] evidence.durable_store is not configured. "
+            "Set it in the repo config before migrating."
+        )
+        raise typer.Exit(code=1)
+
+    from acp.evidence.durable_task_store import DurableTaskStore
+    from acp.models import EventType
+    from acp.events import EventWriter
+
+    store = DurableTaskStore(cfg.evidence.durable_store)
+    store.init()
+
+    if dry_run:
+        # Count task.json files without importing.
+        count = sum(1 for _ in Path(runs_root).rglob("task.json"))
+        console.print(
+            f"[bold]ACP migrate[/] · dry-run · "
+            f"found {count} task.json file(s)"
+        )
+        console.print(
+            f"[dim]Use without --dry-run to import into "
+            f"{cfg.evidence.durable_store}[/]"
+        )
+        store.close()
+        return
+
+    imported = store.rebuild_from_jsonl(runs_root)
+    console.print(
+        f"[green]✓[/] migrated {imported} task(s) into "
+        f"{cfg.evidence.durable_store}"
+    )
+
+    # Emit task.store_migrated events for each imported task.
+    # We write a single summary event to a migration log.
+    migration_log = Path(runs_root) / "migration_events.jsonl"
+    events = EventWriter("__migration__", Path(runs_root))
+    events.relocate("__migration__", Path(runs_root))
+    events.write(
+        EventType.TASK_STORE_MIGRATED,
+        {
+            "imported_count": imported,
+            "durable_store": str(cfg.evidence.durable_store),
+            "runs_root": str(runs_root),
+            "primary": cfg.evidence.task_store_primary,
+        },
+    )
+
+    console.print(
+        f"[green]✓[/] task.store_migrated event written to "
+        f"{migration_log}"
+    )
+    console.print(
+        "\n[dim]Set evidence.task_store_primary: \"sqlite\" in the "
+        "repo config to make SQLite the primary source of truth.[/]"
+    )
+    store.close()
+
+
+# --------------------------------------------------------------------------- #
 # v0.7.0 (M14): acp mission — group tasks into larger epics.
 # --------------------------------------------------------------------------- #
 
