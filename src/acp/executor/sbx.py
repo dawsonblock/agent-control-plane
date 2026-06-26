@@ -89,6 +89,10 @@ class SbxExecutor:
         self._sandbox_remote: str = ""
         self._sbx_version: str = ""
 
+    @property
+    def backend_name(self) -> str:
+        return "docker_sbx"
+
     # ------------------------------------------------------------------ #
     # Utility: sbx presence + version
     # ------------------------------------------------------------------ #

@@ -576,6 +576,68 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "worktree_path": sandbox_wt_path if sandbox_wt_path.exists() else state["repo_path"],
         }
 
+    # --- openhands backend: run OpenHands in headless mode ----------------- #
+    if cfg.executor.backend == "openhands":
+        from acp.executor.openhands import OpenHandsExecutor
+        executor = OpenHandsExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"openhands:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+            },
+        )
+
+        try:
+            agent_result = executor.start(
+                task_id=state["task_id"],
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "run_agent",
+                    "reason": "openhands failed to start",
+                    "detail": str(exc),
+                },
+            )
+            ctx.events.write(
+                EventType.AGENT_FINISHED,
+                {
+                    "agent": f"openhands:{cfg.executor.agent}",
+                    "exit_code": -1,
+                    "summary": f"openhands failed: {exc}",
+                },
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # OpenHands works directly in the worktree — no remote to fetch.
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
     # --- worktree backend (default): current behavior --------------------- #
     agent = ctx.agent_factory(cfg)
     task.status = TaskStatus.EXECUTING
