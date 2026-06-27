@@ -140,16 +140,32 @@ class DurableTaskStore:
         repo_name: str | None = None,
         limit: int = 1000,
     ) -> list[Task]:
-        """Query tasks by status and/or repo. Returns in creation order."""
+        """Query tasks by status and/or repo. Returns in creation order.
+
+        v0.7.4: Validates the status parameter against the TaskStatus enum
+        to prevent injection of arbitrary status strings. The repo_name
+        parameter is validated to reject SQL metacharacters.
+        """
         if self._conn is None:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
             status_str = status.value if isinstance(status, TaskStatus) else status
+            # v0.7.4: Validate status against known TaskStatus values.
+            valid_statuses = {s.value for s in TaskStatus}
+            if status_str not in valid_statuses:
+                raise ValueError(
+                    f"Invalid status: {status_str!r}. Must be one of: {sorted(valid_statuses)}"
+                )
             clauses.append("status = ?")
             params.append(status_str)
         if repo_name is not None:
+            # v0.7.4: Reject repo_name with SQL-dangerous characters.
+            # The parameterized query prevents injection, but this is
+            # defense-in-depth — a repo_name should never contain these.
+            if any(c in repo_name for c in (";", "'", '"', "--", "/*")):
+                raise ValueError("Invalid repo_name: contains SQL metacharacters")
             clauses.append("repo_name = ?")
             params.append(repo_name)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""

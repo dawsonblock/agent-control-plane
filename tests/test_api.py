@@ -557,3 +557,196 @@ class TestCORSConfig:
         assert _cors_enabled() is True
         origins = _resolve_cors_origins()
         assert "http://localhost:5173" in origins
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.4: Path traversal protection
+# --------------------------------------------------------------------------- #
+
+
+class TestPathTraversalProtection:
+    """v0.7.4: API endpoints reject paths containing '..'."""
+
+    def test_list_tasks_rejects_traversal(self, tmp_path):
+        """GET /tasks with runs_root containing .. is rejected."""
+        from fastapi import HTTPException
+
+        from acp.api.server import _validate_path_param
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_path_param("data/../etc", "runs_root")
+        assert exc_info.value.status_code == 400
+        assert "directory traversal" in exc_info.value.detail
+
+    def test_validate_path_rejects_empty(self):
+        """Empty path is rejected."""
+        from fastapi import HTTPException
+
+        from acp.api.server import _validate_path_param
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_path_param("", "runs_root")
+        assert exc_info.value.status_code == 400
+
+    def test_validate_path_accepts_normal(self):
+        """Normal relative paths are accepted."""
+        from acp.api.server import _validate_path_param
+
+        result = _validate_path_param("data/runs", "runs_root")
+        assert result is not None
+
+    def test_validate_path_rejects_nested_traversal(self):
+        """Nested .. in path components is rejected."""
+        from fastapi import HTTPException
+
+        from acp.api.server import _validate_path_param
+
+        with pytest.raises(HTTPException):
+            _validate_path_param("data/runs/../../etc/passwd", "runs_root")
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.4: Recursion depth enforcement
+# --------------------------------------------------------------------------- #
+
+
+class TestSubtaskRecursionDepth:
+    """v0.7.4: Subtask spawning is blocked at max recursion depth."""
+
+    def test_recursion_depth_zero_allows_spawn(self):
+        """At depth 0, spawn requests are allowed."""
+        from acp.subtask import parse_subtask_requests
+
+        stdout = "ACP_SPAWN_SUBTASK: Do something\n"
+        result = parse_subtask_requests(stdout, recursion_depth=0)
+        assert len(result.requests) == 1
+
+    def test_recursion_depth_max_blocks_spawn(self):
+        """At max depth, spawn requests are rejected."""
+        from acp.models import MAX_SUBTASK_RECURSION_DEPTH
+        from acp.subtask import parse_subtask_requests
+
+        stdout = "ACP_SPAWN_SUBTASK: Do something\n"
+        result = parse_subtask_requests(stdout, recursion_depth=MAX_SUBTASK_RECURSION_DEPTH)
+        assert len(result.requests) == 0
+
+    def test_recursion_depth_above_max_blocks_spawn(self):
+        """Above max depth, spawn requests are rejected."""
+        from acp.models import MAX_SUBTASK_RECURSION_DEPTH
+        from acp.subtask import parse_subtask_requests
+
+        stdout = "ACP_SPAWN_SUBTASK: Do something\n"
+        result = parse_subtask_requests(stdout, recursion_depth=MAX_SUBTASK_RECURSION_DEPTH + 1)
+        assert len(result.requests) == 0
+
+    def test_recursion_depth_below_max_allows_spawn(self):
+        """Just below max depth, spawn requests are still allowed."""
+        from acp.models import MAX_SUBTASK_RECURSION_DEPTH
+        from acp.subtask import parse_subtask_requests
+
+        stdout = "ACP_SPAWN_SUBTASK: Do something\n"
+        result = parse_subtask_requests(stdout, recursion_depth=MAX_SUBTASK_RECURSION_DEPTH - 1)
+        assert len(result.requests) == 1
+
+    def test_spawn_lines_stripped_even_when_blocked(self):
+        """Spawn lines are stripped from cleaned_stdout even when blocked."""
+        from acp.models import MAX_SUBTASK_RECURSION_DEPTH
+        from acp.subtask import parse_subtask_requests
+
+        stdout = "line1\nACP_SPAWN_SUBTASK: Do something\nline2\n"
+        result = parse_subtask_requests(stdout, recursion_depth=MAX_SUBTASK_RECURSION_DEPTH)
+        assert len(result.requests) == 0
+        assert "ACP_SPAWN_SUBTASK" not in result.cleaned_stdout
+        assert "line1" in result.cleaned_stdout
+        assert "line2" in result.cleaned_stdout
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.4: Egress domain validation
+# --------------------------------------------------------------------------- #
+
+
+class TestEgressDomainValidation:
+    """v0.7.4: EgressLogger rejects malformed domains."""
+
+    def test_empty_domain_rejected(self):
+        """Empty domain is not logged."""
+        from acp.egress import EgressLogger
+
+        logger = EgressLogger()
+        logger.log_request("", method="GET", path="/", status_code=200)
+        assert len(logger.events) == 0
+
+    def test_whitespace_domain_rejected(self):
+        """Whitespace-only domain is not logged."""
+        from acp.egress import EgressLogger
+
+        logger = EgressLogger()
+        logger.log_request("   ", method="GET", path="/", status_code=200)
+        assert len(logger.events) == 0
+
+    def test_control_chars_rejected(self):
+        """Domains with control characters are not logged."""
+        from acp.egress import EgressLogger
+
+        logger = EgressLogger()
+        logger.log_request("evil\x00.com", method="GET", path="/", status_code=200)
+        assert len(logger.events) == 0
+
+    def test_valid_domain_accepted(self):
+        """Valid domains are logged normally."""
+        from acp.egress import EgressLogger
+
+        logger = EgressLogger()
+        logger.log_request("pypi.org", method="GET", path="/", status_code=200)
+        assert len(logger.events) == 1
+        assert logger.events[0].domain == "pypi.org"
+
+    def test_domain_lowercased(self):
+        """Domains are lowercased."""
+        from acp.egress import EgressLogger
+
+        logger = EgressLogger()
+        logger.log_request("PyPI.Org", method="GET", path="/", status_code=200)
+        assert logger.events[0].domain == "pypi.org"
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.4: DurableTaskStore status validation
+# --------------------------------------------------------------------------- #
+
+
+class TestDurableTaskStoreValidation:
+    """v0.7.4: DurableTaskStore validates status and repo_name parameters."""
+
+    def test_invalid_status_rejected(self, tmp_path):
+        """Query with invalid status raises ValueError."""
+        from acp.evidence.durable_task_store import DurableTaskStore
+
+        store = DurableTaskStore(tmp_path / "test.db")
+        store.init()
+        with pytest.raises(ValueError, match="Invalid status"):
+            store.query(status="DROP TABLE tasks;--")
+        store.close()
+
+    def test_repo_name_with_sql_chars_rejected(self, tmp_path):
+        """Query with SQL metacharacters in repo_name raises ValueError."""
+        from acp.evidence.durable_task_store import DurableTaskStore
+
+        store = DurableTaskStore(tmp_path / "test.db")
+        store.init()
+        with pytest.raises(ValueError, match="SQL metacharacters"):
+            store.query(repo_name="test'; DROP TABLE tasks;--")
+        store.close()
+
+    def test_valid_status_accepted(self, tmp_path):
+        """Query with valid TaskStatus works."""
+        from acp.evidence.durable_task_store import DurableTaskStore
+        from acp.models import TaskStatus
+
+        store = DurableTaskStore(tmp_path / "test.db")
+        store.init()
+        # Should not raise.
+        results = store.query(status=TaskStatus.CREATED)
+        assert results == []
+        store.close()

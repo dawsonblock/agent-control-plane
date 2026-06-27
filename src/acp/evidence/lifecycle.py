@@ -344,7 +344,12 @@ def record_lifecycle_event(
                 exc,
             )
 
-    except Exception:
+    except Exception as rollback_exc:
+        # v0.7.4: Log the exception that triggered the rollback at ERROR
+        # level. Previously this was a bare `except Exception:` that
+        # silently swallowed the root cause, making it impossible to
+        # debug why lifecycle transactions were failing.
+        logger.error("lifecycle transaction failed, rolling back: %s", rollback_exc)
         # --- Full rollback: restore ALL evidence files --------------------- #
         # 1. Restore events.jsonl (truncation + hash chain restore).
         events.rollback(event_checkpoint)

@@ -96,8 +96,8 @@ def _check_human_firewall(frontmatter: Frontmatter) -> None:
 
 def _get_graphiti_client(
     *,
-    falkor_host: str = "localhost",
-    falkor_port: int = 6379,
+    falkor_host: str | None = None,
+    falkor_port: int | None = None,
     group_id: str = "",
 ) -> Any:
     """Create a Graphiti client connected to FalkorDB.
@@ -107,9 +107,23 @@ def _get_graphiti_client(
     Operators can override by setting environment variables or extending
     this function.
 
+    v0.7.4: FalkorDB host and port can now be configured via the
+    ``ACP_FALKORDB_HOST`` and ``ACP_FALKORDB_PORT`` environment variables,
+    instead of being hardcoded to localhost:6379. This supports
+    deployments where FalkorDB runs on a separate host (e.g. Docker
+    compose, Kubernetes, remote server).
+
     Raises:
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
     """
+    import os
+
+    # v0.7.4: Allow FalkorDB connection to be configured via env vars.
+    if falkor_host is None:
+        falkor_host = os.environ.get("ACP_FALKORDB_HOST", "localhost")
+    if falkor_port is None:
+        falkor_port = int(os.environ.get("ACP_FALKORDB_PORT", "6379"))
+
     from graphiti_core import Graphiti
     from graphiti_core.driver.falkordb_driver import FalkorDriver
 

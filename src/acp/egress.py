@@ -26,10 +26,13 @@ egress events directly.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,10 +97,26 @@ class EgressLogger:
         status_code: int = 0,
         blocked: bool = False,
     ) -> None:
-        """Record a single egress event."""
+        """Record a single egress event.
+
+        v0.7.4: Validates the domain format before recording. Malformed
+        domains (empty, whitespace-only, or containing control characters)
+        are rejected to prevent log poisoning and ensure the egress analysis
+        is reliable.
+        """
+        # v0.7.4: Basic domain validation — reject empty/malformed domains
+        # that could corrupt the egress analysis or be used for log poisoning.
+        if not domain or not domain.strip():
+            logger.warning("egress: rejecting empty domain in log_request")
+            return
+        domain_clean = domain.strip().lower()
+        # Reject domains with control characters or null bytes.
+        if any(ord(c) < 32 for c in domain_clean):
+            logger.warning("egress: rejecting domain with control characters: %r", domain)
+            return
         self._events.append(
             EgressEvent(
-                domain=domain.lower(),
+                domain=domain_clean,
                 method=method,
                 path=path,
                 status_code=status_code,
