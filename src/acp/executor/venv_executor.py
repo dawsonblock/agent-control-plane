@@ -25,9 +25,9 @@ Configuration (ExecutorSection):
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 from acp.config import ExecutorSection
@@ -54,7 +54,10 @@ class VenvExecutor:
 
     def __init__(self, config: ExecutorSection) -> None:
         self.config = config
-        self._env_info: dict[str, str] = {}
+        self._env_info: dict[str, str] = {
+            "python_version": self._detect_python_version(),
+            "isolated": "true",
+        }
 
     @property
     def backend_name(self) -> str:
@@ -137,8 +140,6 @@ class VenvExecutor:
         # --isolated: don't inherit the host's virtual environment
         # --no-project: don't load pyproject.toml from cwd (use the lockfile)
         # The agent command is appended after `--` so uv doesn't parse it.
-        import shlex
-
         agent_command = self.config.agent
         cmd = [
             "uv",
@@ -154,13 +155,6 @@ class VenvExecutor:
             task_id,
         )
 
-        # Capture environment info for the evidence trail.
-        self._env_info = {
-            "python_version": self._detect_python_version(),
-            "isolated": "true",
-        }
-
-        start = time.monotonic()
         try:
             prompt_content = prompt_path.read_text()
             proc = subprocess.run(
@@ -173,17 +167,13 @@ class VenvExecutor:
             )
             exit_code = proc.returncode
             out, err = proc.stdout, proc.stderr
-            timed_out = False
         except subprocess.TimeoutExpired:
             exit_code = 124
-            timed_out = True
             out, err = "", f"venv: agent timed out after {timeout_seconds}s"
         except FileNotFoundError as exc:
             exit_code = 127
-            timed_out = False
             out, err = "", f"venv: uv not found: {exc}"
 
-        duration = time.monotonic() - start
         stdout_path.write_text(out)
         stderr_path.write_text(err)
 
@@ -192,8 +182,6 @@ class VenvExecutor:
             exit_code=exit_code,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            duration_seconds=round(duration, 3),
-            timed_out=timed_out,
         )
 
     def _detect_python_version(self) -> str:
@@ -205,18 +193,18 @@ class VenvExecutor:
                 text=True,
                 timeout=10,
             )
-            # uv python find outputs the path; we need the version.
-            # Fall back to querying the version directly.
             if proc.stdout.strip():
                 py_path = proc.stdout.strip()
+                if not Path(py_path).is_file():
+                    return "unknown"
                 ver_proc = subprocess.run(
                     [py_path, "--version"],
                     capture_output=True,
                     text=True,
                     timeout=5,
                 )
-                # Output: "Python 3.12.7"
-                return ver_proc.stdout.strip().replace("Python ", "")
+                if ver_proc.returncode == 0:
+                    return ver_proc.stdout.strip().replace("Python ", "")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
         return "unknown"

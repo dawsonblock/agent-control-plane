@@ -67,6 +67,9 @@ def _verify_agent_from_registry(
     error) — the agent may be a built-in (shell) that doesn't need
     a profile. If the agent IS in the registry but the hash doesn't
     match, this raises ``AgentConfigError`` (refuse to execute).
+
+    v0.7.2: Also verifies the environment lockfile hash when the agent
+    has an :class:`EnvironmentSpec` with ``is_isolated=True``.
     """
     registry = AgentRegistry(agents_dir)
     agent_file = registry.get(kind)
@@ -74,8 +77,14 @@ def _verify_agent_from_registry(
         # Agent not in registry — could be a built-in. Allow but note.
         return
 
-    # Verify the hash. Raises AgentConfigError on mismatch.
+    # Verify the binary hash. Raises AgentConfigError on mismatch.
     registry.verify(agent_file)
+
+    # v0.7.2: Verify the environment lockfile hash if the agent has
+    # an isolated environment spec. This prevents supply-chain attacks
+    # via hijacked Python dependencies.
+    if agent_file.environment and agent_file.environment.is_isolated:
+        registry.verify_environment(agent_file, config.repo.path)
 
 
 def known_agents() -> list[str]:

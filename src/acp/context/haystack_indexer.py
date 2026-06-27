@@ -109,16 +109,17 @@ class HaystackIndexer:
         store_path = self.persist_path / "document_store.json"
         cache_path = self.persist_path / "digest_cache.json"
 
-        # Load digest cache.
-        self._digest_cache = DigestCache.load_from(cache_path)
-
-        # Load document store.
+        # Load document store first. If it fails, we start fresh AND reset
+        # the digest cache to avoid inconsistency (cache thinks files are
+        # indexed but the store is empty).
+        store_loaded = False
         if store_path.is_file():
             try:
                 data = json.loads(store_path.read_text())
                 docs = [Document.from_dict(d) for d in data.get("documents", [])]
                 if docs:
                     self.document_store.write_documents(docs)
+                store_loaded = True
                 logger.debug(
                     "persistent RAG: loaded %d documents from %s",
                     len(docs),
@@ -126,6 +127,14 @@ class HaystackIndexer:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("persistent RAG: failed to load store: %s — starting fresh", exc)
+
+        # Only load the digest cache if the document store loaded successfully.
+        # If the store failed, a stale cache would cause incorrect "cached"
+        # stats — the cache says files are indexed but they're not.
+        if store_loaded:
+            self._digest_cache = DigestCache.load_from(cache_path)
+        else:
+            self._digest_cache = DigestCache()
 
     def _save_persistent_state(self) -> None:
         """Save the document store and digest cache to disk."""
@@ -147,7 +156,10 @@ class HaystackIndexer:
             logger.warning("persistent RAG: failed to save store: %s", exc)
 
         # Save digest cache.
-        self._digest_cache.save_to(cache_path)
+        try:
+            self._digest_cache.save_to(cache_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("persistent RAG: failed to save digest cache: %s", exc)
 
     def _file_digest(self, path: Path) -> str:
         """Get the SHA-256 digest of a file, using the cache if possible."""
@@ -168,19 +180,19 @@ class HaystackIndexer:
                 file_path = doc.meta.get("path")
                 if file_hash and file_path:
                     result[file_path] = file_hash
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("persistent RAG: failed to get indexed file hashes: %s", exc)
         return result
 
     def _delete_documents_for_file(self, file_path: str) -> None:
         """Delete all documents originating from a specific file."""
         try:
             docs = self.document_store.filter_documents()
-            to_delete = [d for d in docs if d.meta.get("path") == file_path]
-            for d in to_delete:
-                self.document_store.delete_document(d.id)
-        except Exception:  # noqa: BLE001
-            pass  # best-effort
+            to_delete = [d.id for d in docs if d.meta.get("path") == file_path]
+            if to_delete:
+                self.document_store.delete_documents(to_delete)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("persistent RAG: failed to delete docs for %s: %s", file_path, exc)
 
     def build_index(self) -> None:
         """Scan, split, embed, and store documents.
@@ -197,6 +209,11 @@ class HaystackIndexer:
             "deleted_files": 0,
         }
 
+        # For persistent mode, fetch the indexed file hashes ONCE (not per
+        # file) to avoid O(n²) complexity. This dict maps rel_path →
+        # file_hash for all documents currently in the store.
+        indexed_hashes: dict[str, str] = self._get_indexed_file_hashes() if is_persistent else {}
+
         # Gather all current files and their hashes.
         current_files: dict[str, str] = {}  # rel_path -> file_hash
         raw_docs: list[Document] = []
@@ -211,9 +228,7 @@ class HaystackIndexer:
                 self._index_stats["total_files"] += 1
 
                 if is_persistent:
-                    # Check if this file is already indexed with the same hash.
-                    indexed = self._get_indexed_file_hashes()
-                    if rel_path in indexed and indexed[rel_path] == file_hash:
+                    if rel_path in indexed_hashes and indexed_hashes[rel_path] == file_hash:
                         self._index_stats["cached_files"] += 1
                         continue  # Skip — unchanged file
                     # File changed or new — delete old docs for this file.
@@ -230,7 +245,8 @@ class HaystackIndexer:
                     )
                 )
                 self._index_stats["new_files"] += 1
-            except (UnicodeDecodeError, OSError):
+            except (UnicodeDecodeError, OSError, ValueError):
+                # ValueError: path not relative to repo_path (e.g., symlink)
                 continue
 
         # 2. Gather Vault Notes (enforcing the human firewall)
@@ -254,8 +270,7 @@ class HaystackIndexer:
                     self._index_stats["total_files"] += 1
 
                     if is_persistent:
-                        indexed = self._get_indexed_file_hashes()
-                        if rel_path in indexed and indexed[rel_path] == file_hash:
+                        if rel_path in indexed_hashes and indexed_hashes[rel_path] == file_hash:
                             self._index_stats["cached_files"] += 1
                             continue
                         self._delete_documents_for_file(rel_path)
@@ -271,13 +286,13 @@ class HaystackIndexer:
                         )
                     )
                     self._index_stats["new_files"] += 1
-                except (UnicodeDecodeError, OSError):
+                except (UnicodeDecodeError, OSError, ValueError):
+                    # ValueError: md_file not relative to vault_root (e.g., symlink)
                     continue
 
         # 3. Persistent mode: remove deleted files from the index.
         if is_persistent:
-            indexed = self._get_indexed_file_hashes()
-            for old_path in indexed:
+            for old_path in indexed_hashes:
                 if old_path not in current_files:
                     self._delete_documents_for_file(old_path)
                     self._index_stats["deleted_files"] += 1

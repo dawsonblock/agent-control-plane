@@ -426,6 +426,7 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
             repo_path=state["repo_path"],
             vault_root=state["vault_root"],
             context_config=cfg.context,
+            reranking_config=getattr(cfg, "reranking", None),
             persist_path=persist_path,
         )
 
@@ -771,11 +772,20 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         "agent": agent.name,
         "timeout_seconds": cfg.agent.timeout_seconds,
     }
-    # If the agent factory produced a CLIAgent with an AgentFile that has
-    # an environment spec, record it in the event.
-    agent_file_env = getattr(agent, "_environment_info", None)
-    if agent_file_env:
-        agent_started_payload["environment"] = agent_file_env
+    # Look up the agent's environment spec from the registry (if configured).
+    try:
+        from acp.agents.registry import get_agent_file
+
+        agent_file = get_agent_file(cfg)
+        if agent_file and agent_file.environment and agent_file.environment.is_isolated:
+            agent_started_payload["environment"] = {
+                "manager": agent_file.environment.manager,
+                "lockfile": agent_file.environment.lockfile,
+                "dependencies_hash": agent_file.environment.dependencies_hash,
+                "python_version": agent_file.environment.python_version,
+            }
+    except Exception:  # noqa: BLE001
+        pass  # best-effort — environment info in event is optional
 
     ctx.events.write(EventType.AGENT_STARTED, agent_started_payload)
     agent_result = agent.run(
