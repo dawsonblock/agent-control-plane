@@ -173,10 +173,22 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.CREATED
     created_at: str = Field(default_factory=_utcnow_iso)
     updated_at: str = Field(default_factory=_utcnow_iso)
+    # v0.7.4: Recursion depth for subtask spawning. Root tasks have
+    # depth=0. Each subtask level increments by 1. Hard-capped at
+    # MAX_SUBTASK_RECURSION_DEPTH to prevent agent fork bombs where
+    # an agent recursively delegates to subtasks indefinitely.
+    recursion_depth: int = 0
 
     def touch(self) -> None:
         """Stamp updated_at. Call after any status change."""
         self.updated_at = _utcnow_iso()
+
+
+# v0.7.4: Maximum subtask recursion depth. A task at depth N can spawn
+# subtasks at depth N+1, but only if N+1 <= this limit. This prevents
+# unbounded recursive subtask spawning (agent fork bombs) where an agent
+# delegates to a subtask, which delegates to a subtask, etc.
+MAX_SUBTASK_RECURSION_DEPTH = 3
 
 
 class Event(BaseModel):

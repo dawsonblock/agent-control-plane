@@ -455,7 +455,7 @@ class TestArtifactIgnoreConsistency:
     """Fast and deep verification agree on ignored files."""
 
     def test_pycache_not_in_manifest(self, tmp_path):
-        """__pycache__/*.pyc not included in the manifest."""
+        """__pycache__/*.pyc tracked in generated_artifacts, not artifacts."""
         from acp.events import EventWriter
         from acp.evidence.manifest import build_evidence_manifest
         from acp.models import EventType
@@ -475,12 +475,21 @@ class TestArtifactIgnoreConsistency:
 
         manifest = build_evidence_manifest(run_dir=run_dir, events_writer=events)
         artifact_keys = set(manifest.get("artifacts", {}).keys())
+        generated_keys = set(manifest.get("generated_artifacts", {}).keys())
 
-        # diff.patch should be in the manifest.
+        # diff.patch should be in the main artifacts section.
         assert "artifacts/diff.patch" in artifact_keys
-        # __pycache__/junk.pyc should NOT be in the manifest.
+        # __pycache__/junk.pyc should NOT be in the main artifacts section.
         assert not any("__pycache__" in k for k in artifact_keys)
         assert not any(".pyc" in k for k in artifact_keys)
+        # v0.7.4: But it SHOULD be in generated_artifacts — tracked as
+        # evidence to close the __pycache__ evasion loophole.
+        assert any("__pycache__" in k for k in generated_keys), (
+            "generated_artifacts should contain __pycache__ files"
+        )
+        assert any(".pyc" in k for k in generated_keys), (
+            "generated_artifacts should contain .pyc files"
+        )
 
     def test_fast_and_deep_agree_on_ignored(self, tmp_path):
         """Fast and deep verification both pass when a .pyc file changes."""
@@ -516,14 +525,26 @@ class TestArtifactIgnoreConsistency:
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
-        # Change the .pyc file — this should NOT break verification.
+        # v0.7.4: __pycache__/*.pyc files are now tracked as
+        # generated_artifacts in the manifest. Changing them DOES break
+        # both fast and deep verify (this is the security fix — previously
+        # a malicious agent could modify files in __pycache__ undetected).
+        # The artifact_content_hash now covers generated files too, so
+        # fast verify detects the change via the evidence.finalized event.
         (pycache_dir / "junk.pyc").write_text("modified junk")
 
         fast_result = verify_evidence_manifest(run_dir, deep=False)
         deep_result = verify_evidence_manifest(run_dir, deep=True)
 
-        assert fast_result is True, "fast verify should ignore .pyc files"
-        assert deep_result is True, "deep verify should ignore .pyc files"
+        # Both fast and deep verify FAIL — the .pyc hash changed after the
+        # manifest was built. This is the intended behavior: generated files
+        # are now evidence, closing the __pycache__ evasion loophole.
+        assert fast_result is False, (
+            "fast verify should detect .pyc modification (generated files are evidence)"
+        )
+        assert deep_result is False, (
+            "deep verify should detect .pyc modification (generated files are evidence)"
+        )
 
 
 # --------------------------------------------------------------------------- #

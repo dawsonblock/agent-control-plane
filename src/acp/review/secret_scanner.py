@@ -222,11 +222,16 @@ def scan_with_trufflehog(
     findings: list[SecretFinding] = []
 
     try:
+        # v0.7.4: Use Path.as_uri() instead of f"file://{path}" to safely
+        # URL-encode special characters in the path (spaces, #, etc.).
+        # Without this, a worktree at /Users/dev/my#project/ would produce
+        # file:///Users/dev/my#project/ which TruffleHog parses incorrectly
+        # (the # is treated as a URI fragment), silently returning zero findings.
         proc = subprocess.run(
             [
                 "trufflehog",
                 "git",
-                f"file://{worktree_path}",
+                worktree_path.resolve().as_uri(),
                 "--json",
                 "--no-update",
                 "--results=verified,unknown,unverified",

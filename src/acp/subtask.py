@@ -64,6 +64,7 @@ def parse_subtask_requests(
     parent_task_id: str = "",
     *,
     max_subtasks: int = 5,
+    recursion_depth: int = 0,
 ) -> SubTaskParseResult:
     """Parse agent stdout for sub-task spawn requests.
 
@@ -77,25 +78,36 @@ def parse_subtask_requests(
         max_subtasks: Maximum number of sub-task requests to parse
             (default: 5). Extra requests are silently dropped — the
             agent cannot overwhelm the control plane with spawn requests.
+        recursion_depth: The recursion depth of the parent task (0 for
+            root tasks). v0.7.4: If depth >= MAX_SUBTASK_RECURSION_DEPTH,
+            all spawn requests are rejected to prevent agent fork bombs.
 
     Returns:
         A :class:`SubTaskParseResult` with the parsed requests and
         cleaned stdout.
     """
+    from acp.models import MAX_SUBTASK_RECURSION_DEPTH
+
     requests: list[SubTaskRequest] = []
     cleaned_lines: list[str] = []
 
+    # v0.7.4: Hard-block subtask spawning if the recursion depth limit
+    # is reached. This prevents agent fork bombs where an agent recursively
+    # delegates to subtasks indefinitely, draining LLM credits and disk.
+    depth_blocked = recursion_depth >= MAX_SUBTASK_RECURSION_DEPTH
+
     for line in stdout.splitlines():
         m = _SPAWN_RE.match(line.strip())
-        if m and len(requests) < max_subtasks:
-            request = m.group(1).strip()
-            if request:  # ignore empty requests
-                requests.append(
-                    SubTaskRequest(
-                        request=request,
-                        parent_task_id=parent_task_id,
+        if m:
+            if not depth_blocked and len(requests) < max_subtasks:
+                request = m.group(1).strip()
+                if request:  # ignore empty requests
+                    requests.append(
+                        SubTaskRequest(
+                            request=request,
+                            parent_task_id=parent_task_id,
+                        )
                     )
-                )
             # Spawn lines are stripped from the cleaned stdout regardless.
         else:
             cleaned_lines.append(line)

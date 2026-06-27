@@ -205,7 +205,22 @@ class EventWriter:
         this method returns. If a signing key is set, the event includes
         an Ed25519 signature over its hash.
         """
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        event = self.build_event(type, payload)
+        self.append_event(event)
+        return event
+
+    def build_event(self, type: EventType, payload: dict[str, Any] | None = None) -> Event:
+        """Build an Event object with the correct hash chain fields, WITHOUT writing to disk.
+
+        v0.7.4: Used by the lifecycle transaction in durable_mode="required"
+        to write to SQLite first, then append to JSONL. This separates
+        event construction from event persistence, enabling crash-safe
+        ordering: SQLite commit → JSONL append (instead of JSONL append →
+        SQLite commit → JSONL truncate on failure).
+
+        The caller is responsible for calling :meth:`append_event` to
+        actually write the event to disk.
+        """
         event_id = next_event_id(self._count)
         timestamp = _utcnow_iso()
         payload = payload or {}
@@ -220,7 +235,7 @@ class EventWriter:
         signature = ""
         if self._signing_key is not None:
             signature = self._signing_key.sign(hash_value.encode()).hex()
-        event = Event(
+        return Event(
             event_id=event_id,
             task_id=self.task_id,
             type=type,
@@ -230,14 +245,23 @@ class EventWriter:
             hash=hash_value,
             signature=signature,
         )
+
+    def append_event(self, event: Event) -> None:
+        """Write a pre-built Event to disk and update internal state.
+
+        v0.7.4: Counterpart to :meth:`build_event`. Writes the event to
+        events.jsonl with fsync, and updates the count and prev_hash.
+        This is the persistence step that was previously inlined in
+        :meth:`write`.
+        """
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         # Crash-safe append: open in binary append mode, write, flush, fsync.
         with self.path.open("ab") as f:
             f.write((event.model_dump_json() + "\n").encode())
             f.flush()
             os.fsync(f.fileno())
         self._count += 1
-        self._prev_hash = hash_value
-        return event
+        self._prev_hash = event.hash
 
     def read_all(self) -> list[Event]:
         """Read every event in log order. Used by the report writer.

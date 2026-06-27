@@ -42,6 +42,7 @@ import asyncio
 import logging
 import re
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from acp.config import StreamingSection
@@ -230,11 +231,25 @@ class StreamSentinel:
         score increases. Each unique chunk decays the score. If the score
         exceeds ``strange_loop_threshold``, return the abort detail string.
 
+        v0.7.4: Short chunks (< 4 tokens) are skipped — they produce
+        trivially small n-gram sets that match too easily (e.g.
+        ``assert x == 1`` in test boilerplate, ``logger.info(...)`` lines).
+        The decay was also increased from 0.5 to 1.0 so that interspersed
+        unique content resets the score faster, preventing false positives
+        on agents that emit repetitive scaffolding mixed with unique output.
+
         Returns ``None`` if no abort is triggered, or a detail string
         describing the repetition score and max similarity.
         """
         tokens = _tokenize(chunk)
         if not tokens:
+            return None
+
+        # v0.7.4: Skip very short chunks — they produce n-gram sets too
+        # small to be meaningful (e.g. "assert x == 1" → 2 trigrams). These
+        # are common in code generation (boilerplate, test assertions,
+        # logger calls) and would cause false-positive strange-loop aborts.
+        if len(tokens) < 4:
             return None
 
         current_ngrams = _ngrams(tokens)
@@ -251,7 +266,9 @@ class StreamSentinel:
             self._repetition_score += 1.5
         else:
             # Unique content — decay the score.
-            self._repetition_score = max(0.0, self._repetition_score - 0.5)
+            # v0.7.4: Increased decay from 0.5 to 1.0 so interspersed
+            # unique content resets the score faster.
+            self._repetition_score = max(0.0, self._repetition_score - 1.0)
 
         self._window.append(current_ngrams)
 
@@ -266,6 +283,10 @@ class StreamSentinel:
         """Write a stream.aborted event to the hash-chained log.
 
         Serialized via ``asyncio.Lock`` to preserve the hash-chain invariant.
+        The blocking ``EventWriter.write`` (which calls ``os.fsync``) is
+        offloaded to a thread via ``asyncio.to_thread`` to avoid stalling
+        the event loop.
+
         If no EventWriter is configured (e.g., in unit tests), this is a no-op.
         """
         self.is_aborted = True
@@ -273,7 +294,10 @@ class StreamSentinel:
         if self.events is None:
             return
         async with self._write_lock:
-            self.events.write(
+            # v0.7.4: EventWriter.write does open/fsync/close — blocking disk
+            # I/O that would stall the asyncio event loop. Offload to a thread.
+            await asyncio.to_thread(
+                self.events.write,
                 EventType.STREAM_ABORTED,
                 {
                     "task_id": self.task_id,
@@ -299,6 +323,10 @@ async def run_agent_streaming(
     the process is killed (terminate → wait 2s → kill) and the partial
     output is returned.
 
+    v0.7.4: Output is spooled to temp files instead of accumulated in
+    memory. This prevents OOM on long agent runs (e.g. OpenHands headless
+    mode emits verbose JSONL tracing that can reach hundreds of MB).
+
     Args:
         cmd: The command list (or string if ``use_shell`` is True).
         cwd: Working directory for the process.
@@ -309,8 +337,23 @@ async def run_agent_streaming(
     Returns:
         A tuple of ``(exit_code, stdout, stderr)``.
     """
-    stdout_data = bytearray()
-    stderr_data = bytearray()
+    import tempfile
+
+    # v0.7.4: Spool to temp files to avoid OOM on long runs.
+    stdout_file = tempfile.NamedTemporaryFile(mode="wb", suffix=".stdout", delete=False)
+    stderr_file = tempfile.NamedTemporaryFile(mode="wb", suffix=".stderr", delete=False)
+    stdout_path = Path(stdout_file.name)
+    stderr_path = Path(stderr_file.name)
+
+    def _read_spooled(path: Path) -> str:
+        """Read spooled output from a temp file and clean up."""
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        finally:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     try:
         if use_shell:
@@ -331,65 +374,62 @@ async def run_agent_streaming(
             )
     except Exception as exc:
         logger.error("Failed to spawn agent process: %s", exc)
+        stdout_file.close()
+        stderr_file.close()
+        _read_spooled(stdout_path)
+        _read_spooled(stderr_path)
         return 127, "", str(exc)
+
+    # Close the file objects (we'll write via the path).
+    stdout_file.close()
+    stderr_file.close()
 
     async def _read_stderr() -> None:
         assert process.stderr is not None
-        while True:
-            line = await process.stderr.readline()
-            if not line:
-                break
-            stderr_data.extend(line)
+        with open(stderr_path, "wb") as f:
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                f.write(line)
 
     stderr_task = asyncio.create_task(_read_stderr())
 
     try:
         async with asyncio.timeout(timeout):
             assert process.stdout is not None
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                stdout_data.extend(line)
-                decoded = line.decode("utf-8", errors="replace")
-                await sentinel.analyze_chunk(decoded)
+            with open(stdout_path, "wb") as f:
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    f.write(line)
+                    decoded = line.decode("utf-8", errors="replace")
+                    await sentinel.analyze_chunk(decoded)
 
     except StreamAbort as exc:
         logger.warning("Stream aborted: %s", exc)
         await _kill_process(process)
         # The abort event was already emitted by _emit_abort in analyze_chunk.
-        return (
-            1,
-            stdout_data.decode("utf-8", errors="replace"),
-            stderr_data.decode("utf-8", errors="replace"),
-        )
+        await stderr_task
+        return 1, _read_spooled(stdout_path), _read_spooled(stderr_path)
 
     except TimeoutError:
         logger.warning("Agent timed out after %ds", timeout)
         await _kill_process(process)
-        return (
-            124,
-            stdout_data.decode("utf-8", errors="replace"),
-            stderr_data.decode("utf-8", errors="replace"),
-        )
+        await stderr_task
+        return 124, _read_spooled(stdout_path), _read_spooled(stderr_path)
 
     except Exception as exc:
         logger.error("Stream error: %s", exc)
         await _kill_process(process)
-        return (
-            127,
-            stdout_data.decode("utf-8", errors="replace"),
-            stderr_data.decode("utf-8", errors="replace"),
-        )
+        await stderr_task
+        return 127, _read_spooled(stdout_path), _read_spooled(stderr_path)
 
     # Normal completion — wait for the process to exit and stderr to drain.
     await stderr_task
     exit_code = await process.wait()
-    return (
-        exit_code,
-        stdout_data.decode("utf-8", errors="replace"),
-        stderr_data.decode("utf-8", errors="replace"),
-    )
+    return exit_code, _read_spooled(stdout_path), _read_spooled(stderr_path)
 
 
 async def _kill_process(process: asyncio.subprocess.Process) -> None:

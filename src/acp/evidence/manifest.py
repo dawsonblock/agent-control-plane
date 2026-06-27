@@ -197,12 +197,18 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
     artifacts to the signed event log: if any artifact is tampered with, this
     hash changes, and the signed event's payload no longer matches.
 
-    Files matching DEFAULT_IGNORE_PATTERNS (``__pycache__``, ``*.pyc``, etc.)
-    are excluded — they are generated junk, not evidence.
+    v0.7.4: Files matching DEFAULT_IGNORE_PATTERNS (``__pycache__``,
+    ``*.pyc``, etc.) are now INCLUDED in the hash as a separate
+    ``generated_artifacts`` block. This closes the evidence evasion loophole
+    where a malicious agent could smuggle code into ``__pycache__/`` without
+    it appearing in the evidence trail. The generated artifacts are tracked
+    in the manifest so ``acp verify --deep`` catches tampering, but they're
+    kept in a separate section so they don't clutter the human-facing diff.
     """
     run_dir = Path(run_dir)
     artifacts_dir = run_dir / "artifacts"
     artifact_hashes: dict[str, str] = {}
+    generated_hashes: dict[str, str] = {}
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.rglob("*")):
             if path.is_file():
@@ -210,9 +216,14 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
                 if rel == "artifacts/final_report.md":
                     continue
                 if _should_ignore_path(path, run_dir):
-                    continue
-                artifact_hashes[rel] = _sha256_file(path)
-    content = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
+                    generated_hashes[rel] = _sha256_file(path)
+                else:
+                    artifact_hashes[rel] = _sha256_file(path)
+    content = json.dumps(
+        {"artifacts": artifact_hashes, "generated": generated_hashes},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(content.encode()).hexdigest()
 
 
@@ -339,6 +350,7 @@ def build_evidence_manifest(
     artifacts_dir = run_dir / "artifacts"
 
     artifact_hashes: dict[str, str] = {}
+    generated_hashes: dict[str, str] = {}
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.rglob("*")):
             if path.is_file():
@@ -349,14 +361,18 @@ def build_evidence_manifest(
                 # *source* artifacts; the report references the manifest hash.
                 if rel == "artifacts/final_report.md":
                     continue
-                # v0.5.15: Apply the same ignore rules as
-                # compute_artifact_content_hash. Ignored/generated files
-                # (e.g. __pycache__, *.pyc) must not appear in the manifest
-                # at all, so fast and deep verification agree on what counts
-                # as evidence.
+                # v0.7.4: Files matching DEFAULT_IGNORE_PATTERNS are tracked
+                # in a separate ``generated_artifacts`` section instead of
+                # being silently excluded. This closes the evidence evasion
+                # loophole where a malicious agent could write a backdoor
+                # into __pycache__/ and have it bypass both the diff and the
+                # evidence manifest. The generated artifacts are hashed and
+                # verified, but kept separate from the human-facing artifacts
+                # so they don't clutter the review.
                 if _should_ignore_path(path, run_dir):
-                    continue
-                artifact_hashes[rel] = _sha256_file(path)
+                    generated_hashes[rel] = _sha256_file(path)
+                else:
+                    artifact_hashes[rel] = _sha256_file(path)
 
     events = events_writer.read_all()
     chain_valid = verify_event_chain(events)
@@ -392,6 +408,11 @@ def build_evidence_manifest(
         "event_chain_head": chain_head,
         "event_chain_valid": chain_valid,
         "artifacts": artifact_hashes,
+        # v0.7.4: Generated/ignored files (e.g. __pycache__, *.pyc) tracked
+        # as evidence to close the evasion loophole. These are hashed and
+        # verified during `acp verify --deep` but kept separate from the
+        # human-facing artifacts section.
+        "generated_artifacts": generated_hashes,
     }
     # The manifest hash covers everything except itself.
     manifest_content = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -669,19 +690,28 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
             if actual != expected_hash:
                 return False
 
+        # v0.7.4: Also verify generated artifacts (e.g. __pycache__, *.pyc).
+        # These were previously excluded from verification, creating an
+        # evidence evasion loophole. Now they're tracked in the manifest
+        # and verified during deep checks.
+        for rel, expected_hash in manifest.get("generated_artifacts", {}).items():
+            path = run_dir / rel
+            if not path.is_file():
+                return False
+            actual = cache.digest(path) if cache else _sha256_file(path)
+            if actual != expected_hash:
+                return False
+
         # Check for extra files not in the manifest (final_report.md is excluded
         # — it's a projection, not source evidence).
-        # v0.5.15: Apply the same ignore rules as build_evidence_manifest
-        # and compute_artifact_content_hash. Ignored/generated files (e.g.
-        # __pycache__, *.pyc) must not trigger a deep verification failure.
+        # v0.7.4: All files must be accounted for — either in "artifacts" or
+        # "generated_artifacts". No file should be untracked.
         if artifacts_dir.is_dir():
-            on_disk = {
-                str(p.relative_to(run_dir))
-                for p in artifacts_dir.rglob("*")
-                if p.is_file() and not _should_ignore_path(p, run_dir)
-            }
+            on_disk = {str(p.relative_to(run_dir)) for p in artifacts_dir.rglob("*") if p.is_file()}
             on_disk.discard("artifacts/final_report.md")
-            manifest_files = set(manifest.get("artifacts", {}).keys())
+            manifest_files = set(manifest.get("artifacts", {}).keys()) | set(
+                manifest.get("generated_artifacts", {}).keys()
+            )
             if on_disk != manifest_files:
                 return False
     else:

@@ -1820,6 +1820,26 @@ def serve(
     if api_token:
         set_api_token(api_token)
 
+    # v0.7.4: Hard-block binding to a non-localhost interface without an
+    # API token. POST /tasks/run accepts arbitrary prompts and configs —
+    # exposing it on 0.0.0.0 without auth is instant RCE for anyone on
+    # the network. Fail closed instead of printing a warning.
+    from acp.api.server import get_api_token
+
+    _is_localhost = host in ("127.0.0.1", "localhost", "::1")
+    if not _is_localhost and get_api_token() is None:
+        console.print(
+            f"[red]✗[/] REFUSING to start: --host {host} binds to a non-localhost "
+            f"interface, but no API token is set.\n"
+            f"  POST /tasks/run accepts arbitrary commands — exposing it without "
+            f"auth is remote code execution.\n"
+            f"  Either:\n"
+            f"    1. Use --host 127.0.0.1 (default, localhost only)\n"
+            f"    2. Set --api-token <secret> to require bearer auth\n"
+            f"    3. Set ACP_API_TOKEN=<secret> environment variable"
+        )
+        raise typer.Exit(code=1)
+
     # Read CORS settings from the repo config and set env vars so the
     # server module picks them up at import time (uvicorn imports the app
     # module fresh, so env vars set here are visible to the server).
@@ -1832,12 +1852,11 @@ def serve(
     console.print(f"[bold]ACP API server[/] · config={config}")
     console.print(f"  listening on http://{host}:{port}")
     console.print(f"  docs at http://{host}:{port}/docs")
-    from acp.api.server import get_api_token
 
     if get_api_token() is not None:
         console.print("  [green]auth: bearer token enabled[/]")
     else:
-        console.print("  [yellow]auth: disabled (set --api-token or ACP_API_TOKEN)[/]")
+        console.print("  [dim]auth: disabled (localhost only — safe)[/]")
     if not cfg.api.cors_enabled:
         console.print("  [dim]CORS: disabled (same-origin)[/]")
     elif cfg.api.cors_origins:
