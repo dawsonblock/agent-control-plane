@@ -164,6 +164,10 @@ class TaskStore:
         base_branch: str,
         user_request: str,
         recursion_depth: int = 0,
+        mission_id: str = "",
+        mission_goal: str = "",
+        mission_description: str = "",
+        mission_step_index: int = 0,
     ) -> Task:
         """Initialize a run directory and write the initial task.json."""
         run_dir = self.run_dir(task_id)
@@ -185,6 +189,11 @@ class TaskStore:
             user_request=user_request,
             status=TaskStatus.CREATED,
             recursion_depth=recursion_depth,
+            # v0.9.0 (Step 7): Mission context persisted on the durable Task.
+            mission_id=mission_id,
+            mission_goal=mission_goal,
+            mission_description=mission_description,
+            mission_step_index=mission_step_index,
         )
         self.save(task)
         return task

@@ -153,12 +153,15 @@ class StreamSentinel:
         # One of: "secret_detected", "strange_loop", "dangerous_path".
         self.abort_reason = ""
 
-        # v0.7.5: Async semantic anomaly detection (non-blocking).
-        # Anomalies are flagged for post-run review, not aborted mid-stream.
+        # v0.7.5 / v0.9.0 (Step 3): Semantic anomaly detection. Anomalies
+        # are flagged for post-run review, never aborted mid-stream. The
+        # expensive model.encode() is offloaded to a thread via
+        # asyncio.to_thread so the event loop stays responsive (torch
+        # releases the GIL during native inference). In batched mode the
+        # whole batch is encoded in one call.
         self.semantic_anomalies: list[dict[str, Any]] = []
         self._semantic_model: Any = None
         self._semantic_embeddings: list[Any] = []
-        self._semantic_task: asyncio.Task[None] | None = None
         if self.config.semantic_anomaly_detection:
             self._init_semantic_model()
 
@@ -187,13 +190,19 @@ class StreamSentinel:
                 exc,
             )
 
-    def _check_semantic_anomaly(self, chunk: str, chunk_index: int) -> None:
-        """Check if a chunk is semantically anomalous (synchronous, fast).
+    async def _check_semantic_anomaly(self, chunk: str, chunk_index: int) -> None:
+        """Check if a chunk is semantically anomalous.
 
         Uses cosine similarity between the chunk's embedding and the running
         average of previous embeddings. If similarity is below the threshold,
-        the chunk is flagged as anomalous. This is a local operation (no LLM
-        round-trip) and takes ~5-20ms on CPU with all-MiniLM-L6-v2.
+        the chunk is flagged as anomalous (post-run review, not aborted).
+
+        v0.9.0 (Step 3): the expensive ``model.encode()`` is offloaded to a
+        thread via :func:`asyncio.to_thread` so the event loop stays
+        responsive during the ~5-20ms native inference (torch releases the
+        GIL). The cheap numpy similarity stays inline. Awaiting (rather
+        than fire-and-forget) preserves embedding ordering — there is no
+        race on ``self._semantic_embeddings``.
         """
         if self._semantic_model is None:
             return
@@ -201,52 +210,92 @@ class StreamSentinel:
         try:
             import numpy as np
 
-            embedding = self._semantic_model.encode(chunk, show_progress_bar=False)
-            self._semantic_embeddings.append(embedding)
-
-            # Need at least 3 chunks before we can compute meaningful averages.
-            if len(self._semantic_embeddings) < 3:
-                return
-
-            # Compute running average of all previous embeddings.
-            prev = np.array(self._semantic_embeddings[:-1])
-            avg = prev.mean(axis=0)
-
-            # Cosine similarity between current chunk and running average.
-            norm_curr = np.linalg.norm(embedding)
-            norm_avg = np.linalg.norm(avg)
-            if norm_curr == 0 or norm_avg == 0:
-                return
-            similarity = float(np.dot(embedding, avg) / (norm_curr * norm_avg))
-
-            if similarity < self.config.semantic_anomaly_threshold:
-                self.semantic_anomalies.append(
-                    {
-                        "chunk_index": chunk_index,
-                        "similarity": round(similarity, 4),
-                        "threshold": self.config.semantic_anomaly_threshold,
-                        "preview": chunk[:100],
-                    }
-                )
-                logger.warning(
-                    "semantic anomaly detected: chunk=%d similarity=%.4f "
-                    "threshold=%.2f — flagged for post-run review",
-                    chunk_index,
-                    similarity,
-                    self.config.semantic_anomaly_threshold,
-                )
+            embedding = await asyncio.to_thread(
+                self._semantic_model.encode, chunk, show_progress_bar=False
+            )
+            self._record_semantic_anomaly(embedding, chunk, chunk_index, np)
         except Exception as exc:  # noqa: BLE001
             logger.debug("semantic anomaly check failed: %s", exc)
 
-    async def analyze_chunk(self, chunk: str) -> None:
-        """Run safety checks on a stream chunk.
+    async def _check_semantic_anomaly_batch(self, chunks: list[str], base_index: int) -> None:
+        """Batched semantic anomaly check (v0.9.0 Step 3 micro-batching).
 
-        Raises :class:`StreamAbort` if a hard block is triggered (secret
-        detected, strange loop, or dangerous path). The caller should
-        catch this, kill the agent process, and record the abort.
+        Encodes the whole batch in a single ``model.encode(chunks)`` call
+        (offloaded to a thread), then computes per-chunk cosine similarity
+        against the running average. One encode call for N chunks is far
+        cheaper than N per-line calls — the main win of micro-batching for
+        the semantic path. ``base_index`` is the chunk index of the first
+        chunk in the batch (for the post-run anomaly report).
+        """
+        if self._semantic_model is None or not chunks:
+            return
+        try:
+            import numpy as np
+
+            embeddings = await asyncio.to_thread(
+                self._semantic_model.encode, chunks, show_progress_bar=False
+            )
+            for i, emb in enumerate(embeddings):
+                self._record_semantic_anomaly(emb, chunks[i], base_index + i, np)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("batched semantic anomaly check failed: %s", exc)
+
+    def _record_semantic_anomaly(
+        self,
+        embedding: Any,
+        chunk: str,
+        chunk_index: int,
+        np: Any,
+    ) -> None:
+        """Append an embedding and flag an anomaly if it diverges from the running average."""
+        self._semantic_embeddings.append(embedding)
+        # Need at least 3 chunks before we can compute meaningful averages.
+        if len(self._semantic_embeddings) < 3:
+            return
+        # Compute running average of all previous embeddings.
+        prev = np.array(self._semantic_embeddings[:-1])
+        avg = prev.mean(axis=0)
+        norm_curr = np.linalg.norm(embedding)
+        norm_avg = np.linalg.norm(avg)
+        if norm_curr == 0 or norm_avg == 0:
+            return
+        similarity = float(np.dot(embedding, avg) / (norm_curr * norm_avg))
+        if similarity < self.config.semantic_anomaly_threshold:
+            self.semantic_anomalies.append(
+                {
+                    "chunk_index": chunk_index,
+                    "similarity": round(similarity, 4),
+                    "threshold": self.config.semantic_anomaly_threshold,
+                    "preview": chunk[:100],
+                }
+            )
+            logger.warning(
+                "semantic anomaly detected: chunk=%d similarity=%.4f "
+                "threshold=%.2f — flagged for post-run review",
+                chunk_index,
+                similarity,
+                self.config.semantic_anomaly_threshold,
+            )
+
+    async def _analyze_one(self, chunk: str) -> int:
+        """Run the per-chunk hard-abort checks + subtask detection.
+
+        Checks (in order): secret detection (kill-switch), dangerous-path
+        detection (kill-switch), strange-loop detection (kill-switch), and
+        subtask-spawn recording. Raises :class:`StreamAbort` on the first
+        hard violation. Returns the chunk index assigned to this chunk
+        (0 if the chunk was skipped as empty/aborted).
+
+        v0.9.0 (Step 3): the strange-loop check (tokenize + Jaccard over the
+        rolling window) is offloaded to :func:`asyncio.to_thread` so its
+        CPU work doesn't block the event loop. It mutates ``self._window``
+        and ``self._repetition_score``; because :meth:`analyze_chunk` and
+        :meth:`analyze_batch` await each chunk sequentially, there is no
+        concurrent access to that state. Shared by the single-chunk and
+        batched entry points so the kill-switch semantics are identical.
         """
         if self.is_aborted or not chunk.strip():
-            return
+            return 0
 
         self._chunk_count += 1
         chunk_index = self._chunk_count
@@ -286,9 +335,9 @@ class StreamSentinel:
                         detail=f"pattern={pat.pattern}",
                     )
 
-        # 3. Strange-loop / attractor detection.
+        # 3. Strange-loop / attractor detection (offloaded — pure CPU).
         if self.config.strange_loop_detection:
-            abort_info = self._check_strange_loop(chunk)
+            abort_info = await asyncio.to_thread(self._check_strange_loop, chunk)
             if abort_info is not None:
                 await self._emit_abort(
                     reason="strange_loop",
@@ -307,11 +356,53 @@ class StreamSentinel:
             if request:
                 self.subtask_requests.append(request)
 
-        # 5. v0.7.5: Semantic anomaly detection (non-blocking, local model).
-        # Uses a local sentence-transformers cross-encoder — no LLM round-trip.
+        return chunk_index
+
+    async def analyze_chunk(self, chunk: str) -> None:
+        """Run safety checks on a single stream chunk.
+
+        Raises :class:`StreamAbort` if a hard block is triggered (secret
+        detected, strange loop, or dangerous path). The caller should
+        catch this, kill the agent process, and record the abort.
+
+        Backwards-compatible single-chunk entry point (used by tests and
+        any non-batched caller). The streaming hot path uses
+        :meth:`analyze_batch` instead.
+        """
+        chunk_index = await self._analyze_one(chunk)
+        # 5. Semantic anomaly detection (non-blocking, local model, offloaded).
         # Anomalies are flagged for post-run review, NOT aborted mid-stream.
+        if chunk_index and self.config.semantic_anomaly_detection and self._semantic_model is not None:
+            await self._check_semantic_anomaly(chunk, chunk_index)
+
+    async def analyze_batch(self, chunks: list[str]) -> None:
+        """Run safety checks on a batch of stream chunks (v0.9.0 Step 3).
+
+        The streaming hot path buffers lines (up to ``batch_max_lines`` or
+        ``batch_interval_ms``) and hands the batch here so the per-line
+        hard-abort checks run in one pass and the semantic check encodes
+        the whole batch in a single ``model.encode()`` call. Kill-switch
+        semantics are preserved: the first violating chunk in the batch
+        raises :class:`StreamAbort` (after emitting the abort event), so
+        abort latency is bounded by the flush interval.
+        """
+        if self.is_aborted:
+            return
+        base_index = 0
+        for chunk in chunks:
+            idx = await self._analyze_one(chunk)
+            if idx:
+                base_index = idx
+            if self.is_aborted:
+                return
+        # Semantic anomaly — batched encode (one call for the whole batch).
         if self.config.semantic_anomaly_detection and self._semantic_model is not None:
-            self._check_semantic_anomaly(chunk, chunk_index)
+            non_empty = [c for c in chunks if c.strip()]
+            if non_empty:
+                # base_index is the last assigned chunk index; back-derive the
+                # first non-empty chunk's index for the anomaly report.
+                start_index = base_index - (len(non_empty) - 1) if base_index else 0
+                await self._check_semantic_anomaly_batch(non_empty, start_index)
 
     def _check_strange_loop(self, chunk: str) -> str | None:
         """Update the strange-loop detector and return abort detail if triggered.

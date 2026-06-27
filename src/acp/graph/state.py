@@ -106,6 +106,11 @@ class ACPState(TypedDict, total=False):
     mission_id: str  # the mission this task belongs to
     mission_step_index: int  # which step in the mission (0-based)
     parent_task_id: str  # preceding step's task_id ("" for step 0)
+    # v0.9.0 (Step 7): The mission goal/description, threaded through so
+    # create_task can persist them on the durable Task and the Graphiti
+    # episode text can be mission-aware. Empty for non-mission runs.
+    mission_goal: str
+    mission_description: str
 
     # --- v0.7.4: Subtask recursion depth — prevents agent fork bombs ------ #
     # Root tasks have depth=0. Each subtask level increments by 1.

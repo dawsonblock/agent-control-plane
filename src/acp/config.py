@@ -797,6 +797,15 @@ class StreamingSection(BaseModel):
     semantic_anomaly_detection: bool = False
     semantic_anomaly_threshold: float = 0.3
     semantic_anomaly_model: str = "all-MiniLM-L6-v2"
+    # v0.9.0 (Step 3): Micro-batching for the stream loop. Lines are
+    # buffered and analyzed in batches to amortize per-line overhead and
+    # enable a single batched ``model.encode()`` for semantic anomaly
+    # detection. A flush triggers on whichever comes first: the interval
+    # elapsing with no new line, or the max line count. Set
+    # ``batch_interval_ms=0`` to disable batching (analyze every line —
+    # the pre-v0.9.0 behavior).
+    batch_interval_ms: int = 50
+    batch_max_lines: int = 64
 
     @field_validator("strange_loop_threshold")
     @classmethod
@@ -831,6 +840,20 @@ class StreamingSection(BaseModel):
                 raise ValueError(
                     f"streaming.dangerous_path_patterns: invalid regex '{pattern}': {exc}"
                 ) from exc
+        return v
+
+    @field_validator("batch_interval_ms")
+    @classmethod
+    def _validate_batch_interval(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("streaming.batch_interval_ms must be >= 0 (0 disables batching)")
+        return v
+
+    @field_validator("batch_max_lines")
+    @classmethod
+    def _validate_batch_max_lines(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("streaming.batch_max_lines must be >= 1")
         return v
 
 

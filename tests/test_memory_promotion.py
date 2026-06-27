@@ -114,6 +114,77 @@ def _write_vault_note(
 
 
 # --------------------------------------------------------------------------- #
+# 0. Episode text construction — mission awareness (v0.9.0 Step 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_build_episode_text_includes_mission_context(tmp_path):
+    """_build_episode_text prepends a Mission Context block when mission_id is set."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()
+    task.mission_id = "mission_20260626_0001"
+    task.mission_goal = "Migrate to React 19"
+    task.mission_description = "Incremental migration of the legacy views."
+    task.mission_step_index = 2
+    fm = Frontmatter(type="task_report", risk="low", recommendation="merge", files_changed=4)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nDid the thing.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    # Mission context block is present and first.
+    assert "Mission Context:" in text
+    assert "Mission ID: mission_20260626_0001" in text
+    assert "Mission Goal: Migrate to React 19" in text
+    assert "Mission Description: Incremental migration of the legacy views." in text
+    assert "Step Index: 2" in text
+    assert text.index("Mission Context:") < text.index("Task:")
+    # Task metadata + report body are still present.
+    assert f"Task: {task.task_id}" in text
+    assert "Report:" in text
+    assert "Did the thing." in text
+
+
+def test_build_episode_text_omits_mission_context_for_isolated_task(tmp_path):
+    """_build_episode_text has no Mission Context block when mission_id is empty."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()  # no mission fields set → all empty/0
+    fm = Frontmatter(type="task_report", risk="low", recommendation="merge", files_changed=1)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nStandalone fix.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    assert "Mission Context:" not in text
+    assert "Mission Goal:" not in text
+    assert f"Task: {task.task_id}" in text
+    assert "Standalone fix." in text
+
+
+def test_build_episode_text_mission_context_without_description(tmp_path):
+    """A mission task with no description omits the description line gracefully."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()
+    task.mission_id = "mission_20260626_0002"
+    task.mission_goal = "Harden the API"
+    task.mission_description = ""  # no description
+    task.mission_step_index = 0
+    fm = Frontmatter(type="task_report", risk="medium", recommendation="review", files_changed=2)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nHardened.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    assert "Mission Context:" in text
+    assert "Mission Goal: Harden the API" in text
+    assert "Mission Description:" not in text
+    assert "Step Index: 0" in text
+
+
+# --------------------------------------------------------------------------- #
 # 1. Promotion rules
 # --------------------------------------------------------------------------- #
 
@@ -728,3 +799,90 @@ class TestFullGraphitiIntegration:
         fm, body = parse_frontmatter(content)
         assert fm.graphiti_ingested is True
         assert "Report body" in body
+
+
+# --------------------------------------------------------------------------- #
+# 6. Mission rollup (v0.9.0 Step 7b)
+# --------------------------------------------------------------------------- #
+
+
+@memory_skip
+class TestMissionRollupIntegration:
+    """Mission rollup episode ingestion (requires the memory extra)."""
+
+    async def test_rollup_calls_add_episode_with_mission_framing(self, tmp_path):
+        """rollup_mission_to_graphiti ingests a consolidated episode via the Graphiti client."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from acp.memory.graphiti_client import rollup_mission_to_graphiti
+        from acp.models import Mission, MissionStep
+
+        mission = Mission(
+            mission_id="mission_20260627_0001",
+            goal="Migrate to React 19",
+            description="Incremental migration of the legacy views.",
+            repo_name="demo",
+            repo_path=tmp_path,
+            base_branch="main",
+            steps=[
+                MissionStep(description="Add rate limiting", task_id="t1", status="completed"),
+                MissionStep(description="Add auth checks", task_id="t2", status="completed"),
+            ],
+        )
+
+        fake_result = MagicMock()
+        fake_result.episode.uuid = "ep-rollup-123"
+        fake_result.nodes = [MagicMock(), MagicMock(), MagicMock()]
+        fake_result.edges = [MagicMock(), MagicMock()]
+
+        fake_client = MagicMock()
+        fake_client.add_episode = AsyncMock(return_value=fake_result)
+        fake_client.close = AsyncMock()
+
+        with patch("acp.memory.graphiti_client._get_graphiti_client", return_value=fake_client):
+            result = await rollup_mission_to_graphiti(mission, graphiti_group_id="g1")
+
+        assert result["mission_id"] == "mission_20260627_0001"
+        assert result["episode_id"] == "ep-rollup-123"
+        assert result["nodes_created"] == 3
+        assert result["edges_created"] == 2
+        assert result["step_count"] == 2
+
+        fake_client.add_episode.assert_awaited_once()
+        call = fake_client.add_episode.call_args
+        # First positional arg is the rollup episode text.
+        episode_text = call.args[0] if call.args else ""
+        assert "Mission Rollup:" in episode_text
+        assert "Mission Goal: Migrate to React 19" in episode_text
+        assert "Mission Description: Incremental migration of the legacy views." in episode_text
+        # group_id + reference_id thread through to the client.
+        assert call.kwargs.get("group_id") == "g1"
+        assert call.kwargs.get("reference_id") == "mission_20260627_0001"
+        # The client is always closed (finally block).
+        fake_client.close.assert_awaited_once()
+
+    async def test_rollup_closes_client_even_on_add_episode_error(self, tmp_path):
+        """The finally block closes the client even if add_episode raises."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from acp.memory.graphiti_client import rollup_mission_to_graphiti
+        from acp.models import Mission
+
+        mission = Mission(
+            mission_id="mission_20260627_0002",
+            goal="Harden the API",
+            repo_name="demo",
+            repo_path=tmp_path,
+            base_branch="main",
+            steps=[],
+        )
+
+        fake_client = MagicMock()
+        fake_client.add_episode = AsyncMock(side_effect=RuntimeError("FalkorDB down"))
+        fake_client.close = AsyncMock()
+
+        with patch("acp.memory.graphiti_client._get_graphiti_client", return_value=fake_client):
+            with pytest.raises(RuntimeError, match="FalkorDB down"):
+                await rollup_mission_to_graphiti(mission)
+
+        fake_client.close.assert_awaited_once()

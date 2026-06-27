@@ -209,6 +209,9 @@ class MissionOrchestrator:
                     {"mission_id": mission_id},
                 )
             self.store.save(mission)
+            # v0.9.0 (Step 7b): best-effort mission memory rollup on completion.
+            if mission.status == MissionStatus.COMPLETED:
+                self._trigger_mission_rollup(mission)
 
         return {
             "mission_id": mission_id,
@@ -248,6 +251,10 @@ class MissionOrchestrator:
             mission_id=mission.mission_id,
             mission_step_index=step_index,
             parent_task_id=parent_task_id,
+            # v0.9.0 (Step 7): Thread the mission goal/description so the
+            # durable Task carries them and Graphiti extraction is mission-aware.
+            mission_goal=mission.goal,
+            mission_description=mission.description,
         )
 
         task_id = result.get("task_id", "")
@@ -360,6 +367,9 @@ class MissionOrchestrator:
                         {"mission_id": mission_id},
                     )
                 self.store.save(mission)
+                # v0.9.0 (Step 7b): best-effort mission memory rollup on completion.
+                if mission.status == MissionStatus.COMPLETED:
+                    self._trigger_mission_rollup(mission)
             elif mission.status == MissionStatus.RUNNING:
                 # Not all steps done — restore to a non-running state.
                 # If the mission was already RUNNING (e.g. via run()), keep
@@ -430,3 +440,54 @@ class MissionOrchestrator:
             raise ValueError(f"mission {mission_id} is not paused (status={mission.status})")
         mission.status = MissionStatus.RUNNING
         self.store.save(mission)
+
+    def _trigger_mission_rollup(self, mission: Mission) -> None:
+        """Best-effort mission memory rollup on completion (v0.9.0 Step 7b).
+
+        Ingests a consolidated mission-level episode into Graphiti so the
+        extraction LLM can derive high-level Mission Conclusions. Gated on
+        ``memory.promote_reports_by_default`` (the same opt-in that governs
+        per-task auto-promotion) so no new independent LLM-call path is
+        introduced. Failures (missing memory extra, FalkorDB down, LLM
+        error, running event loop) are logged and never propagate — a
+        rollup failure must not break mission completion.
+        """
+        import asyncio
+
+        cfg = load_repo_config(self.config_path)
+        if not getattr(cfg.memory, "promote_reports_by_default", False):
+            return  # operator hasn't opted into temporal-memory promotion
+
+        try:
+            from acp.memory.graphiti_client import rollup_mission_to_graphiti
+        except ImportError:
+            logger.debug(
+                "mission rollup skipped for %s — memory extra not installed",
+                mission.mission_id,
+            )
+            return
+
+        try:
+            # The orchestrator is a sync entry point (run_workflow uses
+            # asyncio.run per step), so there is no running loop here.
+            asyncio.run(
+                rollup_mission_to_graphiti(
+                    mission,
+                    graphiti_group_id=getattr(cfg.memory, "graphiti_group_id", ""),
+                    memory_config=cfg.memory,
+                )
+            )
+            logger.info("mission rollup ingested for %s", mission.mission_id)
+        except RuntimeError as exc:
+            # Called from within a running event loop — best-effort skip.
+            logger.warning(
+                "mission rollup skipped for %s — cannot start from a running event loop (%s)",
+                mission.mission_id,
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "mission rollup failed for %s (mission completion unaffected): %s",
+                mission.mission_id,
+                exc,
+            )

@@ -442,6 +442,8 @@ def run_workflow(
     mission_id: str = "",
     mission_step_index: int = -1,
     parent_task_id: str = "",
+    mission_goal: str = "",
+    mission_description: str = "",
     recursion_depth: int = 0,
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state (sync).
@@ -464,6 +466,8 @@ def run_workflow(
             mission_id=mission_id,
             mission_step_index=mission_step_index,
             parent_task_id=parent_task_id,
+            mission_goal=mission_goal,
+            mission_description=mission_description,
             recursion_depth=recursion_depth,
         )
     )
@@ -480,6 +484,8 @@ async def run_workflow_async(
     mission_id: str = "",
     mission_step_index: int = -1,
     parent_task_id: str = "",
+    mission_goal: str = "",
+    mission_description: str = "",
     recursion_depth: int = 0,
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
@@ -617,6 +623,11 @@ async def run_workflow_async(
         state["mission_id"] = mission_id
         state["mission_step_index"] = mission_step_index
         state["parent_task_id"] = parent_task_id
+        # v0.9.0 (Step 7): Thread the mission goal/description so create_task
+        # can persist them on the durable Task and the Graphiti episode text
+        # can be mission-aware.
+        state["mission_goal"] = mission_goal
+        state["mission_description"] = mission_description
     state["recursion_depth"] = recursion_depth
 
     import uuid

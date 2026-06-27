@@ -183,6 +183,17 @@ class Task(BaseModel):
     # MAX_SUBTASK_RECURSION_DEPTH to prevent agent fork bombs where
     # an agent recursively delegates to subtasks indefinitely.
     recursion_depth: int = 0
+    # v0.9.0 (Step 7): Mission context — persisted on the Task so that
+    # memory extraction (Graphiti episode text) and the CLI ``acp memory
+    # promote`` path can see the overarching mission goal/description
+    # without re-loading the Mission. Empty for non-mission runs. The
+    # ephemeral ACPState already carried mission_id/step_index/parent for
+    # artifact chaining; these fields make the *goal* durable so the
+    # Graphiti LLM extraction prompt is mission-aware.
+    mission_id: str = ""
+    mission_goal: str = ""
+    mission_description: str = ""
+    mission_step_index: int = 0
 
     def touch(self) -> None:
         """Stamp updated_at. Call after any status change."""

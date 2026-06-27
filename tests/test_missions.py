@@ -914,6 +914,157 @@ def test_run_single_step_runs_pending_step(tmp_path, monkeypatch):
     assert mission.steps[0].task_id == "task_test_0001"
 
 
+def test_run_single_step_threads_mission_goal_to_workflow(tmp_path, monkeypatch):
+    """v0.9.0 (Step 7): the orchestrator passes mission goal/description to run_workflow."""
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Migrate to React 19",
+        description="Incremental migration of the legacy view layer.",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+
+    captured: dict = {}
+
+    def fake_run_workflow(**kwargs):
+        captured.update(kwargs)
+        return {"task_id": "task_test_0002", "status": "passed"}
+
+    monkeypatch.setattr("acp.graph.workflow.run_workflow", fake_run_workflow)
+
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    orch.run_single_step(mid, 0)
+
+    assert captured.get("mission_id") == mid
+    assert captured.get("mission_goal") == "Migrate to React 19"
+    assert captured.get("mission_description") == "Incremental migration of the legacy view layer."
+    assert captured.get("mission_step_index") == 0
+
+
+def _write_config_with_memory_promotion(path: Path) -> Path:
+    """A minimal config with memory.promote_reports_by_default=true (for rollup tests)."""
+    path.write_text(
+        "repo:\n  name: demo\n  path: .\n  default_branch: main\n"
+        "agent:\n  default: shell\ncommands:\n  test: echo ok\nreview: {}\n"
+        "memory:\n  promote_reports_by_default: true\n"
+    )
+    return path
+
+
+def test_mission_completion_triggers_rollup_when_enabled(tmp_path, monkeypatch):
+    """v0.9.0 (Step 7b): completing a mission ingests a rollup episode when opted in."""
+    from unittest.mock import AsyncMock
+
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Migrate to React 19",
+        description="Incremental migration.",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+
+    monkeypatch.setattr(
+        "acp.graph.workflow.run_workflow",
+        lambda **kwargs: {"task_id": "task_rollup_0001", "status": "passed"},
+    )
+    rollup_mock = AsyncMock(return_value={"episode_id": "ep-rollup", "nodes_created": 3})
+    monkeypatch.setattr("acp.memory.graphiti_client.rollup_mission_to_graphiti", rollup_mock)
+
+    config_path = _write_config_with_memory_promotion(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    orch.run_single_step(mid, 0)
+
+    # Mission reached COMPLETED and the rollup was invoked with that mission.
+    assert store.load(mid).status == MissionStatus.COMPLETED
+    assert rollup_mock.await_count == 1
+    args, kwargs = rollup_mock.call_args
+    rolled_mission = args[0] if args else kwargs.get("mission")
+    assert rolled_mission.mission_id == mid
+    assert rolled_mission.goal == "Migrate to React 19"
+
+
+def test_mission_completion_skips_rollup_when_promotion_disabled(tmp_path, monkeypatch):
+    """Without promote_reports_by_default, mission completion does not call the rollup."""
+    from unittest.mock import AsyncMock
+
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(mission_id=mid, goal="G", repo_name="demo", repo_path=tmp_path)
+    store.add_step(mid, "Step A")
+
+    monkeypatch.setattr(
+        "acp.graph.workflow.run_workflow",
+        lambda **kwargs: {"task_id": "task_norollup_0001", "status": "passed"},
+    )
+    rollup_mock = AsyncMock()
+    monkeypatch.setattr("acp.memory.graphiti_client.rollup_mission_to_graphiti", rollup_mock)
+
+    # Minimal config has no memory.promote_reports_by_default → defaults False.
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    orch.run_single_step(mid, 0)
+
+    assert store.load(mid).status == MissionStatus.COMPLETED
+    assert rollup_mock.await_count == 0
+
+
+def test_rollup_mission_to_graphiti_text_contains_goal_and_steps(tmp_path):
+    """_build_mission_rollup_text frames the mission goal + per-step outcomes for the LLM."""
+    from acp.memory.graphiti_client import _build_mission_rollup_text
+    from acp.models import MissionStep
+
+    mission = _make_mission(mid := "mission_20260627_0001", goal="Harden the API")
+    mission.description = "Add rate limiting + auth checks."
+    mission.steps = [
+        MissionStep(
+            description="Add rate limiting",
+            prompt="Add a token-bucket limiter",
+            task_id="t1",
+            status="completed",
+        ),
+        MissionStep(description="Add auth checks", task_id="t2", status="completed"),
+    ]
+
+    text = _build_mission_rollup_text(mission)
+
+    assert "Mission Rollup:" in text
+    assert f"Mission ID: {mid}" in text
+    assert "Mission Goal: Harden the API" in text
+    assert "Mission Description: Add rate limiting + auth checks." in text
+    assert "Step Count: 2" in text
+    assert "Step 0" in text and "t1" in text and "status=completed" in text
+    assert "Step 1" in text and "t2" in text
+    assert "Mission Conclusions" in text
+
+
 def test_run_single_step_refuses_completed_mission(tmp_path, monkeypatch):
     """run_single_step raises ValueError for a completed mission."""
     from acp.missions.orchestrator import MissionOrchestrator

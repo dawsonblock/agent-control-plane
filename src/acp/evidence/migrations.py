@@ -121,6 +121,17 @@ TASK_STORE_MIGRATIONS: list[list[str]] = [
     [
         "ALTER TABLE tasks ADD COLUMN orphan_reason TEXT DEFAULT ''",
     ],
+    # Migration 2 → 3: v0.9.0 (Step 7) — Mission context columns so the
+    # durable Task carries the overarching mission goal/description. This
+    # makes Graphiti memory extraction mission-aware on the
+    # ``task_store_primary="sqlite"`` path (the json path gets them via
+    # model_dump). All default to empty/0 so existing rows are back-compat.
+    [
+        "ALTER TABLE tasks ADD COLUMN mission_id TEXT DEFAULT ''",
+        "ALTER TABLE tasks ADD COLUMN mission_goal TEXT DEFAULT ''",
+        "ALTER TABLE tasks ADD COLUMN mission_description TEXT DEFAULT ''",
+        "ALTER TABLE tasks ADD COLUMN mission_step_index INTEGER DEFAULT 0",
+    ],
 ]
 
 

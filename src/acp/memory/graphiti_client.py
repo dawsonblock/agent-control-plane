@@ -30,7 +30,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
-from acp.models import Task
+from acp.models import Mission, Task
 from acp.vault.frontmatter import Frontmatter, parse_frontmatter
 
 logger = logging.getLogger(__name__)
@@ -351,6 +351,12 @@ def _build_episode_text(
     The episode text is what Graphiti's LLM processes to extract entities
     and edges. It includes the task metadata, the repo, the branch, and
     the vault note body (which contains the report).
+
+    v0.9.0 (Step 7): When the task belongs to a mission (``task.mission_id``
+    set), a ``Mission Context`` block is prepended so the extraction LLM
+    sees the overarching goal/description and the step's position in the
+    chain. This makes extracted facts mission-aware instead of treating
+    each task as an isolated unit.
     """
     content = vault_note_path.read_text(encoding="utf-8")
     try:
@@ -358,19 +364,36 @@ def _build_episode_text(
     except ValueError:
         body = content
 
-    parts = [
-        f"Task: {task.task_id}",
-        f"Repo: {task.repo_name}",
-        f"Branch: {task.task_branch}",
-        f"Status: {task.status.value}",
-        f"User Request: {task.user_request}",
-        f"Risk: {frontmatter.risk or 'unknown'}",
-        f"Recommendation: {frontmatter.recommendation or 'unknown'}",
-        f"Files Changed: {frontmatter.files_changed or 0}",
-        "",
-        "Report:",
-        body,
-    ]
+    parts: list[str] = []
+    # v0.9.0 (Step 7): Mission context first, so the LLM frames the task
+    # against the overarching goal before reading the task detail.
+    if task.mission_id:
+        parts.extend(
+            [
+                "Mission Context:",
+                f"Mission ID: {task.mission_id}",
+                f"Mission Goal: {task.mission_goal or '(unspecified)'}",
+            ]
+        )
+        if task.mission_description:
+            parts.append(f"Mission Description: {task.mission_description}")
+        parts.append(f"Step Index: {task.mission_step_index}")
+        parts.append("")
+    parts.extend(
+        [
+            f"Task: {task.task_id}",
+            f"Repo: {task.repo_name}",
+            f"Branch: {task.task_branch}",
+            f"Status: {task.status.value}",
+            f"User Request: {task.user_request}",
+            f"Risk: {frontmatter.risk or 'unknown'}",
+            f"Recommendation: {frontmatter.recommendation or 'unknown'}",
+            f"Files Changed: {frontmatter.files_changed or 0}",
+            "",
+            "Report:",
+            body,
+        ]
+    )
     return "\n".join(parts)
 
 
@@ -495,6 +518,109 @@ async def ingest_task_to_graphiti(
         "episode_id": getattr(result.episode, "uuid", str(result.episode)),
         "nodes_created": len(result.nodes) if hasattr(result, "nodes") else 0,
         "edges_created": len(result.edges) if hasattr(result, "edges") else 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Mission rollup (v0.9.0 Step 7b)
+# --------------------------------------------------------------------------- #
+
+
+def _build_mission_rollup_text(mission: Mission) -> str:
+    """Build the consolidated mission rollup episode text.
+
+    Includes the mission goal/description and a concise per-step summary
+    (step index, task_id, prompt/description, status). The per-task
+    episodes — ingested via :func:`ingest_task_to_graphiti` and now
+    mission-aware via Step 7a — hold the detailed facts; this rollup gives
+    the extraction LLM the mission-level framing it needs to synthesize
+    high-level "Mission Conclusions" and link them back to the per-task
+    work. This prevents future working-memory retrieval from flooding the
+    context window with micro-facts when only the mission-level summary
+    is relevant.
+    """
+    parts = [
+        "Mission Rollup:",
+        f"Mission ID: {mission.mission_id}",
+        f"Mission Goal: {mission.goal}",
+    ]
+    if mission.description:
+        parts.append(f"Mission Description: {mission.description}")
+    parts.append(f"Step Count: {len(mission.steps)}")
+    parts.append("")
+    parts.append("Steps:")
+    for idx, step in enumerate(mission.steps):
+        outcome = step.prompt or step.description
+        parts.append(
+            f"- Step {idx}: task_id={step.task_id or '(not spawned)'} "
+            f"status={step.status} — {outcome}"
+        )
+    parts.append("")
+    parts.append(
+        "Synthesize high-level Mission Conclusions that link the per-task "
+        "work above to the overarching Mission Goal."
+    )
+    return "\n".join(parts)
+
+
+async def rollup_mission_to_graphiti(
+    mission: Mission,
+    *,
+    graphiti_group_id: str = "",
+    memory_config: Any = None,
+) -> dict[str, Any]:
+    """Ingest a mission-level rollup episode into Graphiti on mission completion.
+
+    When a mission is marked COMPLETED, this builds one consolidated
+    episode covering the overarching goal + each step's outcome and
+    ingests it via Graphiti. The extraction LLM derives high-level
+    "Mission Conclusions" and links them to the per-task episodes (which
+    already carry mission context via Step 7a).
+
+    Best-effort: callers should guard ``ImportError`` (memory extra
+    missing) and FalkorDB/LLM errors so a rollup failure never breaks
+    mission completion. See :meth:`MissionOrchestrator._trigger_mission_rollup`
+    for the guarded sync entry point.
+
+    Args:
+        mission: The completed mission (goal, description, steps with
+            task_id/status/prompt).
+        graphiti_group_id: Optional Graphiti group ID for multi-tenant
+            isolation. Defaults to "" (default group).
+        memory_config: Optional :class:`MemorySection` for custom
+            LLM/embedder clients.
+
+    Returns:
+        ``{"mission_id", "episode_id", "nodes_created", "edges_created",
+        "step_count"}``
+
+    Raises:
+        ImportError: If ``graphiti-core[falkordb]`` is not installed.
+        Exception: If FalkorDB is not running or the LLM fails.
+    """
+    from graphiti_core.nodes import EpisodeType
+
+    rollup_text = _build_mission_rollup_text(mission)
+
+    client = _get_graphiti_client(group_id=graphiti_group_id, memory_config=memory_config)
+    try:
+        group_id = graphiti_group_id or "default"
+        result = await client.add_episode(
+            rollup_text,
+            episode_type=EpisodeType.text,
+            group_id=group_id,
+            reference_id=mission.mission_id,
+            source_description=f"ACP mission rollup — {mission.mission_id}",
+        )
+    finally:
+        await client.close()
+
+    return {
+        "mission_id": mission.mission_id,
+        "episode_id": getattr(result.episode, "uuid", str(result.episode)),
+        "nodes_created": len(result.nodes) if hasattr(result, "nodes") else 0,
+        "edges_created": len(result.edges) if hasattr(result, "edges") else 0,
+        "step_count": len(mission.steps),
     }
 
 

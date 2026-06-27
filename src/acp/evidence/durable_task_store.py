@@ -94,8 +94,9 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         self._conn.execute(
             "INSERT INTO tasks (task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            "task_branch, worktree_path, user_request, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(task_id) DO UPDATE SET "
             "repo_name=excluded.repo_name, "
             "repo_path=excluded.repo_path, "
@@ -106,7 +107,11 @@ class DurableTaskStore:
             "user_request=excluded.user_request, "
             "status=excluded.status, "
             "created_at=excluded.created_at, "
-            "updated_at=excluded.updated_at",
+            "updated_at=excluded.updated_at, "
+            "mission_id=excluded.mission_id, "
+            "mission_goal=excluded.mission_goal, "
+            "mission_description=excluded.mission_description, "
+            "mission_step_index=excluded.mission_step_index",
             (
                 task.task_id,
                 task.repo_name,
@@ -119,6 +124,10 @@ class DurableTaskStore:
                 task.status.value,
                 task.created_at,
                 task.updated_at,
+                task.mission_id,
+                task.mission_goal,
+                task.mission_description,
+                task.mission_step_index,
             ),
         )
 
@@ -128,7 +137,8 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         row = self._conn.execute(
             "SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            "task_branch, worktree_path, user_request, status, created_at, updated_at "
+            "task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             "FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
@@ -175,7 +185,8 @@ class DurableTaskStore:
         params.append(limit)
         rows = self._conn.execute(
             f"SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            f"task_branch, worktree_path, user_request, status, created_at, updated_at "
+            f"task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             f"FROM tasks{where} ORDER BY created_at ASC LIMIT ?",
             params,
         ).fetchall()
@@ -240,7 +251,8 @@ class DurableTaskStore:
         placeholders = ",".join("?" * len(orphaned_statuses))
         rows = self._conn.execute(
             f"SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            f"task_branch, worktree_path, user_request, status, created_at, updated_at "
+            f"task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             f"FROM tasks WHERE status IN ({placeholders}) ORDER BY created_at ASC",
             orphaned_statuses,
         ).fetchall()
@@ -438,8 +450,15 @@ class DurableTaskStore:
         self.close()
 
 
-def _row_to_task(row: tuple[str, str, str, str, str, str, str, str, str, str, str]) -> Task:
-    """Convert a SQLite row to a Task model."""
+def _row_to_task(row: tuple[Any, ...]) -> Task:
+    """Convert a SQLite row to a Task model.
+
+    The row must include the v0.9.0 mission-context columns
+    (mission_id, mission_goal, mission_description, mission_step_index)
+    appended after updated_at. Rows from a pre-migration database lack
+    those trailing entries; callers always SELECT the full column list so
+    the row width is consistent.
+    """
     return Task(
         task_id=row[0],
         repo_name=row[1],
@@ -452,4 +471,9 @@ def _row_to_task(row: tuple[str, str, str, str, str, str, str, str, str, str, st
         status=TaskStatus(row[8]),
         created_at=row[9],
         updated_at=row[10],
+        # v0.9.0 (Step 7): mission context (defaults if absent — back-compat).
+        mission_id=row[11] if len(row) > 11 else "",
+        mission_goal=row[12] if len(row) > 12 else "",
+        mission_description=row[13] if len(row) > 13 else "",
+        mission_step_index=row[14] if len(row) > 14 else 0,
     )

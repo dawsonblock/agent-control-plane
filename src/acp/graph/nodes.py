@@ -263,6 +263,13 @@ async def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         base_branch=cfg.repo.default_branch,
         user_request=state["user_request"],
         recursion_depth=state.get("recursion_depth", 0),
+        # v0.9.0 (Step 7): Persist mission context on the durable Task so
+        # memory extraction (Graphiti episode text) and ``acp memory promote``
+        # are mission-aware without re-loading the Mission.
+        mission_id=state.get("mission_id", ""),
+        mission_goal=state.get("mission_goal", ""),
+        mission_description=state.get("mission_description", ""),
+        mission_step_index=state.get("mission_step_index", 0),
     )
     ctx.events.write(EventType.TASK_CREATED, {"request": state["user_request"]})
     return {
