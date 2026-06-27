@@ -13,6 +13,7 @@ enough, delete this module and the tests that depend on it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ from acp.review.gates import GateOutcome, evaluate_final_gates
 from acp.store import TaskStore
 from acp.testing.runner import run_commands, validation_passed, validation_status
 from acp.vault.obsidian_writer import write_vault_note
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -167,8 +170,8 @@ class EvidenceLoop:
             if not self.keep_worktree:
                 try:
                     remove_worktree(repo_path, worktree_path)
-                except Exception:  # noqa: BLE001
-                    pass  # cleanup is best-effort
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("worktree cleanup failed (best-effort): %s", exc)
 
     def _run_after_worktree(
         self,

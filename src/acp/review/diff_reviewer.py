@@ -29,6 +29,7 @@ Check categories:
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
 from acp.review.secret_scanner import scan_diff
 from acp.testing.runner import validation_passed, validation_ran, validation_status
+
+logger = logging.getLogger(__name__)
 
 # --- path heuristics (lowercase substring matches) ------------------------- #
 
@@ -361,8 +364,8 @@ def _evaluate(
             )
             if skill:
                 apply_skill_review_gates(engine, skill, diff.changed_files)
-        except Exception:  # noqa: BLE001
-            pass  # Skills not available — don't block the review
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skills not available — don't block the review: %s", exc)
 
     risk = engine.level
     recommendation = engine.recommend(

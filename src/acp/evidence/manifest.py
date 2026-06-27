@@ -31,11 +31,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from acp.events import EventWriter, verify_event_chain
+
+logger = logging.getLogger(__name__)
 
 EVIDENCE_CONFIG_FILENAME = "evidence_config.json"
 
@@ -673,8 +676,8 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
                 if peek_evt.type.value == "evidence.finalized":
                     has_finalized_peek = True
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("failed to peek finalized event: %s", exc)
 
     # Fast mode can skip individual hash recompute only when evidence.finalized
     # exists (its artifact_content_hash covers all artifacts). Otherwise,

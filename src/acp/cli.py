@@ -10,6 +10,7 @@ test-only equivalence checks.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ from acp.evidence.lifecycle import (
 )
 from acp.models import EventType, Task, TaskStatus
 from acp.store import TaskStore, is_valid_task_id
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="acp",
@@ -398,8 +401,8 @@ def _verify_impl(
                     f"task.json is a projection and must match."
                 )
                 all_ok = False
-        except Exception:
-            pass  # malformed task.json already reported above
+        except Exception as exc:
+            logger.warning("status consistency check failed: %s", exc)
 
     # 2. Evidence manifest — required for v0.5.10+ runs (those with
     # evidence.finalized). Missing manifest is fatal, not a warning.

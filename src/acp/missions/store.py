@@ -21,6 +21,7 @@ under ``data/missions/``, never under ``data/runs/``, so ``acp verify``
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,8 @@ import yaml
 
 from acp.events import EventWriter
 from acp.models import EventType, Mission, MissionStatus, _utcnow_iso
+
+logger = logging.getLogger(__name__)
 
 # mission_20260626_0001
 _MISSION_ID_RE = re.compile(r"^mission_(\d{8})_(\d{4})$")
@@ -173,8 +176,9 @@ class MissionStore:
                 continue
             try:
                 missions.append(Mission.model_validate(yaml.safe_load(yaml_path.read_text())))
-            except Exception:  # noqa: BLE001
-                pass  # skip malformed
+            except Exception as exc:  # noqa: BLE001
+                # v0.7.4: Log the error instead of silently skipping.
+                logger.error("Failed to load mission from %s: %s", yaml_path, exc)
         return missions
 
     # ------------------------------------------------------------------ #

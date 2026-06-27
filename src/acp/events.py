@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from datetime import UTC
 from pathlib import Path
 from typing import Any
 
 from acp.models import Event, EventType, next_event_id
+
+logger = logging.getLogger(__name__)
 
 GENESIS_HASH = "GENESIS"
 
@@ -149,8 +152,8 @@ class EventWriter:
                 try:
                     evt = Event.model_validate_json(line)
                     self._prev_hash = evt.hash or GENESIS_HASH
-                except Exception:  # noqa: BLE001
-                    pass  # malformed line — keep the last good hash
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("malformed event line during hash recompute: %s", exc)
 
     def set_signing_key(self, private_key: bytes) -> None:
         """Set an Ed25519 private key for signing events.
@@ -195,8 +198,8 @@ class EventWriter:
                 try:
                     evt = Event.model_validate_json(line)
                     self._prev_hash = evt.hash or GENESIS_HASH
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("skipping malformed event line during hash recompute: %s", exc)
 
     def write(self, type: EventType, payload: dict[str, Any] | None = None) -> Event:
         """Append one event, fsync it to disk, and return the Event object.
@@ -279,8 +282,9 @@ class EventWriter:
                 continue
             try:
                 events.append(Event.model_validate_json(line))
-            except Exception:  # noqa: BLE001
-                continue  # skip malformed line
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("skipping malformed event line in read_all: %s", exc)
+                continue
         return events
 
     @property

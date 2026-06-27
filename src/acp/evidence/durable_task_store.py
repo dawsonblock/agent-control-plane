@@ -40,12 +40,15 @@ Schema:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from acp.models import Task, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -209,8 +212,9 @@ class DurableTaskStore:
                 task = Task.model_validate_json(task_json.read_text())
                 self.save(task)
                 count += 1
-            except Exception:  # noqa: BLE001
-                pass  # skip malformed task.json
+            except Exception as exc:  # noqa: BLE001
+                # v0.7.4: Log the error instead of silently skipping.
+                logger.error("Failed to load task.json during rebuild: %s", exc)
         return count
 
     def close(self) -> None:
@@ -293,14 +297,14 @@ class DurableTaskStore:
                 if wt_path and Path(wt_path).is_dir():
                     try:
                         remove_worktree(task.repo_path, Path(wt_path))
-                    except Exception:  # noqa: BLE001
-                        pass  # best-effort cleanup
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("worktree cleanup failed for %s: %s", task.task_id, exc)
 
                 recovered.append(task.task_id)
                 if on_recovered is not None:
                     on_recovered(task.task_id)
-            except Exception:  # noqa: BLE001
-                pass  # best-effort — continue recovering other tasks
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to recover orphaned task: %s", exc)
 
         return recovered
 
@@ -323,10 +327,6 @@ class DurableTaskStore:
         are detected, the caller should emit a ``store.integrity_breach``
         event and refuse to proceed with the affected tasks.
         """
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         runs_root = Path(runs_root)
         breaches: list[dict[str, str]] = []
 

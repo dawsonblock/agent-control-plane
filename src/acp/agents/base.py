@@ -12,11 +12,14 @@ through ``build_agent`` (see agents/registry.py, added in M2).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from acp.config import RepoConfig
 from acp.models import AgentResult
+
+logger = logging.getLogger(__name__)
 
 
 def write_prompt(
@@ -64,8 +67,8 @@ def write_prompt(
                     f"Follow them in addition to the general constraints below.\n\n"
                     f"{instructions}\n"
                 )
-        except Exception:  # noqa: BLE001
-            pass  # Skills not available — don't block the run
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skills not available — don't block the run: %s", exc)
 
     # v0.6.9: Inject federated MCP tool capabilities when configured.
     federation_section = ""
@@ -83,8 +86,8 @@ def write_prompt(
             tools_by_server = fm.discover_tools()
             federation_section = fm.build_prompt_section(tools_by_server)
             fm.stop_all()
-        except Exception:  # noqa: BLE001
-            pass  # Federation not available — don't block the run
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("federation not available — don't block the run: %s", exc)
 
     body = f"""You are operating inside an isolated git worktree. A control plane
 is watching you. Everything you print is captured. The diff you produce is

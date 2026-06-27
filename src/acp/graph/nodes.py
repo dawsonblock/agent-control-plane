@@ -509,8 +509,8 @@ def _parse_and_emit_subtasks(
         )
         if result.requests:
             emit_subtask_events(result.requests, ctx.events)
-    except Exception:  # noqa: BLE001
-        pass  # best-effort — sub-task parsing must never crash the run
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sub-task parsing failed (best-effort, run continues): %s", exc)
 
 
 def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
@@ -824,8 +824,8 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 "dependencies_hash": agent_file.environment.dependencies_hash,
                 "python_version": agent_file.environment.python_version,
             }
-    except Exception:  # noqa: BLE001
-        pass  # best-effort — environment info in event is optional
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("environment info collection failed (best-effort): %s", exc)
 
     ctx.events.write(EventType.AGENT_STARTED, agent_started_payload)
     agent_result = agent.run(
