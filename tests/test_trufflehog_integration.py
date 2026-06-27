@@ -194,10 +194,18 @@ class TestTruffleHogVerifiedFiltering:
 
         mock_proc = MagicMock(stdout=th_output, stderr="", returncode=0)
 
+        # v0.7.4: The scanner now streams stdout to a temp file. The mock
+        # needs to write to the file handle passed as the stdout kwarg.
+        def _mock_run(*args, **kwargs):
+            stdout_f = kwargs.get("stdout")
+            if stdout_f is not None:
+                stdout_f.write(th_output)
+            return mock_proc
+
         with patch(
             "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
         ):
-            with patch("acp.review.secret_scanner.subprocess.run", return_value=mock_proc):
+            with patch("acp.review.secret_scanner.subprocess.run", side_effect=_mock_run):
                 findings = scan_with_trufflehog(tmp_path)
                 # Only the verified AWS finding should be included.
                 assert len(findings) == 1
@@ -216,10 +224,17 @@ class TestTruffleHogVerifiedFiltering:
 
         mock_proc = MagicMock(stdout=th_output, stderr="", returncode=0)
 
+        # v0.7.4: The scanner now streams stdout to a temp file.
+        def _mock_run(*args, **kwargs):
+            stdout_f = kwargs.get("stdout")
+            if stdout_f is not None:
+                stdout_f.write(th_output)
+            return mock_proc
+
         with patch(
             "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
         ):
-            with patch("acp.review.secret_scanner.subprocess.run", return_value=mock_proc):
+            with patch("acp.review.secret_scanner.subprocess.run", side_effect=_mock_run):
                 findings = scan_with_trufflehog(tmp_path)
                 # Should skip the malformed line and include the valid one.
                 assert len(findings) == 1

@@ -59,8 +59,15 @@ def write_vault_note(
         raise ValueError(f"task_id contains path separators — refusing to write: {task.task_id}")
     note_path = tasks_dir / f"{task.task_id}.md"
 
-    if note_path.exists():
+    # v0.7.4: Read the existing note directly instead of TOCTOU-vulnerable
+    # exists() + read_text() pattern. If the file is deleted between the
+    # check and the read, we treat it as a new note (no existing content).
+    try:
         existing = note_path.read_text()
+    except FileNotFoundError:
+        existing = None
+
+    if existing is not None:
         try:
             frontmatter, _ = parse_frontmatter(existing)
         except ValueError:

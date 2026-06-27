@@ -227,65 +227,84 @@ def scan_with_trufflehog(
         # Without this, a worktree at /Users/dev/my#project/ would produce
         # file:///Users/dev/my#project/ which TruffleHog parses incorrectly
         # (the # is treated as a URI fragment), silently returning zero findings.
-        proc = subprocess.run(
-            [
-                "trufflehog",
-                "git",
-                worktree_path.resolve().as_uri(),
-                "--json",
-                "--no-update",
-                "--results=verified,unknown,unverified",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired:
-        return []
-    except FileNotFoundError:
+        # v0.7.4: Stream stdout to a temp file instead of capturing into
+        # memory. TruffleHog on a large repo can produce hundreds of MB
+        # of JSON output, which would cause OOM with capture_output=True.
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as stdout_f:
+            stdout_tmp_path = Path(stdout_f.name)
+        try:
+            with open(stdout_tmp_path, "w") as stdout_f:
+                subprocess.run(
+                    [
+                        "trufflehog",
+                        "git",
+                        worktree_path.resolve().as_uri(),
+                        "--json",
+                        "--no-update",
+                        "--results=verified,unknown,unverified",
+                    ],
+                    stdout=stdout_f,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+        except subprocess.TimeoutExpired:
+            stdout_tmp_path.unlink(missing_ok=True)
+            return []
+        except FileNotFoundError:
+            stdout_tmp_path.unlink(missing_ok=True)
+            return []
+    except Exception:  # noqa: BLE001
         return []
 
     # TruffleHog outputs one JSON object per line on stdout.
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    # v0.7.4: Read from the temp file instead of proc.stdout.
+    try:
+        for line in stdout_tmp_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-        # TruffleHog JSON format includes:
-        # - DetectorName: the type of secret detected
-        # - Verified: whether the secret was verified as live
-        # - Raw: the raw secret value (we redact this)
-        # - SourceMetadata: file path, line number
-        # We only include verified findings to avoid false positives.
-        detector = obj.get("DetectorName", "unknown")
-        verified = obj.get("Verified", False)
-        raw_secret = obj.get("Raw", "")
-        source_meta = obj.get("SourceMetadata", {})
-        line_no = 0
+            # TruffleHog JSON format includes:
+            # - DetectorName: the type of secret detected
+            # - Verified: whether the secret was verified as live
+            # - Raw: the raw secret value (we redact this)
+            # - SourceMetadata: file path, line number
+            # We only include verified findings to avoid false positives.
+            detector = obj.get("DetectorName", "unknown")
+            verified = obj.get("Verified", False)
+            raw_secret = obj.get("Raw", "")
+            source_meta = obj.get("SourceMetadata", {})
+            line_no = 0
 
-        # Extract line number from source metadata if available.
-        metadata = source_meta.get("Metadata", {})
-        if isinstance(metadata, dict):
-            line_no = metadata.get("line", 0)
+            # Extract line number from source metadata if available.
+            metadata = source_meta.get("Metadata", {})
+            if isinstance(metadata, dict):
+                line_no = metadata.get("line", 0)
 
-        # Only include verified findings — TruffleHog's key advantage.
-        if not verified:
-            continue
+            # Only include verified findings — TruffleHog's key advantage.
+            if not verified:
+                continue
 
-        kind = f"trufflehog:{detector.lower()}"
-        snippet = _redact(raw_secret) if raw_secret else "(verified secret detected)"
+            kind = f"trufflehog:{detector.lower()}"
+            snippet = _redact(raw_secret) if raw_secret else "(verified secret detected)"
 
-        findings.append(
-            SecretFinding(
-                kind=kind,
-                snippet=snippet,
-                line_no=line_no,
+            findings.append(
+                SecretFinding(
+                    kind=kind,
+                    snippet=snippet,
+                    line_no=line_no,
+                )
             )
-        )
+    finally:
+        # v0.7.4: Clean up the temp file.
+        stdout_tmp_path.unlink(missing_ok=True)
 
     return findings
 

@@ -116,9 +116,11 @@ class MissionStore:
         Returns the created :class:`Mission`.
         """
         mission_dir = self.mission_dir(mission_id)
-        if mission_dir.exists():
-            raise FileExistsError(f"mission dir already exists: {mission_dir}")
-        mission_dir.mkdir(parents=True, exist_ok=True)
+        # v0.7.4: Atomic existence check via mkdir instead of TOCTOU pattern.
+        try:
+            mission_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            raise FileExistsError(f"mission dir already exists: {mission_dir}") from None
 
         from acp.models import MissionStep
 

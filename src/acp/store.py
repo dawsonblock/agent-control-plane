@@ -167,8 +167,12 @@ class TaskStore:
     ) -> Task:
         """Initialize a run directory and write the initial task.json."""
         run_dir = self.run_dir(task_id)
-        if run_dir.exists():
-            raise FileExistsError(f"run dir already exists: {run_dir}")
+        # v0.7.4: Atomic existence check via mkdir instead of TOCTOU-vulnerable
+        # exists() + mkdir() pattern.
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            raise FileExistsError(f"run dir already exists: {run_dir}") from None
         self.artifacts_dir(task_id).mkdir(parents=True, exist_ok=True)
 
         task = Task(

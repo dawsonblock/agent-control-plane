@@ -31,6 +31,7 @@ graph to be drivable and its transitions observable.)
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -67,6 +68,8 @@ from acp.models import Event, EventType, TaskStatus
 from acp.store import TaskStore
 from acp.testing.runner import validation_passed, validation_ran
 
+_logger = logging.getLogger(__name__)
+
 
 def node_error_handler(node_fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Wrap a graph node so unhandled exceptions produce a FAILED state.
@@ -94,7 +97,15 @@ def node_error_handler(node_fn: Callable[..., dict[str, Any]]) -> Callable[..., 
                         "message": str(exc),
                     },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as event_exc:  # noqa: BLE001
+                # v0.7.4: Log the event write failure so operators can
+                # diagnose evidence chain breaks instead of silently
+                # setting a flag that's only visible in the state.
+                _logger.error(
+                    "Failed to write node_failed event for %s: %s",
+                    node_fn.__name__,
+                    event_exc,
+                )
                 event_write_failed = True
             patch: dict[str, Any] = {
                 "status": TaskStatus.FAILED,

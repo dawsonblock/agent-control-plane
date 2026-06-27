@@ -26,6 +26,7 @@ custom ``llm_client`` to :func:`_get_graphiti_client`.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from datetime import UTC
 from pathlib import Path
@@ -44,17 +45,51 @@ def _run_async(coro: Any) -> Any:
     the current thread already has a running loop (e.g. inside an
     async web framework). This prevents ``RuntimeError: This event
     loop is already running``.
+
+    v0.7.4: Uses a module-level persistent ThreadPoolExecutor instead
+    of creating/destroying one per call. This avoids the overhead of
+    thread creation for every Graphiti operation and prevents resource
+    leaks from abandoned executors. The executor is lazily initialized
+    on first use and shared across all calls.
+
+    The proper long-term fix is to make the CLI commands and LangGraph
+    nodes async-native, eliminating the need for this workaround entirely.
+    See: https://langchain-ai.github.io/langgraph/how-tos/async/
     """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop is not None:
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+        return _async_pool_proxy.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
+
+
+# v0.7.4: Module-level persistent thread pool for async-in-sync workaround.
+# Lazily initialized to avoid creating threads when Graphiti isn't used.
+_async_pool: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_async_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or create the module-level thread pool for async operations."""
+    global _async_pool
+    if _async_pool is None:
+        _async_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="graphiti-async",
+        )
+    return _async_pool
+
+
+# Use the property pattern so the pool is lazily created on first access.
+class _AsyncPoolProxy:
+    """Lazy proxy that creates the thread pool on first use."""
+
+    def submit(self, *args: Any, **kwargs: Any) -> Any:
+        return _get_async_pool().submit(*args, **kwargs)
+
+
+_async_pool_proxy = _AsyncPoolProxy()
 
 
 # --------------------------------------------------------------------------- #

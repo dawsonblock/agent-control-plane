@@ -131,28 +131,37 @@ class CLIAgent:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                argv,
-                cwd=str(worktree_path),
-                shell=use_shell,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            # v0.7.4: Stream stdout/stderr directly to files instead of
+            # capturing into memory. Same OOM fix as the OpenHands/sbx/gvisor
+            # executors — prevents memory exhaustion on long agent runs.
+            with (
+                open(stdout_path, "w") as stdout_f,
+                open(stderr_path, "w") as stderr_f,
+            ):
+                proc = subprocess.run(
+                    argv,
+                    cwd=str(worktree_path),
+                    shell=use_shell,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
             exit_code = proc.returncode
-            out, err = proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             exit_code = 124  # standard timeout exit code
-            out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            err = f"acp: agent timed out after {timeout_seconds}s\n{err}"
+            # Files already have partial output — append timeout notice.
+            stderr_path.write_text(
+                stderr_path.read_text(encoding="utf-8", errors="replace")
+                + f"\nacp: agent timed out after {timeout_seconds}s\n",
+                encoding="utf-8",
+            )
         except Exception as exc:  # noqa: BLE001
             exit_code = 127
-            out, err = "", f"acp: failed to spawn agent: {exc}"
+            stdout_path.write_text("")
+            stderr_path.write_text(f"acp: failed to spawn agent: {exc}")
 
         duration = time.monotonic() - start
-        stdout_path.write_text(out)
-        stderr_path.write_text(err)
 
         return AgentResult(
             agent_name=self.name,

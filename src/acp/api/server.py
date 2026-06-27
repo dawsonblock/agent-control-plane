@@ -465,6 +465,110 @@ if BearerTokenMiddleware is not None:
 
 
 # --------------------------------------------------------------------------- #
+# Rate limiting (v0.7.4)
+# --------------------------------------------------------------------------- #
+
+
+class RateLimitMiddleware:
+    """Simple in-memory rate limiter using a sliding window.
+
+    v0.7.4: Lightweight rate limiting without external dependencies.
+    Tracks request timestamps per client IP in memory. When the number
+    of requests in the window exceeds the limit, returns 429 Too Many
+    Requests.
+
+    This is defense-in-depth on top of the bearer token auth — it
+    prevents authenticated clients from overwhelming the API with
+    expensive operations like /tasks/run.
+
+    Configurable via environment variables:
+      - ACP_RATE_LIMIT_ENABLED: "false" to disable (default: enabled)
+      - ACP_RATE_LIMIT_REQUESTS: max requests per window (default: 60)
+      - ACP_RATE_LIMIT_WINDOW: window size in seconds (default: 60)
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.enabled = os.environ.get("ACP_RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
+        self.max_requests = int(os.environ.get("ACP_RATE_LIMIT_REQUESTS", "60"))
+        self.window_seconds = int(os.environ.get("ACP_RATE_LIMIT_WINDOW", "60"))
+        # client_ip -> list of timestamps
+        self._requests: dict[str, list[float]] = {}
+        self._cleanup_counter = 0
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if not self.enabled or scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Extract client IP.
+        client_ip = scope.get("client", ["unknown", None])[0] if scope.get("client") else "unknown"
+        path = scope.get("path", "")
+
+        # Skip rate limiting for health checks and docs.
+        if path in _PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        import time
+
+        now = time.monotonic()
+        window_start = now - self.window_seconds
+
+        # Get or create request list for this client.
+        if client_ip not in self._requests:
+            self._requests[client_ip] = []
+        timestamps = self._requests[client_ip]
+
+        # Remove expired timestamps.
+        while timestamps and timestamps[0] < window_start:
+            timestamps.pop(0)
+
+        # Check limit.
+        if len(timestamps) >= self.max_requests:
+            # Send 429 response.
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"retry-after", str(self.window_seconds).encode()),
+                    ],
+                }
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": json.dumps(
+                        {"detail": "Rate limit exceeded. Try again in a few seconds."}
+                    ).encode(),
+                }
+            )
+            return
+
+        # Record this request.
+        timestamps.append(now)
+
+        # Periodic cleanup of stale entries to prevent memory growth.
+        self._cleanup_counter += 1
+        if self._cleanup_counter > 1000:
+            self._cleanup_counter = 0
+            stale_ips = [
+                ip
+                for ip, ts_list in self._requests.items()
+                if not ts_list or ts_list[-1] < window_start
+            ]
+            for ip in stale_ips:
+                del self._requests[ip]
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RateLimitMiddleware)
+
+
+# --------------------------------------------------------------------------- #
 # Path validation
 # --------------------------------------------------------------------------- #
 
