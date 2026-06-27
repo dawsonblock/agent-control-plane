@@ -1504,6 +1504,7 @@ def auto_approve_node(
                         frontmatter=fm,
                         vault_note_path=Path(vault_note_path),
                         graphiti_group_id=cfg.memory.graphiti_group_id,
+                        memory_config=cfg.memory,
                     )
                     ctx.events.write(
                         EventType.MEMORY_PROMOTED,

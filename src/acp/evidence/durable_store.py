@@ -138,7 +138,7 @@ class DurableEventStore:
                 event.prev_hash,
                 event.hash,
                 event.signature,
-                "ed25519",
+                event.signature_algorithm,
             ),
         )
 
@@ -163,7 +163,7 @@ class DurableEventStore:
                         event.prev_hash,
                         event.hash,
                         event.signature,
-                        "ed25519",
+                        event.signature_algorithm,
                     ),
                 )
             self._conn.execute("COMMIT")
@@ -289,8 +289,6 @@ def _row_to_event(row: tuple[str, str, str, str, str, str, str, str, str]) -> Ev
 
     Column order matches the SELECT statements: task_id, event_id, type,
     timestamp, payload, prev_hash, hash, signature, signature_algorithm.
-    The signature_algorithm column (index 8) is not yet used by the Event
-    model — it's reserved for future multi-algorithm support.
     """
     return Event(
         task_id=row[0],
@@ -301,4 +299,5 @@ def _row_to_event(row: tuple[str, str, str, str, str, str, str, str, str]) -> Ev
         prev_hash=row[5],
         hash=row[6],
         signature=row[7] or "",
+        signature_algorithm=row[8] or "ed25519",
     )

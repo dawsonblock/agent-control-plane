@@ -10,9 +10,13 @@ runs (Claude Code, Codex, OpenHands, etc.). These are separate concerns:
 
 v0.5.13: ``worktree`` (default) and ``docker_sbx`` backends.
 v0.7.0 (Phase 2.1): ``openhands`` backend — runs the OpenHands agent
-in headless mode inside its own Docker-based runtime. The
-:class:`Executor` protocol is extracted so that new backends (gVisor,
-Firecracker, etc.) can be added without modifying the workflow graph.
+in headless mode inside its own Docker-based runtime.
+v0.7.1: ``gvisor`` backend — gVisor (runsc) syscall-sandboxed containers.
+v0.7.2: ``venv`` backend — hermetic Python isolation via ``uv run --isolated``.
+
+The :class:`Executor` protocol is extracted so that new backends
+(Firecracker microVMs, seccomp profiles, etc.) can be added without
+modifying the workflow graph.
 
 Executor interface:
 

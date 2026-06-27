@@ -922,6 +922,7 @@ async def memory_search(
             query,
             group_id=cfg.memory.graphiti_group_id,
             num_results=num_results,
+            memory_config=cfg.memory,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc

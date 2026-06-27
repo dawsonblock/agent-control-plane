@@ -134,19 +134,26 @@ def _get_graphiti_client(
     falkor_host: str | None = None,
     falkor_port: int | None = None,
     group_id: str = "",
+    memory_config: Any = None,
 ) -> Any:
     """Create a Graphiti client connected to FalkorDB.
 
     Returns a :class:`Graphiti` instance configured with a FalkorDriver.
     The LLM client defaults to OpenAI (requires ``OPENAI_API_KEY``).
-    Operators can override by setting environment variables or extending
-    this function.
 
     v0.7.4: FalkorDB host and port can now be configured via the
     ``ACP_FALKORDB_HOST`` and ``ACP_FALKORDB_PORT`` environment variables,
     instead of being hardcoded to localhost:6379. This supports
     deployments where FalkorDB runs on a separate host (e.g. Docker
     compose, Kubernetes, remote server).
+
+    v0.7.4: Custom LLM and embedder clients can now be configured via
+    ``MemorySection`` in the repo config or via environment variables.
+    Supported providers: openai (default), anthropic, gemini, groq,
+    azure_openai, custom. When ``memory_config`` is provided, the
+    appropriate LLM and embedder clients are instantiated and passed
+    to Graphiti. When not provided, Graphiti's defaults (OpenAI) are
+    used.
 
     Raises:
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
@@ -164,10 +171,223 @@ def _get_graphiti_client(
 
     driver = FalkorDriver(host=falkor_host, port=falkor_port)
 
-    # Graphiti defaults to OpenAI LLM + embedder. For local/air-gapped
-    # setups, operators can pass custom clients here in the future.
-    # For now, we use the defaults (requires OPENAI_API_KEY).
-    return Graphiti(graph_driver=driver)
+    # v0.7.4: Build custom LLM and embedder clients if configured.
+    llm_client = _build_llm_client(memory_config)
+    embedder_client = _build_embedder_client(memory_config)
+
+    kwargs: dict[str, Any] = {"graph_driver": driver}
+    if llm_client is not None:
+        kwargs["llm_client"] = llm_client
+    if embedder_client is not None:
+        kwargs["embedder"] = embedder_client
+
+    return Graphiti(**kwargs)
+
+
+def _resolve_llm_config(memory_config: Any) -> dict[str, str]:
+    """Resolve LLM config from MemorySection + env var overrides."""
+    import os
+
+    defaults = {
+        "llm_provider": "openai",
+        "llm_model": "",
+        "llm_base_url": "",
+        "llm_api_key_env": "",
+    }
+    if memory_config is not None:
+        defaults["llm_provider"] = memory_config.llm_provider
+        defaults["llm_model"] = memory_config.llm_model
+        defaults["llm_base_url"] = memory_config.llm_base_url
+        defaults["llm_api_key_env"] = memory_config.llm_api_key_env
+
+    # Env var overrides take precedence.
+    defaults["llm_provider"] = os.environ.get("ACP_GRAPHITI_LLM_PROVIDER", defaults["llm_provider"])
+    defaults["llm_model"] = os.environ.get("ACP_GRAPHITI_LLM_MODEL", defaults["llm_model"])
+    defaults["llm_base_url"] = os.environ.get("ACP_GRAPHITI_LLM_BASE_URL", defaults["llm_base_url"])
+    return defaults
+
+
+def _resolve_embedder_config(memory_config: Any) -> dict[str, str]:
+    """Resolve embedder config from MemorySection + env var overrides."""
+    import os
+
+    defaults = {
+        "embedder_provider": "openai",
+        "embedder_model": "",
+        "embedder_base_url": "",
+        "embedder_api_key_env": "",
+    }
+    if memory_config is not None:
+        defaults["embedder_provider"] = memory_config.embedder_provider
+        defaults["embedder_model"] = memory_config.embedder_model
+        defaults["embedder_base_url"] = memory_config.embedder_base_url
+        defaults["embedder_api_key_env"] = memory_config.embedder_api_key_env
+
+    # Env var overrides take precedence.
+    defaults["embedder_provider"] = os.environ.get(
+        "ACP_GRAPHITI_EMBEDDER_PROVIDER", defaults["embedder_provider"]
+    )
+    defaults["embedder_model"] = os.environ.get(
+        "ACP_GRAPHITI_EMBEDDER_MODEL", defaults["embedder_model"]
+    )
+    defaults["embedder_base_url"] = os.environ.get(
+        "ACP_GRAPHITI_EMBEDDER_BASE_URL", defaults["embedder_base_url"]
+    )
+    return defaults
+
+
+def _get_api_key(provider: str, api_key_env: str) -> str:
+    """Get API key from the appropriate environment variable."""
+    import os
+
+    if api_key_env:
+        return os.environ.get(api_key_env, "")
+    # Default env var names per provider.
+    defaults = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "azure_openai": "AZURE_OPENAI_API_KEY",
+        "custom": "OPENAI_API_KEY",  # custom uses OpenAI-compatible API
+    }
+    return os.environ.get(defaults.get(provider, "OPENAI_API_KEY"), "")
+
+
+def _build_llm_client(memory_config: Any) -> Any:
+    """Build a custom LLM client based on provider config.
+
+    Returns None when the provider is OpenAI (Graphiti's default) —
+    in that case, Graphiti creates its own default client.
+    """
+    cfg = _resolve_llm_config(memory_config)
+    provider = cfg["llm_provider"]
+
+    # When provider is openai and no custom model/base_url is set,
+    # let Graphiti use its built-in default.
+    if provider == "openai" and not cfg["llm_model"] and not cfg["llm_base_url"]:
+        return None
+
+    api_key = _get_api_key(provider, cfg["llm_api_key_env"])
+    model = cfg["llm_model"] or _default_model_for_provider(provider)
+    base_url = cfg["llm_base_url"] or None
+
+    try:
+        return _instantiate_llm_client(provider, api_key, model, base_url)
+    except ImportError as exc:
+        logger.warning(
+            "LLM provider '%s' requires additional packages: %s — "
+            "falling back to Graphiti default (OpenAI)",
+            provider,
+            exc,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to create LLM client for provider '%s': %s — "
+            "falling back to Graphiti default (OpenAI)",
+            provider,
+            exc,
+        )
+        return None
+
+
+def _build_embedder_client(memory_config: Any) -> Any:
+    """Build a custom embedder client based on provider config.
+
+    Returns None when the provider is OpenAI (Graphiti's default).
+    """
+    cfg = _resolve_embedder_config(memory_config)
+    provider = cfg["embedder_provider"]
+
+    if provider == "openai" and not cfg["embedder_model"] and not cfg["embedder_base_url"]:
+        return None
+
+    api_key = _get_api_key(provider, cfg["embedder_api_key_env"])
+    model = cfg["embedder_model"] or "text-embedding-3-small"
+    base_url = cfg["embedder_base_url"] or None
+
+    try:
+        return _instantiate_embedder_client(provider, api_key, model, base_url)
+    except ImportError as exc:
+        logger.warning(
+            "Embedder provider '%s' requires additional packages: %s — "
+            "falling back to Graphiti default (OpenAI)",
+            provider,
+            exc,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to create embedder for provider '%s': %s — "
+            "falling back to Graphiti default (OpenAI)",
+            provider,
+            exc,
+        )
+        return None
+
+
+def _default_model_for_provider(provider: str) -> str:
+    """Return a sensible default model for each provider."""
+    defaults = {
+        "openai": "gpt-4o",
+        "anthropic": "claude-3-5-sonnet-20241022",
+        "gemini": "gemini-1.5-pro",
+        "groq": "llama-3.3-70b-versatile",
+        "azure_openai": "gpt-4o",
+        "custom": "gpt-4o",
+    }
+    return defaults.get(provider, "gpt-4o")
+
+
+def _instantiate_llm_client(provider: str, api_key: str, model: str, base_url: str | None) -> Any:
+    """Instantiate the appropriate LLM client for the given provider."""
+    if provider in ("openai", "custom"):
+        from graphiti_core.llm_client import LLMConfig
+        from graphiti_core.llm_client.openai_client import OpenAIClient
+
+        config = LLMConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return OpenAIClient(config=config)
+    elif provider == "anthropic":
+        from graphiti_core.llm_client import LLMConfig
+        from graphiti_core.llm_client.anthropic_client import AnthropicClient
+
+        config = LLMConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return AnthropicClient(config=config)
+    elif provider == "gemini":
+        from graphiti_core.llm_client import LLMConfig
+        from graphiti_core.llm_client.gemini_client import GeminiClient
+
+        config = LLMConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return GeminiClient(config=config)
+    elif provider == "groq":
+        from graphiti_core.llm_client import LLMConfig
+        from graphiti_core.llm_client.groq_client import GroqClient
+
+        config = LLMConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return GroqClient(config=config)
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def _instantiate_embedder_client(
+    provider: str, api_key: str, model: str, base_url: str | None
+) -> Any:
+    """Instantiate the appropriate embedder client for the given provider."""
+    if provider in ("openai", "custom"):
+        from graphiti_core.embedder import EmbedderConfig
+        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder
+
+        config = EmbedderConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return OpenAIEmbedder(config=config)
+    else:
+        # For non-OpenAI embedders, fall back to OpenAI embedder with the
+        # custom config — most providers offer OpenAI-compatible embedding APIs.
+        from graphiti_core.embedder import EmbedderConfig
+        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder
+
+        config = EmbedderConfig(api_key=api_key or None, model=model, base_url=base_url)
+        return OpenAIEmbedder(config=config)
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +473,7 @@ def ingest_task_to_graphiti(
     frontmatter: dict[str, Any] | Frontmatter,
     vault_note_path: Path,
     graphiti_group_id: str = "",
+    memory_config: Any = None,
 ) -> dict[str, Any]:
     """Ingest an approved task report into Graphiti temporal memory.
 
@@ -296,7 +517,7 @@ def ingest_task_to_graphiti(
     async def _ingest() -> Any:
         from graphiti_core.nodes import EpisodeType
 
-        client = _get_graphiti_client(group_id=graphiti_group_id)
+        client = _get_graphiti_client(group_id=graphiti_group_id, memory_config=memory_config)
         try:
             group_id = graphiti_group_id or "default"
             result = await client.add_episode(
@@ -340,6 +561,7 @@ def search_graphiti_facts(
     entity_type: str | None = None,
     group_id: str = "",
     num_results: int = 10,
+    memory_config: Any = None,
 ) -> list[dict[str, Any]]:
     """Search for facts in Graphiti temporal memory.
 
@@ -368,7 +590,7 @@ def search_graphiti_facts(
     async def _search() -> list[dict[str, Any]]:
         from graphiti_core.search.search_config import SearchConfig
 
-        client = _get_graphiti_client(group_id=group_id)
+        client = _get_graphiti_client(group_id=group_id, memory_config=memory_config)
         try:
             config = SearchConfig(num_results=num_results)
             results = await client.search(
@@ -395,6 +617,7 @@ def get_temporal_relationships(
     entity_type: str,
     entity_id: str,
     group_id: str = "",
+    memory_config: Any = None,
 ) -> list[dict[str, Any]]:
     """Get temporal relationships for an entity.
 
@@ -417,7 +640,7 @@ def get_temporal_relationships(
     """
 
     async def _get_relationships() -> list[dict[str, Any]]:
-        client = _get_graphiti_client(group_id=group_id)
+        client = _get_graphiti_client(group_id=group_id, memory_config=memory_config)
         try:
             # Search for edges related to this entity.
             results = await client.search(
@@ -449,6 +672,7 @@ def find_superseded_nodes(
     group_id: str = "",
     *,
     older_than_days: int = 90,
+    memory_config: Any = None,
 ) -> list[dict[str, Any]]:
     """Find Graphiti nodes that have been superseded for longer than the threshold.
 
@@ -472,7 +696,7 @@ def find_superseded_nodes(
     cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
 
     async def _find() -> list[dict[str, Any]]:
-        client = _get_graphiti_client(group_id=group_id)
+        client = _get_graphiti_client(group_id=group_id, memory_config=memory_config)
         try:
             # Graphiti's driver exposes the underlying FalkorDB graph.
             # We query for nodes with an incoming SUPERSEDES edge whose
@@ -580,6 +804,7 @@ def prune_superseded_nodes(
     *,
     older_than_days: int = 90,
     dry_run: bool = True,
+    memory_config: Any = None,
 ) -> dict[str, Any]:
     """Prune superseded nodes from the Graphiti/FalkorDB knowledge graph.
 
@@ -608,13 +833,17 @@ def prune_superseded_nodes(
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
         Exception: If FalkorDB is not running.
     """
-    nodes = find_superseded_nodes(group_id=group_id, older_than_days=older_than_days)
+    nodes = find_superseded_nodes(
+        group_id=group_id,
+        older_than_days=older_than_days,
+        memory_config=memory_config,
+    )
 
     pruned = 0
     if not dry_run and nodes:
 
         async def _prune() -> int:
-            client = _get_graphiti_client(group_id=group_id)
+            client = _get_graphiti_client(group_id=group_id, memory_config=memory_config)
             try:
                 driver = getattr(client, "driver", None)
                 if driver is None:

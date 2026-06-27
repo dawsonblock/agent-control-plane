@@ -24,9 +24,10 @@ non-skipped command failed (and attempts remain), ``run_tests`` routes to
 ``repair_plan → run_repair → run_tests`` (re-evaluated). The cap at
 ``config.agent.max_repair_attempts`` guarantees termination.
 
-Compiled with an in-memory ``MemorySaver`` checkpointer so runs are
-inspectable. (Durable checkpointing is a later concern; M3 only needs the
-graph to be drivable and its transitions observable.)
+Compiled with a checkpointer so runs are inspectable. v0.7.4 adds support
+for durable SQLite checkpointing (``checkpoint_store`` config) — when
+configured, workflow state persists across process restarts for crash
+recovery. Without it, an in-memory ``MemorySaver`` is used.
 """
 
 from __future__ import annotations
@@ -283,6 +284,7 @@ def build_workflow(
     store: TaskStore,
     events: EventWriter,
     agent_factory: Callable[[Any], Any] | None = None,
+    checkpoint_db_path: Path | None = None,
 ) -> Any:
     """Build + compile the ACP workflow graph.
 
@@ -294,6 +296,12 @@ def build_workflow(
     ``agent_factory`` is optional and defaults to the registry's
     ``build_agent``; tests inject a controllable agent to exercise the
     repair loop deterministically.
+
+    ``checkpoint_db_path`` is optional (v0.7.4). When provided, the graph
+    uses a SQLite-backed durable checkpointer instead of the default
+    in-memory ``MemorySaver``. This enables crash recovery — workflow
+    state persists across process restarts. Requires the ``checkpoint``
+    extra (``langgraph-checkpoint-sqlite``).
 
     Returns a compiled graph ready to ``.invoke(initial_state)``.
     """
@@ -379,7 +387,35 @@ def build_workflow(
     g.add_edge("failed", END)
     g.add_edge("needs_review", END)
 
-    return g.compile(checkpointer=MemorySaver())
+    # v0.7.4: Durable checkpointing via SQLite when configured.
+    # Falls back to in-memory MemorySaver when no checkpoint_db_path is provided.
+    checkpointer: Any = MemorySaver()
+    if checkpoint_db_path is not None:
+        try:
+            import sqlite3
+
+            from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore[import-not-found]
+
+            conn = sqlite3.connect(str(checkpoint_db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            checkpointer = SqliteSaver(conn)
+            checkpointer.setup()
+            _logger.info("durable checkpointing enabled: %s", checkpoint_db_path)
+        except ImportError:
+            _logger.warning(
+                "checkpoint_store configured but langgraph-checkpoint-sqlite "
+                "is not installed. Install with: uv sync --extra checkpoint. "
+                "Falling back to in-memory checkpointer."
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "failed to initialize SQLite checkpointer: %s — "
+                "falling back to in-memory checkpointer",
+                exc,
+            )
+
+    return g.compile(checkpointer=checkpointer)
 
 
 # --------------------------------------------------------------------------- #
@@ -455,18 +491,30 @@ def run_workflow(
             raise EvidenceConfigError(
                 f"signing key file not readable: {evidence_cfg.signing_key_path} ({exc})"
             ) from exc
-        if len(key_bytes) != 32:
+        # v0.7.4: Key size validation is algorithm-aware.
+        algorithm = evidence_cfg.signature_algorithm
+        expected_sizes = {"ed25519": 32, "mldsa44": 2560, "mldsa65": 4032, "mldsa87": 4896}
+        expected = expected_sizes.get(algorithm, 32)
+        if len(key_bytes) != expected:
             raise EvidenceConfigError(
-                f"signing key file must be exactly 32 bytes, got {len(key_bytes)}: "
-                f"{evidence_cfg.signing_key_path}"
+                f"signing key file for {algorithm} must be exactly {expected} bytes, "
+                f"got {len(key_bytes)}: {evidence_cfg.signing_key_path}"
             )
         try:
-            events.set_signing_key(key_bytes)
+            events.set_signing_key(key_bytes, algorithm=algorithm)
         except ImportError as exc:
-            raise EvidenceConfigError(
-                "signing is configured but the 'cryptography' package is not "
-                "installed — refusing to run unsigned. Install with: uv sync --extra crypto"
-            ) from exc
+            if algorithm == "ed25519":
+                raise EvidenceConfigError(
+                    "signing is configured but the 'cryptography' package is not "
+                    "installed — refusing to run unsigned. "
+                    "Install with: uv sync --extra crypto"
+                ) from exc
+            else:
+                raise EvidenceConfigError(
+                    f"{algorithm} signing requires cryptography>=49 with ML-DSA "
+                    "support — refusing to run unsigned. "
+                    "Install with: uv sync --extra mldsa"
+                ) from exc
 
     # Wire SQLite durable store if configured. The store is additive: events
     # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
@@ -517,7 +565,17 @@ def run_workflow(
                     f"durable store initialization failed (required mode): {exc}"
                 ) from exc
 
-    wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
+    # v0.7.4: Durable checkpointing — use SQLite checkpointer when configured.
+    checkpoint_db_path = None
+    if evidence_cfg and evidence_cfg.checkpoint_store:
+        checkpoint_db_path = evidence_cfg.checkpoint_store
+
+    wf = build_workflow(
+        store=store,
+        events=events,
+        agent_factory=agent_factory,
+        checkpoint_db_path=checkpoint_db_path,
+    )
 
     state = {
         "config": config,
@@ -534,7 +592,14 @@ def run_workflow(
         state["parent_task_id"] = parent_task_id
     # v0.7.4: Subtask recursion depth — prevents agent fork bombs.
     state["recursion_depth"] = recursion_depth
-    result: dict[str, Any] = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
+    # v0.7.4: Use task_id as thread_id for checkpoint isolation. When a
+    # pre-allocated task_id is provided, each run gets its own checkpoint
+    # thread. When not provided, fall back to a unique id so concurrent
+    # runs don't overwrite each other's checkpoints.
+    import uuid
+
+    thread_id = task_id if task_id else f"acp-run-{uuid.uuid4().hex[:8]}"
+    result: dict[str, Any] = wf.invoke(state, config={"configurable": {"thread_id": thread_id}})
 
     # Close the durable stores if they were opened.
     if durable_store is not None:

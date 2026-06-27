@@ -217,8 +217,63 @@ class ContextSection(BaseModel):
 
 
 class MemorySection(BaseModel):
+    """Temporal memory settings (v0.6.2 / M7).
+
+    - ``graphiti_group_id``: group id for Graphiti episodes. All tasks
+      run with this config share the same group, enabling cross-task
+      memory promotion and search.
+
+    - ``promote_reports_by_default``: when True, approved task reports
+      are automatically promoted to Graphiti temporal memory after
+      approval. When False, promotion requires explicit ``acp memory
+      promote``.
+
+    v0.7.4: Custom LLM configuration for Graphiti. By default, Graphiti
+    uses OpenAI for both LLM and embeddings (requires ``OPENAI_API_KEY``).
+    These fields allow operators to use alternative providers (Anthropic,
+    Gemini, Groq, Azure OpenAI, or any OpenAI-compatible endpoint).
+
+    - ``llm_provider``: LLM provider for entity extraction. One of:
+      ``openai`` (default), ``anthropic``, ``gemini``, ``groq``,
+      ``azure_openai``, ``custom``.
+    - ``llm_model``: model name (e.g. ``gpt-4o``, ``claude-3-5-sonnet``).
+    - ``llm_base_url``: custom API base URL (for ``custom`` provider or
+      self-hosted endpoints).
+    - ``llm_api_key_env``: environment variable name containing the API
+      key. Defaults to provider-specific vars (``OPENAI_API_KEY``, etc.).
+
+    - ``embedder_provider``: embedding provider. Same options as
+      ``llm_provider``. Defaults to ``openai``.
+    - ``embedder_model``: embedding model name.
+    - ``embedder_base_url``: custom embedding API base URL.
+    - ``embedder_api_key_env``: env var name for embedding API key.
+
+    Environment variable overrides (take precedence over config file):
+      - ``ACP_GRAPHITI_LLM_PROVIDER``, ``ACP_GRAPHITI_LLM_MODEL``,
+        ``ACP_GRAPHITI_LLM_BASE_URL``
+      - ``ACP_GRAPHITI_EMBEDDER_PROVIDER``, ``ACP_GRAPHITI_EMBEDDER_MODEL``,
+        ``ACP_GRAPHITI_EMBEDDER_BASE_URL``
+    """
+
     graphiti_group_id: str = ""
     promote_reports_by_default: bool = False
+    # v0.7.4: Custom LLM configuration for Graphiti.
+    llm_provider: str = "openai"
+    llm_model: str = ""
+    llm_base_url: str = ""
+    llm_api_key_env: str = ""
+    embedder_provider: str = "openai"
+    embedder_model: str = ""
+    embedder_base_url: str = ""
+    embedder_api_key_env: str = ""
+
+    @field_validator("llm_provider", "embedder_provider")
+    @classmethod
+    def _validate_provider(cls, v: str) -> str:
+        allowed = ("openai", "anthropic", "gemini", "groq", "azure_openai", "custom")
+        if v not in allowed:
+            raise ValueError(f"provider must be one of {allowed}, got: {v}")
+        return v
 
 
 class SkillsSection(BaseModel):
@@ -511,6 +566,18 @@ class EvidenceSection(BaseModel):
       becomes a projection. When ``"sqlite"``, ``durable_store`` must
       also be set. This flag enables gradual migration — operators can
       enable it per-repo without changing code.
+
+    - ``checkpoint_store``: v0.7.4 path to a SQLite database file for
+      LangGraph durable checkpointing. When set, workflow state persists
+      across process restarts, enabling crash recovery for long-running
+      agent tasks. Requires the ``checkpoint`` extra
+      (``uv sync --extra checkpoint``). When not set, an in-memory
+      checkpointer is used (state is lost on process exit).
+
+    - ``signature_algorithm``: v0.7.4 algorithm for event signing.
+      ``"ed25519"`` (default): 32-byte keys, requires ``crypto`` extra.
+      ``"mldsa44"`` / ``"mldsa65"`` / ``"mldsa87"``: post-quantum ML-DSA
+      (FIPS 204), requires ``mldsa`` extra and OpenSSL 3.5+.
     """
 
     signing_key_path: Path | None = None
@@ -518,8 +585,10 @@ class EvidenceSection(BaseModel):
     durable_store: Path | None = None
     durable_mode: DurableMode = DurableMode.BEST_EFFORT
     task_store_primary: str = "json"
+    checkpoint_store: Path | None = None
+    signature_algorithm: str = "ed25519"
 
-    @field_validator("signing_key_path", "public_key_path", "durable_store")
+    @field_validator("signing_key_path", "public_key_path", "durable_store", "checkpoint_store")
     @classmethod
     def _absolute(cls, v: Path | None) -> Path | None:
         if v is None:
@@ -533,6 +602,17 @@ class EvidenceSection(BaseModel):
         if v not in allowed:
             raise ValueError(
                 f"evidence.task_store_primary='{v}' is not valid. "
+                f"Must be one of: {', '.join(allowed)}."
+            )
+        return v
+
+    @field_validator("signature_algorithm")
+    @classmethod
+    def _validate_signature_algorithm(cls, v: str) -> str:
+        allowed = ("ed25519", "mldsa44", "mldsa65", "mldsa87")
+        if v not in allowed:
+            raise ValueError(
+                f"evidence.signature_algorithm='{v}' is not valid. "
                 f"Must be one of: {', '.join(allowed)}."
             )
         return v

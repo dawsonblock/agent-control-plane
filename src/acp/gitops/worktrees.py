@@ -7,8 +7,23 @@ must be identical before and after a run (verified by the caller / tests).
 **This is workflow isolation, not a security sandbox.** The worktree
 prevents the agent from touching the default branch, but it does NOT
 prevent a malicious agent or command from accessing the filesystem, network,
-SSH keys, environment variables, home directory, or other repos. True
-sandboxing (containers, seccomp, etc.) is a future concern.
+SSH keys, environment variables, home directory, or other repos.
+
+For true security sandboxing, use one of the executor backends instead of
+the default worktree mode:
+
+  - ``docker_sbx``: Full microVM isolation via Docker Sandboxes (separate
+    kernel, private filesystem, network policy enforcement).
+  - ``gvisor``: OS-level syscall sandboxing via gVisor's runsc runtime
+    (user-space kernel intercepts syscalls).
+  - ``openhands``: Docker-based runtime sandbox via OpenHands' own
+    container isolation.
+  - ``venv``: Hermetic Python dependency isolation via ``uv run --isolated``
+    (prevents supply-chain attacks via hijacked dependencies).
+
+Seccomp profile customization and Firecracker microVM support remain future
+enhancements. See ``src/acp/executor/`` for the available backends and
+``ExecutorSection`` in ``config.py`` for configuration.
 """
 
 from __future__ import annotations

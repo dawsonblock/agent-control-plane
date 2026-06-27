@@ -1178,6 +1178,7 @@ def memory_promote(
                 frontmatter=fm,
                 vault_note_path=note_path,
                 graphiti_group_id=group_id,
+                memory_config=cfg.memory,
             )
 
             # Write memory.promoted event to the event log.
@@ -1259,6 +1260,7 @@ def memory_search(
             query,
             group_id=group_id,
             num_results=num_results,
+            memory_config=cfg.memory,
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/] search failed: {exc}")
@@ -1338,6 +1340,7 @@ def memory_prune(
             group_id=group_id,
             older_than_days=older_than_days,
             dry_run=dry_run,
+            memory_config=cfg.memory,
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/] prune failed: {exc}")

@@ -85,6 +85,17 @@ context:
 memory:
   graphiti_group_id: my-app
   promote_reports_by_default: false
+  # v0.7.4: Custom LLM configuration for Graphiti.
+  # By default, Graphiti uses OpenAI for LLM + embeddings (requires OPENAI_API_KEY).
+  # Uncomment and configure to use alternative providers:
+  # llm_provider: openai          # openai | anthropic | gemini | groq | azure_openai | custom
+  # llm_model: gpt-4o             # model name (leave empty for provider default)
+  # llm_base_url: ""              # custom API base URL (for self-hosted endpoints)
+  # llm_api_key_env: ""           # env var name containing API key (defaults to provider standard)
+  # embedder_provider: openai     # same provider options as llm_provider
+  # embedder_model: text-embedding-3-small
+  # embedder_base_url: ""
+  # embedder_api_key_env: ""
 
 # v0.6.3 (M8): Skills governance — YAML playbooks that govern review,
 # repair, and prompt behavior. When active_skill is set, the skill's

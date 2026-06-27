@@ -42,12 +42,12 @@ graph = [
 # documented validation path (`uv sync --extra dev && bash scripts/validate.sh`)
 # works exactly as written — the signing tests are part of the gate.
 crypto = [
-    "cryptography>=43,<46",
+    "cryptography>=43,<50",
 ]
 dev = [
     "pytest>=8.2,<9",
     "pytest-cov>=4.1,<7",
-    "cryptography>=43,<46",
+    "cryptography>=43,<50",
     "ruff>=0.6,<1",
     "mypy>=1.11,<2",
     "types-PyYAML>=6.0,<7",
@@ -76,6 +76,24 @@ api = [
     "fastapi>=0.100,<1",
     "uvicorn[standard]>=0.20,<1",
 ]
+# v0.7.4: Durable LangGraph checkpointing via SQLite.
+# Optional — install with: uv sync --extra checkpoint
+# When configured, workflow state persists across process restarts,
+# enabling crash recovery for long-running agent tasks.
+checkpoint = [
+    "langgraph-checkpoint-sqlite>=2.0,<3",
+]
+# v0.7.4: Post-quantum event signatures (ML-DSA, FIPS 204).
+# Optional — install with: uv sync --extra mldsa
+# Requires OpenSSL 3.5+, AWS-LC, or BoringSSL. When installed, operators
+# can configure evidence.signature_algorithm to mldsa44/mldsa65/mldsa87
+# for quantum-resistant event-log authenticity proofs.
+mldsa = [
+    "cryptography>=49,<50",
+]
+# Note: crypto and dev extras use cryptography>=43,<50 so they are compatible
+# with the mldsa extra (which requires >=49). When both are installed, the
+# newer version wins. ML-DSA APIs are only available with >=49 + OpenSSL 3.5+.
 
 [project.scripts]
 acp = "acp.cli:app"

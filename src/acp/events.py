@@ -66,6 +66,143 @@ def _compute_event_hash(
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+# --------------------------------------------------------------------------- #
+# Multi-algorithm signing helpers (v0.7.4)
+# --------------------------------------------------------------------------- #
+
+# Key size constants for each supported algorithm.
+_KEY_SIZES: dict[str, int] = {
+    "ed25519": 32,
+    "mldsa44": 2560,
+    "mldsa65": 4032,
+    "mldsa87": 4896,
+}
+
+
+def _load_mldsa_private_key(algorithm: str, key_bytes: bytes) -> Any:
+    """Load an ML-DSA private key from raw bytes.
+
+    Requires ``cryptography>=49`` and OpenSSL 3.5+ (or AWS-LC / BoringSSL).
+    Install with: ``uv sync --extra mldsa``.
+    """
+    expected = _KEY_SIZES.get(algorithm)
+    if expected is None:
+        raise ValueError(f"Unknown ML-DSA algorithm: {algorithm}")
+    if len(key_bytes) != expected:
+        raise ValueError(
+            f"{algorithm} private key must be exactly {expected} bytes, got {len(key_bytes)}"
+        )
+    try:
+        from cryptography.hazmat.primitives.asymmetric import mldsa
+    except ImportError:
+        raise ImportError(
+            f"{algorithm} signing requires cryptography>=49 with ML-DSA support. "
+            "Install with: uv sync --extra mldsa. "
+            "Note: ML-DSA requires OpenSSL 3.5+, AWS-LC, or BoringSSL."
+        ) from None
+
+    key_cls = {
+        "mldsa44": mldsa.MLDSA44PrivateKey,
+        "mldsa65": mldsa.MLDSA65PrivateKey,
+        "mldsa87": mldsa.MLDSA87PrivateKey,
+    }[algorithm]
+    return key_cls.from_private_bytes(key_bytes)  # type: ignore[attr-defined]
+
+
+def _sign_with_key(signing_key: Any, data: bytes) -> bytes:
+    """Sign data with the appropriate algorithm.
+
+    Ed25519 keys sign directly. ML-DSA keys may require a context string
+    (FIPS 204 allows empty context). We use an empty context for simplicity.
+    """
+    # Ed25519 keys have a simple .sign(data) API.
+    # ML-DSA keys in cryptography>=49 use .sign(data, context=b"") or .sign(data).
+    # We try the simple API first, then fall back to the context-aware API.
+    try:
+        return bytes(signing_key.sign(data))
+    except TypeError:
+        # ML-DSA may require a context parameter.
+        return bytes(signing_key.sign(data, b""))
+
+
+def _verify_with_key(public_key: Any, signature: bytes, data: bytes) -> None:
+    """Verify a signature with the appropriate algorithm.
+
+    Raises an exception if verification fails.
+    """
+    try:
+        public_key.verify(signature, data)
+    except TypeError:
+        # ML-DSA may require a context parameter.
+        public_key.verify(signature, data, b"")
+
+
+def verify_event_signatures(events: list[Event], public_key: bytes) -> bool:
+    """Verify signatures on a list of events.
+
+    ``public_key`` is the raw bytes of the public key. The algorithm is
+    determined by the ``signature_algorithm`` field on each event. For
+    backward compatibility, events without a ``signature_algorithm`` field
+    default to ``"ed25519"``.
+
+    Returns ``True`` iff every event has a non-empty ``signature`` that is a
+    valid signature over the event's ``hash``, verified against the provided
+    ``public_key``. Events without signatures fail verification (an unsigned
+    event log is not authentic). An empty event list returns ``False``.
+
+    Requires the ``cryptography`` package (``uv sync --extra crypto`` for
+    Ed25519, ``uv sync --extra mldsa`` for ML-DSA).
+    """
+    if not events:
+        return False
+
+    # Group events by algorithm to avoid re-importing for each event.
+    algorithms_used = {evt.signature_algorithm or "ed25519" for evt in events if evt.signature}
+
+    # Load the appropriate public key for each algorithm.
+    public_keys: dict[str, Any] = {}
+    for alg in algorithms_used:
+        if alg == "ed25519":
+            try:
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            except ImportError:
+                raise ImportError(
+                    "Ed25519 verification requires the 'cryptography' package. "
+                    "Install it with: uv sync --extra crypto"
+                ) from None
+            public_keys[alg] = Ed25519PublicKey.from_public_bytes(public_key)
+        elif alg in ("mldsa44", "mldsa65", "mldsa87"):
+            try:
+                from cryptography.hazmat.primitives.asymmetric import mldsa
+            except ImportError:
+                raise ImportError(
+                    f"{alg} verification requires cryptography>=49 with ML-DSA support. "
+                    "Install with: uv sync --extra mldsa"
+                ) from None
+            key_cls = {
+                "mldsa44": mldsa.MLDSA44PublicKey,
+                "mldsa65": mldsa.MLDSA65PublicKey,
+                "mldsa87": mldsa.MLDSA87PublicKey,
+            }[alg]
+            public_keys[alg] = key_cls.from_public_bytes(public_key)  # type: ignore[attr-defined]
+        else:
+            raise ValueError(f"Unsupported signature algorithm: {alg}")
+
+    for evt in events:
+        if not evt.signature:
+            return False
+        alg = evt.signature_algorithm or "ed25519"
+        pk = public_keys.get(alg)
+        if pk is None:
+            return False
+        try:
+            sig_bytes = bytes.fromhex(evt.signature)
+            _verify_with_key(pk, sig_bytes, evt.hash.encode())
+        except Exception:  # noqa: BLE001
+            return False
+    return True
+
+
 def verify_event_chain(events: list[Event]) -> bool:
     """Verify the hash chain of an event list.
 
@@ -96,35 +233,6 @@ def verify_event_chain(events: list[Event]) -> bool:
     return True
 
 
-def verify_event_signatures(events: list[Event], public_key: bytes) -> bool:
-    """Verify Ed25519 signatures on all events.
-
-    Returns ``True`` iff every event has a ``signature`` field that is a
-    valid Ed25519 signature over the event's ``hash``, verified against
-    the provided ``public_key``. Events without signatures fail
-    verification. Requires the ``cryptography`` package.
-    """
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError:
-        raise ImportError(
-            "Ed25519 signature verification requires the 'cryptography' package. "
-            "Install it with: uv sync --extra crypto"
-        )
-    pk = Ed25519PublicKey.from_public_bytes(public_key)
-    if not events:
-        return False
-    for evt in events:
-        if not evt.signature:
-            return False
-        try:
-            sig_bytes = bytes.fromhex(evt.signature)
-            pk.verify(sig_bytes, evt.hash.encode())
-        except Exception:  # noqa: BLE001
-            return False
-    return True
-
-
 class EventWriter:
     """Append-only, fsync'd, hash-chained writer for a task's event log.
 
@@ -143,6 +251,7 @@ class EventWriter:
         self._count = 0
         self._prev_hash = GENESIS_HASH
         self._signing_key: Any = None  # Ed25519PrivateKey or None
+        self._signature_algorithm: str = "ed25519"
         if self.path.exists():
             # Resume counting + hash chain after a restart / repair attempt.
             for line in self.path.open():
@@ -155,26 +264,41 @@ class EventWriter:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("malformed event line during hash recompute: %s", exc)
 
-    def set_signing_key(self, private_key: bytes) -> None:
-        """Set an Ed25519 private key for signing events.
+    def set_signing_key(self, private_key: bytes, algorithm: str = "ed25519") -> None:
+        """Set a private key for signing events.
 
         After this is called, every event written will include a
-        ``signature`` field (Ed25519 signature over the event's hash).
-        Requires the ``cryptography`` package. The key must be exactly 32
-        bytes (Ed25519 raw private key format).
+        ``signature`` field (signature over the event's hash) and a
+        ``signature_algorithm`` field identifying the algorithm used.
+
+        Supported algorithms:
+          - ``ed25519`` (default): Ed25519, 32-byte raw private key.
+            Requires the ``cryptography`` package (``uv sync --extra crypto``).
+          - ``mldsa44`` / ``mldsa65`` / ``mldsa87``: ML-DSA post-quantum
+            signatures (FIPS 204). Requires ``cryptography>=49`` and
+            OpenSSL 3.5+. Install with: ``uv sync --extra mldsa``.
         """
-        if len(private_key) != 32:
+        self._signature_algorithm = algorithm
+        if algorithm == "ed25519":
+            if len(private_key) != 32:
+                raise ValueError(
+                    f"Ed25519 private key must be exactly 32 bytes, got {len(private_key)}"
+                )
+            try:
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            except ImportError:
+                raise ImportError(
+                    "Ed25519 signing requires the 'cryptography' package. "
+                    "Install it with: uv sync --extra crypto"
+                ) from None
+            self._signing_key = Ed25519PrivateKey.from_private_bytes(private_key)
+        elif algorithm in ("mldsa44", "mldsa65", "mldsa87"):
+            self._signing_key = _load_mldsa_private_key(algorithm, private_key)
+        else:
             raise ValueError(
-                f"Ed25519 private key must be exactly 32 bytes, got {len(private_key)}"
+                f"Unsupported signature algorithm: {algorithm}. "
+                "Supported: ed25519, mldsa44, mldsa65, mldsa87"
             )
-        try:
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        except ImportError:
-            raise ImportError(
-                "Ed25519 signing requires the 'cryptography' package. "
-                "Install it with: uv sync --extra crypto"
-            )
-        self._signing_key = Ed25519PrivateKey.from_private_bytes(private_key)
 
     def relocate(self, task_id: str, run_dir: Path) -> None:
         """Repoint this writer at a task's real run dir.
@@ -237,7 +361,7 @@ class EventWriter:
         )
         signature = ""
         if self._signing_key is not None:
-            signature = self._signing_key.sign(hash_value.encode()).hex()
+            signature = _sign_with_key(self._signing_key, hash_value.encode()).hex()
         return Event(
             event_id=event_id,
             task_id=self.task_id,
@@ -247,6 +371,7 @@ class EventWriter:
             prev_hash=self._prev_hash,
             hash=hash_value,
             signature=signature,
+            signature_algorithm=self._signature_algorithm,
         )
 
     def append_event(self, event: Event) -> None:
