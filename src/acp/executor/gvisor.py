@@ -192,31 +192,39 @@ class GvisorExecutor:
         )
 
         start = time.monotonic()
+        timed_out = False
         try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt_content,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            # v0.7.4: Stream stdout/stderr directly to files instead of
+            # capturing into memory. Uses Popen with stdin pipe to pass
+            # the prompt content, and file handles for stdout/stderr.
+            with (
+                open(stdout_path, "w") as stdout_f,
+                open(stderr_path, "w") as stderr_f,
+            ):
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt_content,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
             exit_code = proc.returncode
-            out, err = proc.stdout, proc.stderr
-            timed_out = False
         except subprocess.TimeoutExpired:
             exit_code = 124
             timed_out = True
-            out, err = "", f"gvisor: agent timed out after {timeout_seconds}s"
+            stderr_path.write_text(
+                f"gvisor: agent timed out after {timeout_seconds}s",
+                encoding="utf-8",
+            )
             # Kill the container if it's still running.
             self.stop()
         except FileNotFoundError as exc:
             exit_code = 127
-            timed_out = False
-            out, err = "", f"gvisor: docker not found: {exc}"
+            stdout_path.write_text("")
+            stderr_path.write_text(f"gvisor: docker not found: {exc}")
 
         duration = time.monotonic() - start
-        stdout_path.write_text(out)
-        stderr_path.write_text(err)
 
         self._container_remote = f"docker://{self._container_name}"
 

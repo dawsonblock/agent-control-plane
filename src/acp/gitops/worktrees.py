@@ -45,8 +45,17 @@ def create_worktree(
     if not is_clean(repo_path):
         raise RuntimeError(f"repo is dirty; refusing to create worktree: {repo_path}")
     target_path = target_path.resolve()
-    if target_path.exists():
-        raise FileExistsError(f"worktree target already exists: {target_path}")
+    # v0.7.4: Use mkdir(exist_ok=False) for an atomic existence check
+    # instead of the TOCTOU-vulnerable exists() + git worktree add pattern.
+    # If the path already exists, mkdir raises FileExistsError immediately.
+    # If it doesn't exist, we create it atomically and remove it before
+    # git worktree add (which expects to create the directory itself).
+    try:
+        target_path.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        raise FileExistsError(f"worktree target already exists: {target_path}") from None
+    # Remove it so git worktree add can create it.
+    target_path.rmdir()
 
     base_sha = create_branch(repo_path, base_branch, branch_name)
     repo = Repo(str(repo_path))

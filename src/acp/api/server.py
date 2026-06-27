@@ -171,8 +171,15 @@ def _recover_orphaned_tasks() -> None:
                         task.touch()
                         store.save(task)
                         _logger.info("Recovered orphaned task from task.json: %s", task.task_id)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # v0.7.4: Log the error instead of silently passing.
+                    # A corrupt task.json could indicate evidence tampering
+                    # or a filesystem issue — the operator needs to know.
+                    _logger.error(
+                        "Failed to load task.json during orphan recovery (path=%s): %s",
+                        task_json,
+                        exc,
+                    )
     except Exception as exc:  # noqa: BLE001
         _logger.warning("task.json scan for orphans failed: %s", exc)
 
@@ -639,7 +646,9 @@ async def list_tasks(
                     updated_at=task.updated_at,
                 )
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # v0.7.4: Log the error instead of silently continuing.
+            _logger.error("Failed to load task from %s: %s", task_dir, exc)
             continue
 
     return tasks
@@ -985,7 +994,9 @@ async def stream_tasks(
                             "repo_name": task.repo_name,
                             "user_request": task.user_request,
                         }
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        # v0.7.4: Log the error instead of silently continuing.
+                        _logger.error("SSE: Failed to load task %s: %s", tid, exc)
                         continue
 
             # Emit events for new or changed tasks.
