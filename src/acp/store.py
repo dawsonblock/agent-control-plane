@@ -163,6 +163,7 @@ class TaskStore:
         repo_path: Path,
         base_branch: str,
         user_request: str,
+        recursion_depth: int = 0,
     ) -> Task:
         """Initialize a run directory and write the initial task.json."""
         run_dir = self.run_dir(task_id)
@@ -179,6 +180,7 @@ class TaskStore:
             worktree_path=self.worktree_path(task_id),
             user_request=user_request,
             status=TaskStatus.CREATED,
+            recursion_depth=recursion_depth,
         )
         self.save(task)
         return task

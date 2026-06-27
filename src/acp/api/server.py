@@ -267,7 +267,8 @@ def _load_task_or_404(
     Raises HTTPException(400) for invalid IDs and 404 for missing tasks.
     """
     _validate_task_id(task_id)
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     try:
         task = store.load(task_id)
     except Exception as exc:  # noqa: BLE001
@@ -301,7 +302,8 @@ def _lifecycle_action(
     if not status_check(task.status):
         raise HTTPException(status_code=400, detail=status_error)
 
-    note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
+    safe_vault_root = _validate_path_param(vault_root, "vault_root")
+    note_path = safe_vault_root / "tasks" / f"{task_id}.md"
     if not note_path.is_file():
         raise HTTPException(
             status_code=404,
@@ -349,7 +351,7 @@ def _lifecycle_action(
         run_dir=run_dir,
         task=task,
         store=store,
-        vault_root=Path(vault_root),
+        vault_root=safe_vault_root,
         on_warning=lambda msg: _logger.warning(msg),
     )
 
@@ -436,13 +438,15 @@ def _cors_enabled() -> bool:
 
 
 # CORS middleware — origins resolved from env var at import time.
+# v0.7.4: Restrict methods and headers to only what the API needs,
+# instead of the overly permissive ["*"].
 if _cors_enabled():
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_resolve_cors_origins(),
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "Accept"],
     )
 
 
@@ -451,6 +455,38 @@ if _cors_enabled():
 # middleware is a pass-through.
 if BearerTokenMiddleware is not None:
     app.add_middleware(BearerTokenMiddleware)
+
+
+# --------------------------------------------------------------------------- #
+# Path validation
+# --------------------------------------------------------------------------- #
+
+
+def _validate_path_param(path_str: str, param_name: str) -> Path:
+    """Validate a user-supplied path parameter for safety.
+
+    v0.7.4: Reject paths containing ``..`` (directory traversal) or
+    absolute paths that escape the expected data/vault directories.
+    This prevents an attacker from using the API to read arbitrary
+    filesystem locations via ``runs_root=/etc`` or similar.
+
+    Returns the resolved Path object if safe, raises HTTPException(400) otherwise.
+    """
+    from fastapi import HTTPException
+
+    if not path_str or not path_str.strip():
+        raise HTTPException(status_code=400, detail=f"{param_name} must not be empty")
+
+    # Reject paths with directory traversal components.
+    parts = Path(path_str).parts
+    if ".." in parts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{param_name} must not contain '..' (directory traversal denied)",
+        )
+
+    resolved = Path(path_str).resolve()
+    return resolved
 
 
 # --------------------------------------------------------------------------- #
@@ -485,6 +521,9 @@ async def run_task(request: RunRequest) -> RunResponse:
         state.set_config(request.config_path)
         cfg = state.get_config()
 
+    safe_runs_root = _validate_path_param(request.runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(request.vault_root, "vault_root")
+
     from acp.graph.workflow import run_workflow
 
     try:
@@ -492,8 +531,8 @@ async def run_task(request: RunRequest) -> RunResponse:
             run_workflow,
             config=cfg,
             user_request=request.task,
-            runs_root=Path(request.runs_root),
-            vault_root=Path(request.vault_root),
+            runs_root=safe_runs_root,
+            vault_root=safe_vault_root,
         )
     except ACPError as exc:
         raise HTTPException(status_code=exc.exit_code, detail=str(exc)) from exc
@@ -529,8 +568,11 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
         state.set_config(request.config_path)
         cfg = state.get_config()
 
+    safe_runs_root = _validate_path_param(request.runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(request.vault_root, "vault_root")
+
     # Pre-generate the task_id so the client can poll immediately.
-    store = TaskStore(runs_root=Path(request.runs_root))
+    store = TaskStore(runs_root=safe_runs_root)
     task_id = store.next_task_id(repo_path=cfg.repo.path)
 
     # Run in a background thread so the blocking workflow doesn't
@@ -543,8 +585,8 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
                 run_workflow,
                 config=cfg,
                 user_request=request.task,
-                runs_root=Path(request.runs_root),
-                vault_root=Path(request.vault_root),
+                runs_root=safe_runs_root,
+                vault_root=safe_vault_root,
                 task_id=task_id,
             )
         except Exception as exc:  # noqa: BLE001
@@ -566,7 +608,8 @@ async def list_tasks(
     by directory name, which sorts chronologically). Use ``limit=0`` for
     all tasks (backwards-compatible behavior).
     """
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     tasks: list[TaskSummary] = []
 
     if not store.root.is_dir():
@@ -706,7 +749,8 @@ async def get_events(
     _validate_task_id(task_id)
     from acp.events import EventWriter
 
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     run_dir = store.run_dir(task_id)
     if not run_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
@@ -735,7 +779,8 @@ async def get_report(
 ) -> dict[str, str]:
     """Get the report content for a task."""
     _validate_task_id(task_id)
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     run_dir = store.run_dir(task_id)
     report_path = run_dir / "artifacts" / "report.md"
     if not report_path.is_file():
@@ -901,7 +946,8 @@ async def stream_tasks(
 
     A ``heartbeat`` event is sent every 30 seconds to keep the connection alive.
     """
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
 
     async def event_stream() -> Any:
         last_statuses: dict[str, str] = {}

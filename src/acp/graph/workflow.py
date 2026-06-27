@@ -387,6 +387,7 @@ def run_workflow(
     mission_id: str = "",
     mission_step_index: int = -1,
     parent_task_id: str = "",
+    recursion_depth: int = 0,
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
 
@@ -520,6 +521,8 @@ def run_workflow(
         state["mission_id"] = mission_id
         state["mission_step_index"] = mission_step_index
         state["parent_task_id"] = parent_task_id
+    # v0.7.4: Subtask recursion depth — prevents agent fork bombs.
+    state["recursion_depth"] = recursion_depth
     result: dict[str, Any] = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
 
     # Close the durable stores if they were opened.

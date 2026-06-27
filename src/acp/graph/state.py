@@ -101,6 +101,12 @@ class ACPState(TypedDict, total=False):
     mission_step_index: int  # which step in the mission (0-based)
     parent_task_id: str  # preceding step's task_id ("" for step 0)
 
+    # --- v0.7.4: Subtask recursion depth — prevents agent fork bombs ------ #
+    # Root tasks have depth=0. Each subtask level increments by 1.
+    # Hard-capped at MAX_SUBTASK_RECURSION_DEPTH to prevent unbounded
+    # recursive subtask spawning.
+    recursion_depth: int
+
 
 def initial_state(
     *,

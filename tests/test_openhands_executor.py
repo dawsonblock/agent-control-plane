@@ -103,11 +103,21 @@ def test_start_captures_stdout_stderr(tmp_path):
     cfg = ExecutorSection(backend="openhands", agent="test-model")
     executor = OpenHandsExecutor(cfg)
 
-    # Mock the CLI being installed and returning a result.
+    # v0.7.4: The executor now streams stdout/stderr directly to files
+    # via subprocess.run(stdout=f, stderr=f). The mock needs to write
+    # to the file handles it receives.
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = '{"type": "action", "action": "write"}\n'
-    mock_result.stderr = ""
+
+    def _mock_run(*args, **kwargs):
+        # Write to the file handles passed as stdout/stderr kwargs.
+        stdout_f = kwargs.get("stdout")
+        stderr_f = kwargs.get("stderr")
+        if stdout_f is not None:
+            stdout_f.write('{"type": "action", "action": "write"}\n')
+        if stderr_f is not None:
+            stderr_f.write("")
+        return mock_result
 
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("test task")
@@ -119,7 +129,7 @@ def test_start_captures_stdout_stderr(tmp_path):
     with (
         patch.object(OpenHandsExecutor, "check_installed", return_value=True),
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
-        patch("subprocess.run", return_value=mock_result),
+        patch("subprocess.run", side_effect=_mock_run),
     ):
         result = executor.start(
             task_id="task_20260626_0001",
@@ -254,11 +264,17 @@ def test_extract_jsonl_events(tmp_path):
 
 
 def test_extract_jsonl_events_no_valid_lines(tmp_path):
-    """_extract_jsonl_events doesn't write a file when there are no valid lines."""
+    """_extract_jsonl_events writes an empty file when there are no valid lines.
+
+    v0.7.4: The method now streams to disk (always creates the file),
+    rather than accumulating lines in a list and only writing if non-empty.
+    """
     stdout = "not json\n"
     output_path = tmp_path / "events.jsonl"
     OpenHandsExecutor._extract_jsonl_events(stdout, output_path)
-    assert not output_path.is_file()
+    # The file is created but should be empty (no valid JSONL lines).
+    assert output_path.is_file()
+    assert output_path.read_text() == ""
 
 
 # --------------------------------------------------------------------------- #

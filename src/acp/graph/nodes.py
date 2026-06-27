@@ -261,6 +261,7 @@ def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         repo_path=repo_path,
         base_branch=cfg.repo.default_branch,
         user_request=state["user_request"],
+        recursion_depth=state.get("recursion_depth", 0),
     )
     ctx.events.write(EventType.TASK_CREATED, {"request": state["user_request"]})
     return {
@@ -498,10 +499,13 @@ def _parse_and_emit_subtasks(
 
         cfg = state["config"]
         max_subtasks = getattr(cfg.agent, "max_subtasks", 5)
+        # v0.7.4: Pass recursion_depth to prevent agent fork bombs.
+        recursion_depth = state.get("recursion_depth", 0)
         result = parse_subtask_requests(
             stdout,
             parent_task_id=state["task_id"],
             max_subtasks=max_subtasks,
+            recursion_depth=recursion_depth,
         )
         if result.requests:
             emit_subtask_events(result.requests, ctx.events)

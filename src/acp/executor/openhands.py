@@ -207,31 +207,47 @@ class OpenHandsExecutor:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(repo_path),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            # v0.7.4: Stream stdout/stderr directly to files instead of
+            # capturing into memory. OpenHands headless mode can emit
+            # hundreds of MB of JSONL tracing — capture_output=True would
+            # load it all into RAM, causing OOM on long runs.
+            with (
+                open(stdout_path, "w") as stdout_f,
+                open(stderr_path, "w") as stderr_f,
+            ):
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(repo_path),
+                    env=env,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
             exit_code = proc.returncode
-            out, err = proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             exit_code = 124
-            out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            err = f"acp: openhands agent timed out after {timeout_seconds}s\n{err}"
+            # Files already have partial output — append timeout notice.
+            stderr_path.write_text(
+                stderr_path.read_text()
+                + f"\nacp: openhands agent timed out after {timeout_seconds}s\n",
+                encoding="utf-8",
+            )
         except FileNotFoundError:
             exit_code = 127
-            out, err = "", "acp: 'openhands' not found on PATH"
+            stdout_path.write_text("")
+            stderr_path.write_text("acp: 'openhands' not found on PATH")
         except Exception as exc:  # noqa: BLE001
             exit_code = 127
-            out, err = "", f"acp: failed to start openhands: {exc}"
+            stdout_path.write_text("")
+            stderr_path.write_text(f"acp: failed to start openhands: {exc}")
 
         duration = time.monotonic() - start
-        stdout_path.write_text(out)
-        stderr_path.write_text(err)
+
+        # Read the spooled output for JSONL parsing.
+        # The full stdout is already on disk — we only need to read it
+        # for event counting/extraction, which is a streaming operation.
+        out = stdout_path.read_text(encoding="utf-8", errors="replace")
 
         # Parse the JSONL event stream to count events.
         self._events_captured = self._count_jsonl_events(out)
@@ -271,19 +287,21 @@ class OpenHandsExecutor:
 
     @staticmethod
     def _extract_jsonl_events(stdout: str, output_path: Path) -> None:
-        """Extract valid JSONL lines from stdout and write to a file."""
-        lines = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                json.loads(line)
-                lines.append(line)
-            except json.JSONDecodeError:
-                continue
-        if lines:
-            output_path.write_text("\n".join(lines) + "\n")
+        """Extract valid JSONL lines from stdout and write to a file.
+
+        v0.7.4: Streams to disk instead of accumulating in a list, to
+        avoid memory issues with very large JSONL outputs.
+        """
+        with open(output_path, "w") as f:
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)
+                    f.write(line + "\n")
+                except json.JSONDecodeError:
+                    continue
 
     # ------------------------------------------------------------------ #
     # Metadata for evidence
