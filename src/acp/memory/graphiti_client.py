@@ -319,18 +319,20 @@ def _instantiate_embedder_client(
 ) -> Any:
     """Instantiate the appropriate embedder client for the given provider."""
     if provider in ("openai", "custom"):
-        from graphiti_core.embedder import EmbedderConfig
-        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder
+        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 
-        config = EmbedderConfig(api_key=api_key or None, model=model, base_url=base_url)
+        config = OpenAIEmbedderConfig(
+            api_key=api_key or None, embedding_model=model, base_url=base_url
+        )
         return OpenAIEmbedder(config=config)
     else:
         # For non-OpenAI embedders, fall back to OpenAI embedder with the
         # custom config — most providers offer OpenAI-compatible embedding APIs.
-        from graphiti_core.embedder import EmbedderConfig
-        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder
+        from graphiti_core.embedder.openai_embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 
-        config = EmbedderConfig(api_key=api_key or None, model=model, base_url=base_url)
+        config = OpenAIEmbedderConfig(
+            api_key=api_key or None, embedding_model=model, base_url=base_url
+        )
         return OpenAIEmbedder(config=config)
 
 
@@ -531,7 +533,7 @@ async def search_graphiti_facts(
 
     client = _get_graphiti_client(group_id=group_id, memory_config=memory_config)
     try:
-        config = SearchConfig(num_results=num_results)
+        config = SearchConfig(limit=num_results)
         results = await client.search(
             query,
             config=config,

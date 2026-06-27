@@ -2,7 +2,7 @@
 // Uses SSE (Server-Sent Events) for real-time status updates, with
 // a fallback to periodic polling if SSE is not available.
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { api, type TaskSummary } from "./api";
 
 interface TaskListProps {
@@ -29,18 +29,20 @@ export function TaskList({ onSelect, selectedId, refreshKey }: TaskListProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const fetchTasks = useCallback(() => {
+  // React Compiler (v0.7.6) automatically memoizes this function — no
+  // useCallback needed.
+  const fetchTasks = () => {
     api.listTasks()
       .then(setTasks)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  };
 
   // Initial load + refresh on refreshKey change.
   useEffect(() => {
     setLoading(true);
     fetchTasks();
-  }, [refreshKey, fetchTasks]);
+  }, [refreshKey]);
 
   // SSE stream for real-time updates — falls back to polling on error.
   useEffect(() => {
@@ -72,7 +74,7 @@ export function TaskList({ onSelect, selectedId, refreshKey }: TaskListProps) {
       es?.close();
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [fetchTasks]);
+  }, [refreshKey]);
 
   if (loading && tasks.length === 0) return <div className="loading">Loading tasks...</div>;
   if (error) return <div className="error">{error}</div>;

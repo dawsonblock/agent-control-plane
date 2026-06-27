@@ -320,16 +320,19 @@ class SkillsSection(BaseModel):
 class ExecutorSection(BaseModel):
     """Sandbox / execution backend settings (v0.5.13).
 
-    - ``backend``: the execution backend. ``"worktree"`` (default, deprecated
-      in v0.8.0) uses the traditional git worktree isolation — no OS-level
-      sandboxing. ``"venv"`` uses an isolated uv venv (recommended for
-      production). ``"docker_sbx"`` uses Docker Sandboxes (``sbx``) to run
-      the agent inside an isolated microVM with its own Docker daemon,
-      filesystem, and network. ``"gvisor"`` uses gVisor containers.
+    - ``backend``: the execution backend. ``"venv"`` (default, v0.7.6) uses
+      an isolated uv venv for Python agents (recommended for production).
+      ``"worktree"`` uses the traditional git worktree isolation — no OS-level
+      sandboxing (deprecated, RCE risk with ``allow_shell``). ``"docker_sbx"``
+      uses Docker Sandboxes (``sbx``) to run the agent inside an isolated
+      microVM with its own Docker daemon, filesystem, and network.
+      ``"gvisor"`` uses gVisor containers.
 
-      v0.8.0: The default is still ``"worktree"`` for backwards
-      compatibility, but operators should migrate to ``"venv"`` or
-      ``"docker_sbx"``. A future release will change the default.
+      v0.7.6: The default changed from ``"worktree"`` to ``"venv"``. When
+      ``backend="venv"`` but ``executor.agent`` is not set (e.g. the shell or
+      custom agent), the run falls back to the direct agent path with the same
+      host-shell security checks as worktree — venv isolation only applies to
+      Python agents with a declared ``executor.agent`` command.
 
     - ``danger_allow_host_shell``: when True, explicitly allows
       ``backend: "worktree"`` with ``agent.allow_shell: true``. This is a
@@ -361,20 +364,33 @@ class ExecutorSection(BaseModel):
     - ``remove_after_run``: when True, the sandbox is removed after the run
       completes (reclaims disk space). When False (default), the sandbox
       persists and can be inspected or restarted.
+
+    - ``gvisor_image``: the Docker image used when ``backend="gvisor"``. The
+      user is responsible for building/pulling an image that has their agent
+      installed. Defaults to ``"ubuntu:22.04"``. Ignored for other backends.
+    - ``firecracker_kernel_path``: path to the Firecracker kernel image
+      (vmlinux) used when ``backend="firecracker"``. Required for the
+      Firecracker microVM backend. Ignored for other backends.
+    - ``firecracker_rootfs_path``: path to the Firecracker root filesystem
+      image (ext4) used when ``backend="firecracker"``. Required for the
+      Firecracker microVM backend. Ignored for other backends.
     """
 
-    backend: str = "worktree"
+    backend: str = "venv"
     danger_allow_host_shell: bool = False
     agent: str = ""
     sandbox_name_prefix: str = "acp"
     clone_mode: bool = True
     network_policy: str = "locked_down"
     remove_after_run: bool = False
+    gvisor_image: str = "ubuntu:22.04"
+    firecracker_kernel_path: str = ""
+    firecracker_rootfs_path: str = ""
 
     @field_validator("backend")
     @classmethod
     def _validate_backend(cls, v: str) -> str:
-        allowed = ("worktree", "docker_sbx", "gvisor", "openhands", "venv")
+        allowed = ("worktree", "docker_sbx", "gvisor", "openhands", "venv", "firecracker")
         if v not in allowed:
             raise ValueError(
                 f"executor.backend='{v}' is not valid. Must be one of: {', '.join(allowed)}."

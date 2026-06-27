@@ -78,9 +78,14 @@ if HAYSTACK_INSTALLED:
 
 
 def _install_fake_embedder():
-    """Return a patcher that replaces SentenceTransformersDocumentEmbedder."""
+    """Return a patcher that replaces SentenceTransformersDocumentEmbedder.
+
+    The embedder is imported locally inside HaystackIndexer._build_and_run_pipeline
+    (``from haystack.components.embedders import SentenceTransformersDocumentEmbedder``),
+    so we patch it at the source module rather than at the importer's namespace.
+    """
     return patch(
-        "acp.context.haystack_indexer.SentenceTransformersDocumentEmbedder",
+        "haystack.components.embedders.SentenceTransformersDocumentEmbedder",
         _FakeEmbedder,
     )
 

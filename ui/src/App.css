@@ -498,3 +498,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* M15: Per-step Play button */
+.btn-step-play {
+  padding: 2px 10px;
+  background: var(--cyan);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.btn-step-play:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

@@ -128,6 +128,54 @@ class GvisorExecutor:
                 "Specify the agent command to run inside the container."
             )
 
+    async def _ensure_image_pulled(self) -> None:
+        """Pull the configured gVisor image if it's not present locally.
+
+        Avoids a cryptic ImageNotFound error from ``docker run``. Best-effort:
+        if the pull itself fails, the subsequent ``docker run`` will surface
+        the real error.
+        """
+        image = self.config.gvisor_image
+        # Check if the image is already present locally.
+        try:
+            inspect = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "image", "inspect", image],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning(
+                "gvisor: docker image inspect timed out for %s — proceeding to run (may fail)",
+                image,
+            )
+            return
+        if inspect.returncode == 0:
+            return  # image is cached locally
+        logger.info("gvisor: image %s not found locally — pulling", image)
+        try:
+            pull = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "pull", image],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning(
+                "gvisor: docker pull timed out for %s — proceeding to run (may fail)",
+                image,
+            )
+            return
+        if pull.returncode != 0:
+            logger.warning(
+                "gvisor: failed to pull image %s (exit %s): %s",
+                image,
+                pull.returncode,
+                pull.stderr.strip(),
+            )
+
     # ------------------------------------------------------------------ #
     # Start the container + run the agent
     # ------------------------------------------------------------------ #
@@ -159,6 +207,11 @@ class GvisorExecutor:
         stdout_path = artifact_dir / "agent_stdout.txt"
         stderr_path = artifact_dir / "agent_stderr.txt"
 
+        # Ensure the configured image is present locally; pull if missing so
+        # the run command doesn't fail with an ImageNotFound error. Best-effort
+        # — if the pull fails we let the run command surface the real error.
+        await self._ensure_image_pulled()
+
         # Build the Docker command.
         network_flag = "none" if self.config.network_policy == "locked_down" else "bridge"
         prompt_content = prompt_path.read_text()
@@ -176,10 +229,9 @@ class GvisorExecutor:
             "-w",
             "/workspace",
             "-i",  # stdin for prompt
-            # Use a minimal image with git + the agent. The user is
-            # responsible for building/pulling an image that has their
-            # agent installed. We default to a generic image.
-            "ubuntu:22.04",
+            # Use the configured image. The user is responsible for
+            # building/pulling an image that has their agent installed.
+            self.config.gvisor_image,
             "bash",
             "-c",
             f"{self.config.agent} 2>&1",

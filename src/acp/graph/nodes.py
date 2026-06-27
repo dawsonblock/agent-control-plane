@@ -523,27 +523,38 @@ async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     # allow_shell=True can execute arbitrary commands on the host. Warn loudly
     # so operators know the risk. Consider using docker_sbx, gvisor, or venv.
     # v0.8.0 (Phase 4.1): Hard refuse when worktree+shell without explicit opt-in.
-    if cfg.executor.backend == "worktree":
+    # v0.7.6: The default backend is now "venv", but when executor.agent is not
+    # set (shell/custom agents), the run falls back to the direct agent path —
+    # same host exposure as worktree. Apply the same security checks in that case.
+    _uses_direct_agent_path = cfg.executor.backend == "worktree" or (
+        cfg.executor.backend == "venv" and not cfg.executor.agent
+    )
+    if _uses_direct_agent_path:
         if getattr(cfg.agent, "allow_shell", False):
             if not getattr(cfg.executor, "danger_allow_host_shell", False):
                 raise RuntimeError(
-                    "SECURITY REFUSAL: executor.backend='worktree' with agent.allow_shell=True "
-                    "is refused without explicit opt-in. This configuration gives the agent "
-                    "arbitrary host command execution (RCE). To override, set "
+                    "SECURITY REFUSAL: agent runs directly on the host with "
+                    "agent.allow_shell=True but without explicit opt-in. This "
+                    "configuration gives the agent arbitrary host command "
+                    "execution (RCE). To override, set "
                     "executor.danger_allow_host_shell: true in the repo config. "
-                    "Consider using docker_sbx, gvisor, or venv for OS-level isolation."
+                    "Consider using docker_sbx, gvisor, or venv (with "
+                    "executor.agent set) for OS-level isolation."
                 )
             logger.warning(
-                "SECURITY RISK: executor.backend='worktree' with agent.allow_shell=True "
-                "— agent can execute arbitrary host commands (RCE). "
-                "Operator explicitly opted in via danger_allow_host_shell. "
-                "Consider using docker_sbx, gvisor, or venv for OS-level isolation."
+                "SECURITY RISK: agent runs directly on the host with "
+                "agent.allow_shell=True — agent can execute arbitrary host "
+                "commands (RCE). Operator explicitly opted in via "
+                "danger_allow_host_shell. Consider using docker_sbx, gvisor, "
+                "or venv (with executor.agent set) for OS-level isolation."
             )
         else:
             logger.info(
-                "executor.backend='worktree' — no OS-level sandboxing. "
-                "Agent has filesystem and network access to the host. "
-                "Use docker_sbx, gvisor, or venv for production workloads."
+                "agent runs directly on the host (backend='%s') — no OS-level "
+                "sandboxing. Agent has filesystem and network access to the host. "
+                "Use docker_sbx, gvisor, or venv (with executor.agent set) for "
+                "production workloads.",
+                cfg.executor.backend,
             )
 
     # --- docker_sbx backend: run agent inside sandbox, then fetch remote -- #
@@ -754,8 +765,70 @@ async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
             "worktree_path": state["worktree_path"],
         }
 
+    # --- firecracker backend: Firecracker microVM hardware isolation ------ #
+    if cfg.executor.backend == "firecracker":
+        from acp.executor.firecracker import FirecrackerExecutor
+
+        executor = FirecrackerExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"firecracker:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "sandbox": True,
+                "runtime": "firecracker",
+            },
+        )
+        try:
+            agent_result = await executor.start(
+                task_id=task.task_id,
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "message": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # NOTE: Do NOT call executor.cleanup() here — the rootfs copy must
+        # survive so capture_diff_node can extract the workspace from it.
+        # _cleanup_sandbox (which runs at the end of the workflow) handles
+        # stop/remove using the firecracker_cleanup_paths stored below.
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+            "sandbox_name": executor._vm_id,
+            "firecracker_cleanup_paths": {
+                "socket_path": executor._socket_path,
+                "rootfs_copy_path": executor._rootfs_copy_path,
+            },
+        }
+
     # --- venv backend: hermetic Python isolation via uv run --isolated ---- #
-    if cfg.executor.backend == "venv":
+    # v0.7.6: Only enter the venv executor path when executor.agent is set
+    # (Python agents). When backend="venv" but executor.agent is empty (shell/
+    # custom agents), fall through to the direct agent_factory path below —
+    # venv isolation only applies to Python agents with a declared command.
+    if cfg.executor.backend == "venv" and cfg.executor.agent:
         from acp.executor.venv_executor import VenvExecutor
 
         executor = VenvExecutor(cfg.executor)
@@ -819,7 +892,7 @@ async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
             "worktree_path": state["worktree_path"],
         }
 
-    # --- worktree backend (default): current behavior --------------------- #
+    # --- direct agent path: worktree backend, or venv fallback (no executor.agent) #
     agent = ctx.agent_factory(cfg)
     # v0.7.3: Pass the event writer to agents that support mid-stream
     # analysis (CLIAgent). The sentinel uses it to write stream.aborted
@@ -1056,6 +1129,51 @@ async def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str
         )
         return {"diff": diff}
 
+    # --- firecracker backend: extract workspace from rootfs, then diff --- #
+    if cfg.executor.backend == "firecracker":
+        from acp.executor.firecracker import FirecrackerExecutor
+
+        fc_paths = state.get("firecracker_cleanup_paths", {})
+        executor = FirecrackerExecutor(cfg.executor)
+        executor._socket_path = fc_paths.get("socket_path", "")
+        executor._rootfs_copy_path = fc_paths.get("rootfs_copy_path", "")
+
+        extracted_wt = state["artifacts_dir"] / "fc_workspace"
+        if not executor.extract_workspace_from_rootfs(extracted_wt):
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "capture_diff",
+                    "reason": "failed to extract workspace from rootfs",
+                },
+            )
+            return {
+                "status": TaskStatus.FAILED,
+                "error": "failed to extract workspace from rootfs",
+            }
+        # The workspace was tarred with arcname="workspace", so the repo
+        # content is at extracted_wt / "workspace".
+        ws_path = extracted_wt / "workspace"
+        if not ws_path.exists():
+            ws_path = extracted_wt
+        diff = capture_diff(
+            worktree_path=ws_path,
+            base_branch=cfg.repo.default_branch,
+            artifacts_dir=state["artifacts_dir"],
+            base_commit_sha=base_sha or None,
+        )
+        ctx.events.write(
+            EventType.DIFF_CAPTURED,
+            {
+                "files": len(diff.changed_files),
+                "insertions": diff.insertions,
+                "deletions": diff.deletions,
+                "binary_files": diff.binary_files,
+                "source": "firecracker_rootfs",
+            },
+        )
+        return {"diff": diff}
+
     # --- worktree backend (default): current behavior --------------------- #
     diff = capture_diff(
         worktree_path=state["worktree_path"],
@@ -1278,7 +1396,7 @@ async def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
     ``node.failed`` event on failure. Never raises.
     """
     cfg = state.get("config")
-    if cfg is None or cfg.executor.backend not in ("docker_sbx", "gvisor"):
+    if cfg is None or cfg.executor.backend not in ("docker_sbx", "gvisor", "firecracker"):
         return
     sandbox_name = state.get("sandbox_name", "")
     if not sandbox_name:
@@ -1289,6 +1407,14 @@ async def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
 
             executor: Any = GvisorExecutor(cfg.executor)
             executor._container_name = sandbox_name
+        elif cfg.executor.backend == "firecracker":
+            from acp.executor.firecracker import FirecrackerExecutor
+
+            executor = FirecrackerExecutor(cfg.executor)
+            executor._vm_id = sandbox_name
+            fc_paths = state.get("firecracker_cleanup_paths", {})
+            executor._socket_path = fc_paths.get("socket_path", "")
+            executor._rootfs_copy_path = fc_paths.get("rootfs_copy_path", "")
         else:
             executor = SbxExecutor(cfg.executor)
             executor._sandbox_name = sandbox_name

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from acp.config import ExecutorSection, ReviewSection
+from acp.errors import AgentConfigError
 from acp.models import EventType, TaskStatus
 from acp.review.secret_scanner import (
     detect_hard_block_secrets,
@@ -422,6 +423,130 @@ def test_gvisor_executor_config_accepts_gvisor():
 
 
 # --------------------------------------------------------------------------- #
+# Phase 4.3: FirecrackerExecutor
+# --------------------------------------------------------------------------- #
+
+
+def test_firecracker_executor_backend_name():
+    """FirecrackerExecutor.backend_name returns 'firecracker'."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    executor = FirecrackerExecutor(ExecutorSection(backend="firecracker", agent="claude"))
+    assert executor.backend_name == "firecracker"
+
+
+def test_firecracker_executor_protocol_compliance():
+    """FirecrackerExecutor satisfies the Executor protocol."""
+    from acp.executor.firecracker import FirecrackerExecutor
+    from acp.executor.protocol import Executor
+
+    executor = FirecrackerExecutor(ExecutorSection(backend="firecracker", agent="claude"))
+    assert isinstance(executor, Executor)
+
+
+def test_firecracker_executor_check_installed_returns_false_without_binary():
+    """FirecrackerExecutor.check_installed returns False when binary is missing."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    with patch("shutil.which", return_value=None):
+        assert FirecrackerExecutor.check_installed() is False
+
+
+def test_firecracker_executor_fetch_remote_returns_empty():
+    """FirecrackerExecutor.fetch_remote returns empty (repo injected into rootfs)."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    executor = FirecrackerExecutor(ExecutorSection(backend="firecracker", agent="claude"))
+    assert executor.fetch_remote(Path("/tmp")) == ""
+
+
+def test_firecracker_executor_config_accepts_firecracker():
+    """ExecutorSection accepts 'firecracker' as a backend."""
+    cfg = ExecutorSection(backend="firecracker", agent="claude")
+    assert cfg.backend == "firecracker"
+
+
+def test_firecracker_executor_config_rejects_invalid_backend():
+    """ExecutorSection rejects unknown backends."""
+    with pytest.raises(ValueError, match="not valid"):
+        ExecutorSection(backend="bogus")
+
+
+def test_firecracker_executor_validate_requires_kernel_and_rootfs(tmp_path):
+    """_validate raises AgentConfigError when kernel/rootfs paths are missing."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    executor = FirecrackerExecutor(ExecutorSection(backend="firecracker", agent="claude"))
+    with (
+        patch.object(FirecrackerExecutor, "check_installed", return_value=True),
+        pytest.raises(AgentConfigError, match="firecracker_kernel_path"),
+    ):
+        executor._validate()
+
+
+def test_firecracker_executor_validate_requires_existing_kernel(tmp_path):
+    """_validate raises AgentConfigError when kernel file doesn't exist."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    # Create a rootfs but not a kernel
+    rootfs = tmp_path / "rootfs.img"
+    rootfs.write_text("fake")
+    executor = FirecrackerExecutor(
+        ExecutorSection(
+            backend="firecracker",
+            agent="claude",
+            firecracker_kernel_path=str(tmp_path / "nonexistent_kernel"),
+            firecracker_rootfs_path=str(rootfs),
+        )
+    )
+    with (
+        patch.object(FirecrackerExecutor, "check_installed", return_value=True),
+        pytest.raises(AgentConfigError, match="kernel"),
+    ):
+        executor._validate()
+
+
+def test_firecracker_executor_validate_passes_with_valid_config(tmp_path):
+    """_validate passes when all required fields are set and files exist."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    kernel = tmp_path / "vmlinux"
+    kernel.write_text("fake kernel")
+    rootfs = tmp_path / "rootfs.img"
+    rootfs.write_text("fake rootfs")
+    executor = FirecrackerExecutor(
+        ExecutorSection(
+            backend="firecracker",
+            agent="claude",
+            firecracker_kernel_path=str(kernel),
+            firecracker_rootfs_path=str(rootfs),
+        )
+    )
+    # Mock check_installed since firecracker isn't installed in CI
+    with patch.object(FirecrackerExecutor, "check_installed", return_value=True):
+        executor._validate()  # should not raise
+
+
+def test_firecracker_executor_info_returns_metadata():
+    """info() returns a dict with backend='firecracker'."""
+    from acp.executor.firecracker import FirecrackerExecutor
+
+    executor = FirecrackerExecutor(
+        ExecutorSection(
+            backend="firecracker",
+            agent="claude",
+            firecracker_kernel_path="/tmp/vmlinux",
+            firecracker_rootfs_path="/tmp/rootfs.img",
+        )
+    )
+    info = executor.info()
+    assert info["backend"] == "firecracker"
+    assert info["agent"] == "claude"
+    assert info["kernel_path"] == "/tmp/vmlinux"
+    assert info["rootfs_path"] == "/tmp/rootfs.img"
+
+
+# --------------------------------------------------------------------------- #
 # Phase 4.1: API endpoints (missions + skills)
 # --------------------------------------------------------------------------- #
 
@@ -445,5 +570,18 @@ def test_skills_endpoint_exists():
 
         routes = [r.path for r in app.routes]
         assert "/skills" in routes, "GET /skills endpoint not found"
+    except ImportError:
+        pytest.skip("api extra not installed")
+
+
+def test_mission_step_run_endpoint_exists():
+    """POST /missions/{id}/steps/{index}/run endpoint is registered (M15)."""
+    try:
+        from acp.api.server import app
+
+        routes = [r.path for r in app.routes]
+        assert "/missions/{mission_id}/steps/{step_index}/run" in routes, (
+            "POST /missions/{id}/steps/{index}/run endpoint not found"
+        )
     except ImportError:
         pytest.skip("api extra not installed")

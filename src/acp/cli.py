@@ -3,9 +3,7 @@
 ``acp run`` is the entry point: it runs one coding task in an isolated git
 worktree, captures everything, reviews the diff, and writes an evidence
 report + Obsidian note. The orchestration lives in the LangGraph workflow
-(``acp.graph.workflow``) — the graph is the only production engine. The
-original linear ``EvidenceLoop`` is quarantined in ``acp.legacy_loop`` for
-test-only equivalence checks.
+(``acp.graph.workflow``) — the graph is the sole engine.
 """
 
 from __future__ import annotations

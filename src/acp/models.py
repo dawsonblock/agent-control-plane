@@ -106,6 +106,7 @@ class EventType(StrEnum):
     # mission.step_started/completed/failed = v0.8.0 mission orchestration events
     MISSION_CREATED = "mission.created"
     MISSION_COMPLETED = "mission.completed"
+    MISSION_FAILED = "mission.failed"
     MISSION_STEP_STARTED = "mission.step_started"
     MISSION_STEP_COMPLETED = "mission.step_completed"
     MISSION_STEP_FAILED = "mission.step_failed"
@@ -341,48 +342,3 @@ class Mission(BaseModel):
 def next_event_id(existing_count: int) -> str:
     """Monotonic, zero-padded event id, e.g. evt_000001."""
     return f"evt_{existing_count + 1:06d}"
-
-
-# --------------------------------------------------------------------------- #
-# Gate-correct final-status computation (v0.5)
-# --------------------------------------------------------------------------- #
-
-
-def compute_final_status(
-    *,
-    agent_passed: bool,
-    command_results: list[CommandResult],
-    diff_changed_files: list[str],
-    review: ReviewResult | None,
-) -> TaskStatus:
-    """Determine the final task status using gate-correct logic.
-
-    .. deprecated:: v0.8.1
-        Use :func:`acp.review.gates.evaluate_final_gates` directly for
-        richer results (returns ``GateResult`` with outcome + reasons).
-        This function remains as a thin wrapper for backward compatibility
-        but will be removed in a future release.
-    """
-    import warnings
-
-    warnings.warn(
-        "compute_final_status is deprecated — use evaluate_final_gates directly",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from acp.review.gates import GateOutcome, evaluate_final_gates
-
-    agent_exit_code = 0 if agent_passed else 1
-
-    result = evaluate_final_gates(
-        agent_exit_code=agent_exit_code,
-        command_results=command_results,
-        review_result=review,
-        changed_files=diff_changed_files,
-    )
-
-    if result.outcome == GateOutcome.PASSED:
-        return TaskStatus.PASSED
-    if result.outcome == GateOutcome.NEEDS_REVIEW:
-        return TaskStatus.NEEDS_REVIEW
-    return TaskStatus.FAILED

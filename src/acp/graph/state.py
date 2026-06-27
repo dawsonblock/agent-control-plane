@@ -82,6 +82,12 @@ class ACPState(TypedDict, total=False):
     sandbox_remote: str  # sandbox-acp-<task_id> on the host
     sandbox_metadata: dict[str, Any]  # recorded in sandbox.started event
 
+    # --- v0.8.0: Firecracker executor cleanup paths --------------------- #
+    # Firecracker's stop()/remove() need the socket and rootfs copy paths
+    # that are only known after start(). Stored here so _cleanup_sandbox
+    # can reconstruct a FirecrackerExecutor with the right paths.
+    firecracker_cleanup_paths: dict[str, str]  # socket_path, rootfs_copy_path
+
     # --- v0.6.0: Autonomous mode ---------------------------------------- #
     # Whether autonomous mode was active for this run.
     auto_approved: bool  # True if auto.approved was written

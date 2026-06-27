@@ -43,6 +43,15 @@ def _make_repo_config(repo_path: Path) -> RepoConfig:
     )
 
 
+def _write_minimal_config(path: Path) -> Path:
+    """Write a minimal .repo.yaml and return its path (for orchestrator tests)."""
+    path.write_text(
+        "repo:\n  name: demo\n  path: .\n  default_branch: main\n"
+        "agent:\n  default: shell\ncommands:\n  test: echo ok\nreview: {}\n"
+    )
+    return path
+
+
 def _make_mission(
     mission_id: str = "mission_20260626_0001",
     goal: str = "Migrate to React 19",
@@ -860,3 +869,127 @@ def test_finalize_evidence_no_parent_hash_without_mission(tmp_path):
     assert len(finalized) == 1
     assert "parent_artifact_hash" not in finalized[0].payload
     assert "parent_task_id" not in finalized[0].payload
+
+
+# --------------------------------------------------------------------------- #
+# M15: Per-step run_single_step tests
+# --------------------------------------------------------------------------- #
+
+
+def test_run_single_step_runs_pending_step(tmp_path, monkeypatch):
+    """run_single_step runs a pending step and marks it completed."""
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Test goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+
+    # Mock run_workflow to return a passed result.
+    def fake_run_workflow(**kwargs):
+        return {"task_id": "task_test_0001", "status": "passed"}
+
+    monkeypatch.setattr("acp.graph.workflow.run_workflow", fake_run_workflow)
+
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    result = orch.run_single_step(mid, 0)
+
+    assert result["status"] == "completed"
+    assert result["task_id"] == "task_test_0001"
+    assert result["step_index"] == 0
+
+    mission = store.load(mid)
+    assert mission.steps[0].status == "completed"
+    assert mission.steps[0].task_id == "task_test_0001"
+
+
+def test_run_single_step_refuses_completed_mission(tmp_path, monkeypatch):
+    """run_single_step raises ValueError for a completed mission."""
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Test goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+    # Mark step as completed so complete() doesn't raise.
+    store.mark_step_running(mid, 0, "task_test_0001")
+    store.mark_step_completed(mid, 0, success=True)
+    store.complete(mid)
+
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    with pytest.raises(ValueError, match="completed"):
+        orch.run_single_step(mid, 0)
+
+
+def test_run_single_step_refuses_completed_step(tmp_path, monkeypatch):
+    """run_single_step raises ValueError for an already-completed step."""
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Test goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+    store.mark_step_running(mid, 0, "task_test_0001")
+    store.mark_step_completed(mid, 0, success=True)
+
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    with pytest.raises(ValueError, match="completed"):
+        orch.run_single_step(mid, 0)
+
+
+def test_run_single_step_out_of_range(tmp_path):
+    """run_single_step raises IndexError for an invalid step index."""
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    store = MissionStore(missions_dir=tmp_path / "missions")
+    mid = store.next_mission_id()
+    store.create(
+        mission_id=mid,
+        goal="Test goal",
+        repo_name="demo",
+        repo_path=tmp_path,
+    )
+    store.add_step(mid, "Step A")
+
+    config_path = _write_minimal_config(tmp_path / ".repo.yaml")
+    orch = MissionOrchestrator(
+        config_path=config_path,
+        missions_dir=tmp_path / "missions",
+        runs_root=tmp_path / "runs",
+        vault_root=tmp_path / "vault",
+    )
+    with pytest.raises(IndexError, match="out of range"):
+        orch.run_single_step(mid, 99)

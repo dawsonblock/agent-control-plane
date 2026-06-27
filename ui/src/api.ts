@@ -189,6 +189,20 @@ export const api = {
       method: "POST",
     }),
 
+  // M15: Run a single mission step by index.
+  runMissionStep: (
+    missionId: string,
+    stepIndex: number,
+    configPath = ".repo.yaml",
+    missionsRoot = "data/missions",
+    runsRoot = "data/runs",
+    vaultRoot = "data/vault",
+  ) =>
+    fetchJSON<{ mission_id: string; step_index: number; task_id: string; status: string; error: string | null }>(
+      `/missions/${missionId}/steps/${stepIndex}/run?missions_root=${encodeURIComponent(missionsRoot)}&config_path=${encodeURIComponent(configPath)}&runs_root=${encodeURIComponent(runsRoot)}&vault_root=${encodeURIComponent(vaultRoot)}`,
+      { method: "POST" },
+    ),
+
   // v0.8.0 (Phase 3.1): Mission orchestration — run, pause, resume.
   runMission: (missionId: string, configPath: string, missionsRoot = "data/missions") =>
     fetchJSON<{ steps_run: number; steps_passed: number; steps_failed: number; paused: boolean }>(

@@ -10,8 +10,8 @@ a task may only be marked ``PASSED`` if all of the following hold:
 * review has no hard block
 * review recommendation is ``merge``
 
-The legacy ``compute_final_status()`` in ``models.py`` is now a thin wrapper
-around this module. All new code should call ``evaluate_final_gates`` directly.
+The deprecated ``compute_final_status()`` wrapper in ``models.py`` was
+removed in v0.7.6. All code should call ``evaluate_final_gates`` directly.
 """
 
 from __future__ import annotations

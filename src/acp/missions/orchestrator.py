@@ -204,6 +204,10 @@ class MissionOrchestrator:
                 events.write(EventType.MISSION_COMPLETED, {"mission_id": mission_id})
             elif steps_failed > 0:
                 mission.status = MissionStatus.FAILED
+                events.write(
+                    EventType.MISSION_FAILED,
+                    {"mission_id": mission_id},
+                )
             self.store.save(mission)
 
         return {
@@ -257,6 +261,159 @@ class MissionOrchestrator:
             "parent_artifact_hash": parent_hash,
             "error": result.get("error"),
         }
+
+    def run_single_step(self, mission_id: str, step_index: int) -> dict[str, Any]:
+        """Run a single step by index without running the full mission.
+
+        This enables per-step "Play" buttons in the dashboard UI (M15).
+        The step must be in a non-terminal state (``pending`` or ``failed``)
+        and the mission must not be in a terminal state (``completed`` or
+        ``failed``).
+
+        Returns a dict with:
+          - ``mission_id``: the mission id
+          - ``step_index``: the step index that was run
+          - ``task_id``: the task id produced by the workflow
+          - ``status``: the step status after running (``completed`` or ``failed``)
+          - ``error``: error message if the step failed, otherwise ``None``
+        """
+        mission = self.store.load(mission_id)
+        if mission is None:
+            raise FileNotFoundError(f"mission {mission_id} not found")
+        if mission.status in (MissionStatus.COMPLETED, MissionStatus.FAILED):
+            raise ValueError(f"mission {mission_id} is {mission.status.value} — cannot run step")
+        if step_index < 0 or step_index >= len(mission.steps):
+            raise IndexError(f"step index {step_index} out of range (0..{len(mission.steps) - 1})")
+
+        step = mission.steps[step_index]
+        if step.status not in ("pending", "failed"):
+            raise ValueError(
+                f"step {step_index} is '{step.status}' — only pending or failed steps can be run"
+            )
+
+        events = self.store.events_writer(mission_id)
+        step_prompt = step.prompt or step.description
+
+        # Determine the parent task id for artifact chaining.
+        parent_task_id = ""
+        if step_index > 0:
+            prev_step = mission.steps[step_index - 1]
+            parent_task_id = prev_step.task_id or ""
+
+        events.write(
+            EventType.MISSION_STEP_STARTED,
+            {
+                "mission_id": mission_id,
+                "step_index": step_index,
+                "step_prompt": step_prompt[:200],
+                "parent_task_id": parent_task_id,
+            },
+        )
+
+        # Mark mission as running so pause() works during execution.
+        prev_mission_status = mission.status
+        mission.status = MissionStatus.RUNNING
+        step.status = "running"
+        self.store.save(mission)
+
+        try:
+            result = self._run_step(mission, step_index, step_prompt, parent_task_id)
+            task_id = result.get("task_id", "")
+            step.task_id = task_id
+            step.status = "completed" if result.get("status") == "passed" else "failed"
+            self.store.save(mission)
+
+            if step.status == "completed":
+                events.write(
+                    EventType.MISSION_STEP_COMPLETED,
+                    {
+                        "mission_id": mission_id,
+                        "step_index": step_index,
+                        "task_id": task_id,
+                        "parent_artifact_hash": result.get("parent_artifact_hash"),
+                    },
+                )
+            else:
+                events.write(
+                    EventType.MISSION_STEP_FAILED,
+                    {
+                        "mission_id": mission_id,
+                        "step_index": step_index,
+                        "task_id": task_id,
+                        "error": result.get("error", "step did not pass"),
+                    },
+                )
+
+            # Finalize mission status: if all steps are done, update.
+            all_done = all(s.status in ("completed", "failed") for s in mission.steps)
+            if all_done:
+                any_failed = any(s.status == "failed" for s in mission.steps)
+                mission.status = MissionStatus.FAILED if any_failed else MissionStatus.COMPLETED
+                if mission.status == MissionStatus.COMPLETED:
+                    events.write(
+                        EventType.MISSION_COMPLETED,
+                        {"mission_id": mission_id},
+                    )
+                else:
+                    events.write(
+                        EventType.MISSION_FAILED,
+                        {"mission_id": mission_id},
+                    )
+                self.store.save(mission)
+            elif mission.status == MissionStatus.RUNNING:
+                # Not all steps done — restore to a non-running state.
+                # If the mission was already RUNNING (e.g. via run()), keep
+                # it RUNNING so the orchestrator loop can continue. Otherwise
+                # (was PENDING), set to PAUSED since a step has executed but
+                # the mission is not actively being driven by run().
+                if prev_mission_status == MissionStatus.RUNNING:
+                    pass  # keep RUNNING
+                else:
+                    mission.status = MissionStatus.PAUSED
+                    self.store.save(mission)
+
+            return {
+                "mission_id": mission_id,
+                "step_index": step_index,
+                "task_id": task_id,
+                "status": step.status,
+                "error": result.get("error"),
+            }
+
+        except Exception as exc:  # noqa: BLE001
+            step.status = "failed"
+            self.store.save(mission)
+            events.write(
+                EventType.MISSION_STEP_FAILED,
+                {
+                    "mission_id": mission_id,
+                    "step_index": step_index,
+                    "error": str(exc),
+                },
+            )
+            # Finalize mission status on exception too.
+            all_done = all(s.status in ("completed", "failed") for s in mission.steps)
+            if all_done:
+                mission.status = MissionStatus.FAILED
+                events.write(
+                    EventType.MISSION_FAILED,
+                    {"mission_id": mission_id},
+                )
+                self.store.save(mission)
+            elif prev_mission_status == MissionStatus.RUNNING:
+                mission.status = MissionStatus.RUNNING
+                self.store.save(mission)
+            else:
+                mission.status = MissionStatus.PAUSED
+                self.store.save(mission)
+
+            return {
+                "mission_id": mission_id,
+                "step_index": step_index,
+                "task_id": "",
+                "status": "failed",
+                "error": str(exc),
+            }
 
     def pause(self, mission_id: str) -> None:
         """Pause a running mission — stops after the current step completes."""

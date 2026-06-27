@@ -6,6 +6,6 @@ pipeline from task intake through final reporting.
 """
 
 from acp.graph.state import ACPState
-from acp.graph.workflow import build_workflow, run_workflow
+from acp.graph.workflow import build_workflow, run_workflow, run_workflow_async
 
-__all__ = ["ACPState", "build_workflow", "run_workflow"]
+__all__ = ["ACPState", "build_workflow", "run_workflow", "run_workflow_async"]

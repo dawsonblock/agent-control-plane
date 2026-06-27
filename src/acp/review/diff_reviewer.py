@@ -418,7 +418,3 @@ def _summary(
         f"({diff.insertions}+, {diff.deletions}-), {validation_clause}. "
         f"Risk: {risk.value}. Recommendation: {rec.value}.{block_clause}"
     )
-
-
-# Back-compat re-export (older code imported `evaluate`).
-evaluate = _evaluate

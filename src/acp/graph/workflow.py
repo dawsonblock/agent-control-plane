@@ -427,7 +427,7 @@ def build_workflow(
 
 
 # --------------------------------------------------------------------------- #
-# Convenience runner — used by the CLI (and tests).
+# Convenience runners — used by the CLI, orchestrator, and tests.
 # --------------------------------------------------------------------------- #
 
 
@@ -444,15 +444,12 @@ def run_workflow(
     parent_task_id: str = "",
     recursion_depth: int = 0,
 ) -> dict[str, Any]:
-    """Build + invoke the graph once and return the final state.
+    """Build + invoke the graph once and return the final state (sync).
 
-    v0.8.0: This is now a thin sync wrapper around
-    :func:`run_workflow_async`. It uses ``asyncio.run()`` to drive the
-    async workflow. All node functions are async, and the graph is
-    invoked via ``wf.ainvoke()`` exclusively — no more ``wf.invoke()``.
-
-    When called from an async context (e.g. FastAPI), use
-    :func:`run_workflow_async` directly instead.
+    This is a thin sync wrapper around :func:`run_workflow_async` for sync
+    callers (CLI, orchestrator, sync tests). It uses ``asyncio.run()`` to
+    drive the async workflow. When called from an async context (FastAPI,
+    async tests), use :func:`run_workflow_async` directly.
     """
     import asyncio
 
@@ -485,19 +482,23 @@ async def run_workflow_async(
     parent_task_id: str = "",
     recursion_depth: int = 0,
 ) -> dict[str, Any]:
-    """Async version of :func:`run_workflow` for use in async contexts.
+    """Build + invoke the graph once and return the final state.
 
-    v0.7.5: This is the preferred entry point when calling from an async
-    framework (FastAPI, uvicorn). It uses ``wf.ainvoke()`` instead of
-    ``wf.invoke()``, which allows LangGraph to run async nodes natively
-    without the thread-pool workaround in :func:`_run_async`.
+    This is the single entry point for running a workflow. All node functions
+    are async, and the graph is invoked via ``wf.ainvoke()`` exclusively.
 
-    The setup logic (store init, signing key, durable store wiring) is
-    identical to :func:`run_workflow`. Only the graph invocation differs.
+    Sync callers (CLI, orchestrator) should wrap this in ``asyncio.run()``::
 
-    When the workflow graph contains async nodes (``async def``), LangGraph
-    will execute them concurrently where possible. When all nodes are sync,
-    ``ainvoke`` simply runs them in the event loop without blocking it.
+        result = asyncio.run(run_workflow_async(...))
+
+    Async callers (FastAPI, tests with ``asyncio_mode="auto"``) should await
+    it directly::
+
+        result = await run_workflow_async(...)
+
+    The setup logic (store init, signing key, durable store wiring) runs
+    before the graph is invoked. When the workflow graph contains async nodes
+    (``async def``), LangGraph will execute them concurrently where possible.
     """
     # v0.7.0 (Phase 1.1): Wire SQLite-as-primary if configured.
     evidence_cfg = getattr(config, "evidence", None)

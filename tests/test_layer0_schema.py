@@ -98,16 +98,22 @@ def test_executor_backend_accepts_openhands():
     assert section.backend == "openhands"
 
 
+def test_executor_backend_accepts_firecracker():
+    """ExecutorSection accepts 'firecracker' as a backend (v0.7.6)."""
+    section = ExecutorSection(backend="firecracker")
+    assert section.backend == "firecracker"
+
+
 def test_executor_backend_rejects_unknown():
     """ExecutorSection rejects unknown backend values."""
     with pytest.raises(ValueError, match="not valid"):
         ExecutorSection(backend="kubernetes")
 
 
-def test_executor_backend_defaults_to_worktree():
-    """ExecutorSection defaults to 'worktree'."""
+def test_executor_backend_defaults_to_venv():
+    """ExecutorSection defaults to 'venv' (v0.7.6 security hardening)."""
     section = ExecutorSection()
-    assert section.backend == "worktree"
+    assert section.backend == "venv"
 
 
 # --------------------------------------------------------------------------- #

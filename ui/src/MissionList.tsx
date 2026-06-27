@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { api, type MissionSummary } from "./api";
 
 interface Props {
@@ -12,7 +12,9 @@ export function MissionList({ onSelect, selectedId, refreshKey }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  // React Compiler (v0.7.6) automatically memoizes this function — no
+  // useCallback needed.
+  const load = async () => {
     try {
       setLoading(true);
       const data = await api.listMissions();
@@ -23,11 +25,11 @@ export function MissionList({ onSelect, selectedId, refreshKey }: Props) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  };
 
   useEffect(() => {
     load();
-  }, [load, refreshKey]);
+  }, [refreshKey]);
 
   if (loading && missions.length === 0) {
     return <div className="loading">Loading missions...</div>;

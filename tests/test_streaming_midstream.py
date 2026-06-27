@@ -11,9 +11,8 @@ Also tests:
 - Normal stream: benign output completes without false positives
 - Subtask detection: ACP_SPAWN_SUBTASK lines are recorded mid-stream
 
-Note: This codebase does not use pytest-asyncio. Async test logic is wrapped
-in ``asyncio.run()`` inside sync test functions, matching the pattern in
-``acp.memory.graphiti_client._run_async``.
+Note: This codebase uses pytest-asyncio with ``asyncio_mode="auto"``, so
+async test functions are automatically collected and run in an event loop.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 // Uses SSE for real-time updates while the task is in a non-terminal state,
 // with polling fallback.
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { api, type TaskDetail, type EventItem } from "./api";
 
 interface TaskDetailProps {
@@ -22,7 +22,9 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
   const [actor, setActor] = useState("");
   const [actionMsg, setActionMsg] = useState("");
 
-  const fetchDetail = useCallback(() => {
+  // React Compiler (v0.7.6) automatically memoizes this function — no
+  // useCallback needed.
+  const fetchDetail = () => {
     Promise.all([
       api.getTask(taskId),
       api.getEvents(taskId),
@@ -35,7 +37,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [taskId]);
+  };
 
   // Initial load.
   useEffect(() => {
@@ -43,7 +45,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
     setError("");
     setActionMsg("");
     fetchDetail();
-  }, [taskId, fetchDetail]);
+  }, [taskId]);
 
   // SSE + polling fallback for live updates while non-terminal.
   const isTerminal = task ? TERMINAL_STATES.has(task.status) : true;
@@ -73,7 +75,7 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
       es?.close();
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [isTerminal, fetchDetail]);
+  }, [isTerminal, taskId]);
 
   const handleApprove = async () => {
     try {

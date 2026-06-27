@@ -704,9 +704,8 @@ async def run_task(request: RunRequest) -> RunResponse:
     from acp.graph.workflow import run_workflow_async
 
     try:
-        # v0.7.5: Use async-native workflow invocation instead of
-        # asyncio.to_thread(run_workflow). This eliminates the thread-pool
-        # workaround for Graphiti async operations.
+        # v0.7.5: Use async-native workflow invocation. This eliminates the
+        # old thread-pool workaround for Graphiti async operations.
         result = await run_workflow_async(
             config=cfg,
             user_request=request.task,
@@ -1041,6 +1040,16 @@ class AddStepRequest(BaseModel):
     description: str
 
 
+class RunStepResponse(BaseModel):
+    """Response for POST /missions/{id}/steps/{index}/run (M15)."""
+
+    mission_id: str
+    step_index: int
+    task_id: str
+    status: str
+    error: str | None = None
+
+
 class CreateMissionResponse(BaseModel):
     mission_id: str
     goal: str
@@ -1174,6 +1183,56 @@ async def add_mission_step(
         created_at=mission.created_at,
         updated_at=mission.updated_at,
         completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/steps/{step_index}/run", response_model=RunStepResponse)
+def run_mission_step(
+    mission_id: str,
+    step_index: int,
+    config_path: str = ".repo.yaml",
+    missions_root: str = "data/missions",
+    runs_root: str = "data/runs",
+    vault_root: str = "data/vault",
+) -> RunStepResponse:
+    """Run a single mission step by index (M15 — per-step Play buttons).
+
+    This endpoint enables the dashboard UI to run individual steps on
+    demand without running the entire mission. The step must be in a
+    non-terminal state (``pending`` or ``failed``) and the mission must
+    not be in a terminal state (``completed`` or ``failed``).
+    """
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    safe_missions_root = _validate_path_param(missions_root, "missions_root")
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(vault_root, "vault_root")
+
+    orchestrator = MissionOrchestrator(
+        config_path=Path(config_path),
+        missions_dir=safe_missions_root,
+        runs_root=safe_runs_root,
+        vault_root=safe_vault_root,
+    )
+    try:
+        result = orchestrator.run_single_step(mission_id, step_index)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return RunStepResponse(
+        mission_id=result["mission_id"],
+        step_index=result["step_index"],
+        task_id=result["task_id"],
+        status=result["status"],
+        error=result.get("error"),
     )
 
 

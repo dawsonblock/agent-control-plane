@@ -127,6 +127,26 @@ export function MissionDetail({ missionId }: Props) {
     }
   };
 
+  // M15: Run a single step by index.
+  const handleRunStep = async (stepIndex: number) => {
+    setActionLoading(true);
+    setActionError("");
+    setRunStatus(`Running step ${stepIndex + 1}...`);
+    try {
+      const result = await api.runMissionStep(missionId, stepIndex);
+      setRunStatus(
+        `Step ${stepIndex + 1}: ${result.status}${result.error ? ` — ${result.error}` : ""} (task: ${result.task_id})`,
+      );
+      const updated = await api.getMission(missionId);
+      setMission(updated);
+    } catch (e) {
+      setActionError((e as Error).message);
+      setRunStatus(`Step ${stepIndex + 1} failed`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   // v0.8.0: Run/Pause/Resume handlers
   const handleRun = async () => {
     setActionLoading(true);
@@ -243,6 +263,17 @@ export function MissionDetail({ missionId }: Props) {
               <div className="step-meta">
                 <span className={`status-badge status-${step.status}`}>{step.status}</span>
                 {step.task_id && <span className="step-task">{step.task_id}</span>}
+                {/* M15: Per-step Play button — run a single step on demand */}
+                {isActive && (step.status === "pending" || step.status === "failed") && (
+                  <button
+                    className="btn-step-play"
+                    onClick={() => handleRunStep(idx)}
+                    disabled={actionLoading}
+                    title={`Run step ${idx + 1}`}
+                  >
+                    {actionLoading ? "..." : "▶ Run"}
+                  </button>
+                )}
               </div>
               {/* v0.8.0: Artifact chain visualization */}
               {idx > 0 && step.task_id && (
