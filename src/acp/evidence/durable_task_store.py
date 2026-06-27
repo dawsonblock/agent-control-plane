@@ -69,8 +69,8 @@ class DurableTaskStore:
         """Initialize the database schema. Idempotent.
 
         Uses the forward-rolling migration engine (``acp.evidence.migrations``)
-        to apply schema updates via ``PRAGMA user_version``. This avoids the
-        O(N) drop-and-rebuild strategy as the database grows.
+        to apply schema updates via a per-store ``schema_versions`` table.
+        This avoids the O(N) drop-and-rebuild strategy as the database grows.
         """
         from acp.evidence.migrations import TASK_STORE_MIGRATIONS, run_migrations
 
@@ -82,7 +82,7 @@ class DurableTaskStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
 
-        # Run forward-rolling migrations via PRAGMA user_version.
+        # Run forward-rolling migrations via the schema_versions table.
         run_migrations(self._conn, TASK_STORE_MIGRATIONS, store_name="task_store")
 
     def save(self, task: Task) -> None:

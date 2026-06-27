@@ -75,13 +75,14 @@ class DurableEventStore:
         """Initialize the database schema. Idempotent.
 
         Uses the forward-rolling migration engine (``acp.evidence.migrations``)
-        to apply schema updates via ``PRAGMA user_version``. This avoids the
-        O(N) drop-and-rebuild-from-JSONL strategy as the database grows.
+        to apply schema updates via a per-store ``schema_versions`` table.
+        This avoids the O(N) drop-and-rebuild-from-JSONL strategy as the
+        database grows.
 
         Handles migration from the old single-column primary key schema
         (event_id TEXT PRIMARY KEY) to the composite key schema
         (PRIMARY KEY (task_id, event_id)). If the old schema is detected
-        (user_version == 0 but the events table exists with the old PK),
+        (events table exists with the old PK but no schema_versions entry),
         the table is dropped once — the JSONL log is the canonical source,
         so the SQLite store can be safely rebuilt. After that, normal
         migrations proceed.
@@ -99,7 +100,7 @@ class DurableEventStore:
 
         # Check for old schema (event_id as sole PRIMARY KEY) and migrate.
         # This handles databases created before the migration engine existed
-        # (user_version == 0 but table already present with old PK layout).
+        # (table already present with old PK layout, no schema_versions entry).
         cols = self._conn.execute("PRAGMA table_info(events)").fetchall()
         if cols:
             pk_cols = [c[1] for c in cols if c[5]]  # c[5] is pk flag
@@ -108,7 +109,7 @@ class DurableEventStore:
                 # The JSONL log is canonical; SQLite is a derived index.
                 self._conn.execute("DROP TABLE IF EXISTS events")
 
-        # Run forward-rolling migrations via PRAGMA user_version.
+        # Run forward-rolling migrations via the schema_versions table.
         run_migrations(self._conn, EVENT_STORE_MIGRATIONS, store_name="event_store")
 
     def append(self, event: Event) -> None:
@@ -116,8 +117,9 @@ class DurableEventStore:
         if self._conn is None:
             raise RuntimeError("DurableEventStore not initialized — call .init() first")
         self._conn.execute(
-            "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events "
+            "(task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, signature_algorithm) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.task_id,
                 event.event_id,
@@ -127,6 +129,7 @@ class DurableEventStore:
                 event.prev_hash,
                 event.hash,
                 event.signature,
+                "ed25519",
             ),
         )
 
@@ -138,8 +141,9 @@ class DurableEventStore:
         try:
             for event in events:
                 self._conn.execute(
-                    "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events "
+                    "(task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, signature_algorithm) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         event.task_id,
                         event.event_id,
@@ -149,6 +153,7 @@ class DurableEventStore:
                         event.prev_hash,
                         event.hash,
                         event.signature,
+                        "ed25519",
                     ),
                 )
             self._conn.execute("COMMIT")
@@ -215,7 +220,8 @@ class DurableEventStore:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         rows = self._conn.execute(
-            f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature "
+            f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, "
+            f"signature_algorithm "
             f"FROM events{where} ORDER BY task_id ASC, event_id ASC LIMIT ?",
             params,
         ).fetchall()
@@ -272,7 +278,9 @@ def _row_to_event(row: tuple) -> Event:
     """Convert a SQLite row to an Event model.
 
     Column order matches the SELECT statements: task_id, event_id, type,
-    timestamp, payload, prev_hash, hash, signature.
+    timestamp, payload, prev_hash, hash, signature, signature_algorithm.
+    The signature_algorithm column (index 8) is not yet used by the Event
+    model — it's reserved for future multi-algorithm support.
     """
     return Event(
         task_id=row[0],
