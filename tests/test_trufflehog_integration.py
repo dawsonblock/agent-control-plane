@@ -304,3 +304,180 @@ class TestReviewDiffPassesWorktree:
             worktree_path=None,
         )
         assert review is not None
+
+
+# --------------------------------------------------------------------------- #
+# 9. v0.9.0 (Step 2): SecretVerifier — pluggable active verification
+# --------------------------------------------------------------------------- #
+
+
+class _FakeVerifier:
+    """Test double for SecretVerifier that returns a fixed status per call."""
+
+    def __init__(self, status: str = "verified") -> None:
+        self.status = status
+        self.calls: list[tuple[str, str]] = []
+
+    def verify(self, endpoint: str, secret: str) -> str:  # noqa: ARG002
+        self.calls.append((endpoint, secret))
+        return self.status
+
+    def verify_finding(self, kind, secret, verify_map):  # noqa: ANN001
+        # Reuse the real logic against self.status for integration tests.
+        from acp.review.secret_scanner import SecretVerifier
+
+        real = SecretVerifier()
+        real.verify = self.verify  # type: ignore[method-assign]
+        return real.verify_finding(kind, secret, verify_map)
+
+
+class TestSecretVerifier:
+    """SecretVerifier.verify — HTTP POST active verification (default impl)."""
+
+    def _resp(self, status: int):
+        resp = MagicMock()
+        resp.status = status
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+        return cm
+
+    def test_verify_returns_verified_on_200(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        with patch("urllib.request.urlopen", return_value=self._resp(200)) as m:
+            assert SecretVerifier().verify("http://x/verify", "sekret") == "verified"
+            m.assert_called_once()
+
+    def test_verify_returns_unverified_on_non_200(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        with patch("urllib.request.urlopen", return_value=self._resp(401)):
+            assert SecretVerifier().verify("http://x/verify", "sekret") == "unverified"
+
+    def test_verify_returns_unverified_on_url_error(self):
+        import urllib.error
+
+        from acp.review.secret_scanner import SecretVerifier
+
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")):
+            assert SecretVerifier().verify("http://x/verify", "sekret") == "unverified"
+
+    def test_verify_returns_unverified_on_timeout(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        with patch("urllib.request.urlopen", side_effect=TimeoutError()):
+            assert SecretVerifier().verify("http://x/verify", "sekret") == "unverified"
+
+    def test_verify_request_shape_post_json_timeout(self):
+        """The request is POST with a JSON secret body, JSON content-type, and the configured timeout."""
+        from acp.review.secret_scanner import SecretVerifier
+
+        captured: dict = {}
+
+        def fake_urlopen(req, timeout):  # noqa: ANN001
+            captured["req"] = req
+            captured["timeout"] = timeout
+            return self._resp(200)
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            SecretVerifier(timeout=7.0).verify("http://x/verify", "tok_abc")
+        req = captured["req"]
+        assert req.method == "POST"
+        assert json.loads(req.data) == {"secret": "tok_abc"}
+        assert req.has_header("Content-type")
+        assert captured["timeout"] == 7.0
+
+    def test_verify_finding_no_endpoint_returns_empty_status(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        v = SecretVerifier()
+        status, kind = v.verify_finding("custom:foo", "s", verify_map={})
+        assert status == ""
+        assert kind == "custom:foo"
+
+    def test_verify_finding_verified_keeps_kind(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        v = _FakeVerifier(status="verified")
+        # Use the real verify_finding via _FakeVerifier's shim.
+        status, kind = v.verify_finding("custom:foo", "s", verify_map={"custom:foo": "http://x"})
+        assert status == "verified"
+        assert kind == "custom:foo"
+
+    def test_verify_finding_unverified_suffixes_kind(self):
+        from acp.review.secret_scanner import SecretVerifier
+
+        v = _FakeVerifier(status="unverified")
+        status, kind = v.verify_finding("custom:foo", "s", verify_map={"custom:foo": "http://x"})
+        assert status == "unverified"
+        assert kind == "custom:foo:unverified_hard_block"
+
+
+class TestScanPatchVerification:
+    """scan_patch threads the pluggable verifier through to custom-regex findings."""
+
+    def _custom_setup(self):
+        import re
+
+        from acp.review.secret_scanner import scan_patch
+
+        pattern = re.compile(r"COMPANY_TOKEN_[A-Z0-9]{8}")
+        regexes = [("custom:company", pattern)]
+        meta = [{"name": "custom:company", "verify_endpoint": "https://verify.example.com/"}]
+        diff_text = "+token = COMPANY_TOKEN_ABC123XY\n"
+        return scan_patch, regexes, meta, diff_text
+
+    def test_injected_verifier_verified_tags_finding(self):
+        scan_patch, regexes, meta, diff_text = self._custom_setup()
+        verifier = _FakeVerifier(status="verified")
+        findings = scan_patch(
+            diff_text, custom_regexes=regexes, custom_regex_meta=meta, verifier=verifier
+        )
+        custom = [f for f in findings if f.kind.startswith("custom:")]
+        assert len(custom) == 1
+        assert custom[0].verified == "verified"
+        assert custom[0].kind == "custom:company"
+        # The verifier was actually called with the matched secret.
+        assert verifier.calls and verifier.calls[0][1] == "COMPANY_TOKEN_ABC123XY"
+
+    def test_injected_verifier_unverified_suffixes_kind(self):
+        scan_patch, regexes, meta, diff_text = self._custom_setup()
+        verifier = _FakeVerifier(status="unverified")
+        findings = scan_patch(
+            diff_text, custom_regexes=regexes, custom_regex_meta=meta, verifier=verifier
+        )
+        custom = [f for f in findings if "custom:company" in f.kind]
+        assert len(custom) == 1
+        assert custom[0].verified == "unverified"
+        assert custom[0].kind == "custom:company:unverified_hard_block"
+
+    def test_default_verifier_with_mocked_urlopen_verified(self):
+        """End-to-end: no verifier injected → the default HTTP verifier runs (urlopen mocked)."""
+        scan_patch, regexes, meta, diff_text = self._custom_setup()
+        resp = MagicMock()
+        resp.status = 200
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+        with patch("urllib.request.urlopen", return_value=cm):
+            findings = scan_patch(diff_text, custom_regexes=regexes, custom_regex_meta=meta)
+        custom = [f for f in findings if f.kind.startswith("custom:")]
+        assert len(custom) == 1
+        assert custom[0].verified == "verified"
+
+    def test_no_meta_means_no_verification(self):
+        """Without custom_regex_meta, custom findings have verified='' (no endpoint)."""
+        import re
+
+        from acp.review.secret_scanner import scan_patch
+
+        regexes = [("custom:company", re.compile(r"COMPANY_TOKEN_[A-Z0-9]{8}"))]
+        diff_text = "+token = COMPANY_TOKEN_ABC123XY\n"
+        # A verifier that would raise if called — proving it's NOT called.
+        verifier = _FakeVerifier(status="verified")
+        findings = scan_patch(diff_text, custom_regexes=regexes, verifier=verifier)
+        custom = [f for f in findings if f.kind.startswith("custom:")]
+        assert len(custom) == 1
+        assert custom[0].verified == ""
+        assert verifier.calls == []

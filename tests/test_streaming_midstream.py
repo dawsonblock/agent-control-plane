@@ -717,3 +717,181 @@ def test_sentinel_accumulates_subtask_requests() -> None:
             assert f"Task number {i}" in req
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------- #
+# v0.9.0 (Step 3): micro-batching + offloaded semantic anomaly detection
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSemanticModel:
+    """Stand-in for sentence-transformers used by semantic anomaly tests.
+
+    Returns a fixed embedding per chunk; chunks containing ``OUTLIER`` get
+    an embedding orthogonal to the baseline so cosine similarity is ~0 and
+    the anomaly threshold (0.3) is crossed. Records every ``encode`` call
+    so tests can assert batched-vs-per-line behaviour.
+    """
+
+    def __init__(self) -> None:
+        self.encode_calls: list[object] = []
+
+    def encode(self, chunks: object, show_progress_bar: bool = False) -> object:  # noqa: ARG002
+        self.encode_calls.append(chunks)
+        if isinstance(chunks, (list, tuple)):
+            return [self._emb(c) for c in chunks]
+        return self._emb(chunks)
+
+    @staticmethod
+    def _emb(chunk: str) -> object:
+        import numpy as np
+
+        if "OUTLIER" in chunk:
+            return np.array([0.0, 1.0, 0.0])
+        return np.array([1.0, 0.0, 0.0])
+
+
+def _sentinel_with_fake_semantic() -> StreamSentinel:
+    """A sentinel wired to a fake semantic model (no real model loaded)."""
+    sentinel = StreamSentinel(
+        task_id="test-semantic",
+        events=None,
+        config=StreamingSection(enabled=True, semantic_anomaly_detection=False),
+    )
+    # Avoid loading the real sentence-transformers model; inject the fake.
+    sentinel._semantic_model = _FakeSemanticModel()
+    sentinel.config.semantic_anomaly_detection = True
+    return sentinel
+
+
+def test_streaming_config_batch_defaults() -> None:
+    """Batching config has sensible v0.9.0 defaults."""
+    config = StreamingSection()
+    assert config.batch_interval_ms == 50
+    assert config.batch_max_lines == 64
+
+
+def test_streaming_config_batch_validation() -> None:
+    """Invalid batch params are rejected."""
+    with pytest.raises(ValueError, match="batch_interval_ms"):
+        StreamingSection(batch_interval_ms=-1)
+    with pytest.raises(ValueError, match="batch_max_lines"):
+        StreamingSection(batch_max_lines=0)
+
+
+def test_semantic_anomaly_flags_outlier_single_chunk() -> None:
+    """analyze_chunk flags an orthogonal chunk after 3+ embeddings (offloaded encode)."""
+
+    async def _run() -> None:
+        sentinel = _sentinel_with_fake_semantic()
+        fake = sentinel._semantic_model
+        # Two normal chunks build up the running average; the third diverges.
+        await sentinel.analyze_chunk("working on the feature\n")
+        await sentinel.analyze_chunk("editing the module now\n")
+        await sentinel.analyze_chunk("OUTLIER totally unrelated drift\n")
+        assert len(sentinel.semantic_anomalies) == 1
+        assert "OUTLIER" in sentinel.semantic_anomalies[0]["preview"]
+        # Per-line path calls encode once per chunk (3 calls, each a single str).
+        assert len(fake.encode_calls) == 3
+        assert all(isinstance(c, str) for c in fake.encode_calls)
+
+    asyncio.run(_run())
+
+
+def test_semantic_anomaly_batched_encode_called_once() -> None:
+    """analyze_batch encodes the whole batch in a single model.encode() call."""
+
+    async def _run() -> None:
+        sentinel = _sentinel_with_fake_semantic()
+        fake = sentinel._semantic_model
+        batch = [
+            "working on the feature\n",
+            "editing the module now\n",
+            "OUTLIER totally unrelated drift\n",
+        ]
+        await sentinel.analyze_batch(batch)
+        # One batched encode call receiving the list of non-empty chunks.
+        assert len(fake.encode_calls) == 1
+        assert isinstance(fake.encode_calls[0], list)
+        assert len(fake.encode_calls[0]) == 3
+        assert len(sentinel.semantic_anomalies) == 1
+        assert "OUTLIER" in sentinel.semantic_anomalies[0]["preview"]
+
+    asyncio.run(_run())
+
+
+def test_analyze_batch_secret_aborts_mid_batch() -> None:
+    """Kill-switch still fires within a batch: a secret in chunk N aborts immediately."""
+
+    async def _run() -> None:
+        sentinel = StreamSentinel(
+            task_id="test-batch-abort",
+            events=None,
+            config=StreamingSection(enabled=True),
+        )
+        parts = ["AKIA", "IOSFODNN7EXAMPLE"]
+        batch = [
+            "a benign line with enough tokens here\n",
+            f"export AWS_KEY={''.join(parts)}\n",
+            "later line that should never be processed\n",
+        ]
+        with pytest.raises(StreamAbort):
+            await sentinel.analyze_batch(batch)
+        assert sentinel.is_aborted
+        assert sentinel.abort_reason == "secret_detected"
+        # Only the first two chunks were consumed before the abort.
+        assert sentinel._chunk_count == 2
+
+    asyncio.run(_run())
+
+
+def test_analyze_batch_skips_when_already_aborted() -> None:
+    """analyze_batch is a no-op once the sentinel has already aborted."""
+
+    async def _run() -> None:
+        sentinel = StreamSentinel(
+            task_id="test-batch-skip",
+            events=None,
+            config=StreamingSection(enabled=True),
+        )
+        sentinel.is_aborted = True
+        await sentinel.analyze_batch(["some chunk\n", "another chunk\n"])
+        assert sentinel._chunk_count == 0  # nothing processed
+
+    asyncio.run(_run())
+
+
+def test_analyze_batch_empty_is_noop() -> None:
+    """analyze_batch with empty/whitespace-only chunks does nothing."""
+
+    async def _run() -> None:
+        sentinel = StreamSentinel(
+            task_id="test-batch-empty",
+            events=None,
+            config=StreamingSection(enabled=True),
+        )
+        await sentinel.analyze_batch(["", "   \n", ""])
+        assert sentinel._chunk_count == 0
+
+    asyncio.run(_run())
+
+
+def test_strange_loop_offloaded_still_aborts() -> None:
+    """The thread-offloaded strange-loop check still aborts on a repetition cycle."""
+
+    async def _run() -> None:
+        config = StreamingSection(
+            enabled=True,
+            strange_loop_detection=True,
+            strange_loop_threshold=3.0,
+            strange_loop_similarity=0.6,
+        )
+        sentinel = StreamSentinel(task_id="test-sl-offload", events=None, config=config)
+        repeated = "building the same component over and over again here\n"
+        with pytest.raises(StreamAbort):
+            for _ in range(10):
+                await sentinel.analyze_chunk(repeated)
+        assert sentinel.is_aborted
+        assert sentinel.abort_reason == "strange_loop"
+
+    asyncio.run(_run())

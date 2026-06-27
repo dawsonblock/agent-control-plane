@@ -968,6 +968,49 @@ async def get_report(
     return {"task_id": task_id, "report": report_path.read_text(encoding="utf-8")}
 
 
+@app.get("/tasks/{task_id}/diff")
+async def get_diff(
+    task_id: str,
+    runs_root: str = "data/runs",
+) -> dict[str, str]:
+    """Get the unified diff patch for a task (v0.9.0 Step 6 — diff viewer).
+
+    Serves ``artifacts/diff.patch`` so the desktop review UI can render the
+    code diff inline without opening an IDE.
+    """
+    _validate_task_id(task_id)
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
+    run_dir = store.run_dir(task_id)
+    diff_path = run_dir / "artifacts" / "diff.patch"
+    if not diff_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Diff not found: {diff_path}")
+    return {"task_id": task_id, "diff": diff_path.read_text(encoding="utf-8")}
+
+
+@app.get("/tasks/{task_id}/review")
+async def get_review(
+    task_id: str,
+    runs_root: str = "data/runs",
+) -> dict[str, Any]:
+    """Get the machine-readable review for a task (v0.9.0 Step 6 — risk annotations).
+
+    Serves ``artifacts/review.json`` (the :class:`ReviewResult`: risk level,
+    recommendation, changed_files, concerns, hard_block) so the desktop UI
+    can overlay the Risk Engine's concerns as inline annotations on the diff.
+    """
+    _validate_task_id(task_id)
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
+    run_dir = store.run_dir(task_id)
+    review_path = run_dir / "artifacts" / "review.json"
+    if not review_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Review not found: {review_path}")
+    import json
+
+    return {"task_id": task_id, "review": json.loads(review_path.read_text(encoding="utf-8"))}
+
+
 @app.get("/memory/search")
 async def memory_search(
     query: str = Query(...),

@@ -289,6 +289,97 @@ class TestReport:
         assert resp.status_code == 404
 
 
+@api_skip
+class TestDiffAndReview:
+    """GET /tasks/{task_id}/diff and /review — v0.9.0 Step 6 diff viewer + risk annotations."""
+
+    def test_get_diff(self, tmp_path):
+        from acp.store import TaskStore
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        artifacts = store.run_dir("task_20260626_0001") / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        patch = (
+            "diff --git a/src/auth.py b/src/auth.py\n"
+            "--- a/src/auth.py\n"
+            "+++ b/src/auth.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " def login():\n"
+            "-    return True\n"
+            "+    check_token()\n"
+            "+    return True\n"
+        )
+        (artifacts / "diff.patch").write_text(patch)
+
+        client = _make_client(tmp_path)
+        resp = client.get(
+            "/tasks/task_20260626_0001/diff",
+            params={"runs_root": str(runs_root)},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task_20260626_0001"
+        assert "src/auth.py" in data["diff"]
+        assert "+    check_token()" in data["diff"]
+
+    def test_get_diff_not_found(self, tmp_path):
+        client = _make_client(tmp_path)
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        resp = client.get(
+            "/tasks/task_20260626_9999/diff",
+            params={"runs_root": str(runs_root)},
+        )
+        assert resp.status_code == 404
+
+    def test_get_review(self, tmp_path):
+        from acp.store import TaskStore
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        artifacts = store.run_dir("task_20260626_0001") / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        review = {
+            "risk": "medium",
+            "recommendation": "revise",
+            "changed_files": ["src/auth/login.py", "tests/test_auth.py"],
+            "concerns": ["Auth file touched: src/auth/login.py", "No tests for new branch"],
+            "summary": "Auth change without test coverage.",
+            "hard_block": False,
+        }
+        import json
+
+        (artifacts / "review.json").write_text(json.dumps(review))
+
+        client = _make_client(tmp_path)
+        resp = client.get(
+            "/tasks/task_20260626_0001/review",
+            params={"runs_root": str(runs_root)},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task_20260626_0001"
+        rv = data["review"]
+        assert rv["risk"] == "medium"
+        assert rv["recommendation"] == "revise"
+        assert "src/auth/login.py" in rv["changed_files"]
+        assert any("Auth file touched" in c for c in rv["concerns"])
+        assert rv["hard_block"] is False
+
+    def test_get_review_not_found(self, tmp_path):
+        client = _make_client(tmp_path)
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        resp = client.get(
+            "/tasks/task_20260626_9999/review",
+            params={"runs_root": str(runs_root)},
+        )
+        assert resp.status_code == 404
+
+
 # --------------------------------------------------------------------------- #
 # Approve / Reject
 # --------------------------------------------------------------------------- #

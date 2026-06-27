@@ -107,6 +107,17 @@ export interface SkillSummary {
   has_risk_elevators: boolean;
 }
 
+// v0.9.0 (Step 6): machine-readable review (artifacts/review.json) for the
+// diff viewer's risk-annotation overlay. Mirrors acp.models.ReviewResult.
+export interface ReviewResult {
+  risk: string; // "low" | "medium" | "high"
+  recommendation: string; // "merge" | "revise" | "reject"
+  changed_files: string[];
+  concerns: string[];
+  summary: string;
+  hard_block: boolean;
+}
+
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${url}`, {
     headers: { "Content-Type": "application/json" },
@@ -133,6 +144,16 @@ export const api = {
 
   getReport: (taskId: string, runsRoot = "data/runs") =>
     fetchJSON<{ task_id: string; report: string }>(`/tasks/${taskId}/report?runs_root=${encodeURIComponent(runsRoot)}`),
+
+  // v0.9.0 (Step 6): diff patch + machine-readable review for the inline
+  // diff viewer with risk annotations.
+  getDiff: (taskId: string, runsRoot = "data/runs") =>
+    fetchJSON<{ task_id: string; diff: string }>(`/tasks/${taskId}/diff?runs_root=${encodeURIComponent(runsRoot)}`),
+
+  getReview: (taskId: string, runsRoot = "data/runs") =>
+    fetchJSON<{ task_id: string; review: ReviewResult }>(
+      `/tasks/${taskId}/review?runs_root=${encodeURIComponent(runsRoot)}`,
+    ),
 
   approve: (taskId: string, approver = "", runsRoot = "data/runs", vaultRoot = "vault") =>
     fetchJSON<{ status: string }>(`/tasks/${taskId}/approve?runs_root=${encodeURIComponent(runsRoot)}&vault_root=${encodeURIComponent(vaultRoot)}`, {

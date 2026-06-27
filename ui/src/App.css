@@ -516,3 +516,124 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* v0.9.0 (Step 6): DiffViewer + risk annotations */
+.diff-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+}
+.diff-empty {
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 8px 12px;
+}
+.diff-file {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.diff-file-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.diff-file-path { color: var(--text); font-weight: 600; }
+.diff-file-stat { font-size: 11px; }
+.diff-stat-add { color: var(--green); }
+.diff-stat-del { color: var(--red); }
+.diff-concerns {
+  list-style: none;
+  padding: 6px 12px;
+  margin: 0;
+  background: color-mix(in srgb, var(--yellow) 12%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+.diff-concern {
+  color: var(--yellow);
+  font-size: 12px;
+  padding: 2px 0;
+}
+.diff-hunk-header {
+  padding: 4px 12px;
+  color: var(--accent);
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.diff-lines {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.diff-line td { padding: 0; vertical-align: top; }
+.diff-line-no {
+  width: 3ch;
+  min-width: 3ch;
+  padding: 0 6px;
+  color: var(--text-dim);
+  text-align: right;
+  user-select: none;
+  white-space: nowrap;
+}
+.diff-line-sign { width: 1ch; min-width: 1ch; padding: 0 0 0 4px; user-select: none; }
+.diff-line-text pre {
+  margin: 0;
+  padding: 0 8px 0 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: inherit;
+}
+.diff-line-add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+.diff-line-add .diff-line-sign { color: var(--green); }
+.diff-line-remove { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.diff-line-remove .diff-line-sign { color: var(--red); }
+.diff-line-context .diff-line-sign { color: var(--text-dim); }
+
+/* Risk summary header */
+.risk-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+}
+.risk-badge {
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.risk-low { color: var(--green); background: color-mix(in srgb, var(--green) 18%, transparent); }
+.risk-medium { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 18%, transparent); }
+.risk-high { color: var(--red); background: color-mix(in srgb, var(--red) 18%, transparent); }
+.risk-rec { color: var(--text); }
+.risk-hard-block { color: var(--red); font-weight: 700; }
+.risk-files { color: var(--text-dim); }
+.risk-summary-text { color: var(--text-dim); font-style: italic; }
+.review-concerns {
+  list-style: none;
+  padding: 6px 12px;
+  margin: 0 0 8px 0;
+  background: color-mix(in srgb, var(--yellow) 8%, var(--surface));
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.review-concern { color: var(--yellow); font-size: 12px; padding: 2px 0; }

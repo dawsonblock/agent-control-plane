@@ -3,7 +3,8 @@
 // with polling fallback.
 
 import { useEffect, useState } from "react";
-import { api, type TaskDetail, type EventItem } from "./api";
+import { api, type TaskDetail, type EventItem, type ReviewResult } from "./api";
+import { DiffViewer, RiskSummary } from "./DiffViewer";
 
 interface TaskDetailProps {
   taskId: string;
@@ -17,6 +18,8 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [report, setReport] = useState("");
+  const [diff, setDiff] = useState("");
+  const [review, setReview] = useState<ReviewResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [actor, setActor] = useState("");
@@ -25,15 +28,22 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
   // React Compiler (v0.7.6) automatically memoizes this function — no
   // useCallback needed.
   const fetchDetail = () => {
+    // v0.9.0 (Step 6): also fetch the diff + review for the inline diff
+    // viewer with risk annotations. Both are best-effort (404 when the run
+    // hasn't produced them yet) — a missing diff/review just hides the section.
     Promise.all([
       api.getTask(taskId),
       api.getEvents(taskId),
       api.getReport(taskId).catch(() => ({ task_id: taskId, report: "" })),
+      api.getDiff(taskId).catch(() => ({ task_id: taskId, diff: "" })),
+      api.getReview(taskId).catch(() => ({ task_id: taskId, review: null as ReviewResult | null })),
     ])
-      .then(([t, e, r]) => {
+      .then(([t, e, r, d, rv]) => {
         setTask(t);
         setEvents(e);
         setReport(r.report);
+        setDiff(d.diff);
+        setReview(rv.review);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -142,6 +152,23 @@ export function TaskDetail({ taskId, onAction }: TaskDetailProps) {
         <div className="detail-section">
           <h3>Report</h3>
           <pre className="report-content">{report}</pre>
+        </div>
+      )}
+
+      {(diff || review) && (
+        <div className="detail-section">
+          <h3>Diff &amp; Review</h3>
+          <RiskSummary review={review} />
+          {review && review.concerns.length > 0 && (
+            <ul className="review-concerns">
+              {review.concerns.map((c, i) => (
+                <li key={i} className="review-concern">
+                  ⚠ {c}
+                </li>
+              ))}
+            </ul>
+          )}
+          {diff && <DiffViewer diff={diff} review={review} />}
         </div>
       )}
 

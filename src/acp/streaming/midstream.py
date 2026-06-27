@@ -372,7 +372,11 @@ class StreamSentinel:
         chunk_index = await self._analyze_one(chunk)
         # 5. Semantic anomaly detection (non-blocking, local model, offloaded).
         # Anomalies are flagged for post-run review, NOT aborted mid-stream.
-        if chunk_index and self.config.semantic_anomaly_detection and self._semantic_model is not None:
+        if (
+            chunk_index
+            and self.config.semantic_anomaly_detection
+            and self._semantic_model is not None
+        ):
             await self._check_semantic_anomaly(chunk, chunk_index)
 
     async def analyze_batch(self, chunks: list[str]) -> None:
@@ -581,13 +585,52 @@ async def run_agent_streaming(
         async with asyncio.timeout(timeout):
             assert process.stdout is not None
             with open(stdout_path, "wb") as f:
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    f.write(line)
-                    decoded = line.decode("utf-8", errors="replace")
-                    await sentinel.analyze_chunk(decoded)
+                # v0.9.0 (Step 3): micro-batching. Lines are buffered and
+                # analyzed in batches to amortize per-line overhead and
+                # enable a single batched model.encode() for semantic
+                # anomaly detection. A flush triggers on whichever comes
+                # first: the interval elapsing with no new line, or
+                # batch_max_lines reached. asyncio.wait_for on
+                # StreamReader.readline() is cancellation-safe — partial
+                # bytes are retained in the reader's buffer and returned on
+                # the next readline(). The inner wait_for TimeoutError is
+                # the flush timer; the outer asyncio.timeout's TimeoutError
+                # is raised at the `async with` boundary (not here), so the
+                # overall timeout still works. batch_interval_ms=0 disables
+                # batching (analyze every line — the pre-v0.9.0 behavior).
+                interval = getattr(sentinel.config, "batch_interval_ms", 50) / 1000.0
+                max_lines = getattr(sentinel.config, "batch_max_lines", 64)
+                if interval <= 0:
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        f.write(line)
+                        await sentinel.analyze_chunk(line.decode("utf-8", errors="replace"))
+                else:
+                    buffer: list[str] = []
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(
+                                process.stdout.readline(), timeout=interval
+                            )
+                        except TimeoutError:
+                            # Flush interval elapsed with no new line.
+                            if buffer:
+                                await sentinel.analyze_batch(buffer)
+                                buffer.clear()
+                            continue
+                        if not line:
+                            break
+                        f.write(line)
+                        buffer.append(line.decode("utf-8", errors="replace"))
+                        if len(buffer) >= max_lines:
+                            await sentinel.analyze_batch(buffer)
+                            buffer.clear()
+                    # EOF — flush any remaining buffered lines.
+                    if buffer:
+                        await sentinel.analyze_batch(buffer)
+                        buffer.clear()
 
     except StreamAbort as exc:
         logger.warning("Stream aborted: %s", exc)

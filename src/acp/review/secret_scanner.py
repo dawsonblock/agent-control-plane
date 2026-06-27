@@ -100,6 +100,7 @@ def scan_patch(
     *,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
     custom_regex_meta: list[dict[str, str]] | None = None,
+    verifier: SecretVerifier | None = None,
 ) -> list[SecretFinding]:
     """Scan added lines of a unified diff patch for secret-like content.
 
@@ -118,6 +119,11 @@ def scan_patch(
     """
     findings: list[SecretFinding] = []
     seen: set[tuple[str, int]] = set()  # dedupe (kind, line_no)
+
+    # v0.9.0 (Step 2): pluggable verifier (defaults to the stateless
+    # HTTP-POST SecretVerifier). Inject a custom/subclass verifier for
+    # provider-specific active verification without touching the pipeline.
+    active_verifier = verifier or _DEFAULT_VERIFIER
 
     # Build a map from pattern name to verify_endpoint for HTTP verification.
     verify_map: dict[str, str] = {}
@@ -150,16 +156,14 @@ def scan_patch(
                     continue
                 seen.add(key)
 
-                # v0.8.1 (Phase 2.2): HTTP verification for custom regexes
-                # that have a verify_endpoint. If verification fails (the
-                # endpoint returns 401/403/404 or the request errors), tag
-                # the finding as "unverified" and suffix the kind.
-                verified_status = ""
-                finding_kind = kind
-                if kind in verify_map:
-                    verified_status = _verify_secret(verify_map[kind], m.group(0))
-                    if verified_status == "unverified":
-                        finding_kind = f"{kind}:unverified_hard_block"
+                # v0.8.1 (Phase 2.2) / v0.9.0 (Step 2): active verification
+                # via the pluggable SecretVerifier. If verification fails
+                # (endpoint returns 4xx/5xx or the request errors), tag the
+                # finding as "unverified" and suffix the kind so the review
+                # gate can distinguish verified from unverified hard blocks.
+                verified_status, finding_kind = active_verifier.verify_finding(
+                    kind, m.group(0), verify_map
+                )
 
                 findings.append(
                     SecretFinding(
@@ -194,30 +198,81 @@ def scan_patch(
     return findings
 
 
-def _verify_secret(endpoint: str, secret: str) -> str:
-    """Verify a secret via HTTP POST to the verify_endpoint.
+class SecretVerifier:
+    """Pluggable active secret verification (v0.9.0 Step 2).
 
-    Sends the secret as a JSON body ``{"secret": "..."}`` to the endpoint.
-    Returns:
-      - "verified"   if the endpoint returns 200
-      - "unverified" if the endpoint returns 401/403/404 or the request fails
+    The unified active-verification interface for custom company secrets.
+    A matched secret is verified by sending an HTTP POST ``{"secret": "..."}``
+    to a ``verify_endpoint``; HTTP 200 means the secret is live (``"verified"``),
+    anything else (4xx/5xx/network error/timeout) means ``"unverified"``.
+
+    Pluggable: subclasses override :meth:`verify` to implement custom
+    verification (e.g. provider-specific API calls, mTLS, retry policy)
+    without changing the scan pipeline. Inject a custom verifier via the
+    ``verifier`` parameter of :func:`scan_patch` / :func:`scan_diff` /
+    :func:`detect_hard_block_secrets`.
+
+    Note on the streaming kill-switch (:func:`acp.streaming.secret_stream_scanner.scan_stream`):
+    it intentionally does NOT verify. The mid-stream sentinel must abort on
+    any secret match — blocking the stream on a network round-trip (or
+    suppressing an abort because an endpoint was unreachable) would risk a
+    live leak. Verification is a *review-time* concern; the kill-switch is a
+    *runtime* concern. Keeping them separate is deliberate.
     """
-    import urllib.error
-    import urllib.request
 
-    try:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps({"secret": secret}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                return "verified"
+    def __init__(self, *, timeout: float = 10.0) -> None:
+        self.timeout = timeout
+
+    def verify(self, endpoint: str, secret: str) -> str:
+        """Return ``"verified"`` or ``"unverified"`` for one (endpoint, secret)."""
+        import urllib.error
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps({"secret": secret}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if resp.status == 200:
+                    return "verified"
+                return "unverified"
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
             return "unverified"
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
-        return "unverified"
+
+    def verify_finding(
+        self,
+        kind: str,
+        secret: str,
+        verify_map: dict[str, str],
+    ) -> tuple[str, str]:
+        """Verify a finding against ``verify_map`` (name → endpoint).
+
+        Returns ``(verified_status, finding_kind)``:
+          - kind has no endpoint → ``("", kind)`` (no verification attempted)
+          - verified (HTTP 200) → ``("verified", kind)``
+          - unverified → ``("unverified", f"{kind}:unverified_hard_block")``
+
+        Suffixing the kind on failure lets the review gate distinguish
+        verified from unverified custom hard blocks.
+        """
+        if kind not in verify_map:
+            return "", kind
+        status = self.verify(verify_map[kind], secret)
+        if status == "unverified":
+            return status, f"{kind}:unverified_hard_block"
+        return status, kind
+
+
+# Module-level default verifier (constructed lazily-free; stateless).
+_DEFAULT_VERIFIER = SecretVerifier()
+
+
+def _verify_secret(endpoint: str, secret: str) -> str:
+    """Backwards-compatible shim — delegates to :meth:`SecretVerifier.verify`."""
+    return _DEFAULT_VERIFIER.verify(endpoint, secret)
 
 
 # --------------------------------------------------------------------------- #
@@ -395,6 +450,7 @@ def scan_diff(
     use_trufflehog: bool = True,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
     custom_regex_meta: list[dict[str, str]] | None = None,
+    verifier: SecretVerifier | None = None,
 ) -> tuple[list[SecretFinding], dict[str, str]]:
     """Scan a diff for secrets, using TruffleHog if available.
 
@@ -423,7 +479,12 @@ def scan_diff(
     """
     # Always run the regex scanner — it catches patterns TruffleHog might
     # miss (e.g., private key blocks that TruffleHog doesn't verify).
-    findings = scan_patch(patch, custom_regexes=custom_regexes, custom_regex_meta=custom_regex_meta)
+    findings = scan_patch(
+        patch,
+        custom_regexes=custom_regexes,
+        custom_regex_meta=custom_regex_meta,
+        verifier=verifier,
+    )
 
     degraded = "false"
     scanner = "regex_only"
@@ -502,6 +563,7 @@ def detect_hard_block_secrets(
     *,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
     custom_regex_meta: list[dict[str, str]] | None = None,
+    verifier: SecretVerifier | None = None,
 ) -> list[SecretFinding]:
     """Fast pre-TruffleHog scan for secrets that constitute a HARD_BLOCK.
 
@@ -521,7 +583,12 @@ def detect_hard_block_secrets(
     ``custom:``) are always treated as hard blocks — the user explicitly
     defined them because they know they're secrets.
     """
-    findings = scan_patch(patch, custom_regexes=custom_regexes, custom_regex_meta=custom_regex_meta)
+    findings = scan_patch(
+        patch,
+        custom_regexes=custom_regexes,
+        custom_regex_meta=custom_regex_meta,
+        verifier=verifier,
+    )
     hard_blocks: list[SecretFinding] = []
     for f in findings:
         if f.kind in _HARD_BLOCK_KINDS:
