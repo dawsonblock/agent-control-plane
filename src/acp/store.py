@@ -18,9 +18,12 @@ import fcntl
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from acp.models import Task, TaskStatus
+
+if TYPE_CHECKING:
+    from acp.evidence.durable_task_store import DurableTaskStore
 
 # File-based locking for atomic task-id allocation. Prevents two concurrent
 # processes (e.g., the API server handling parallel requests) from generating
@@ -83,7 +86,7 @@ class TaskStore:
         self,
         runs_root: str | Path | None = None,
         *,
-        durable_store: Any | None = None,
+        durable_store: DurableTaskStore | None = None,
         primary: str = "json",
     ) -> None:
         self.root = Path(runs_root or "data/runs").resolve()

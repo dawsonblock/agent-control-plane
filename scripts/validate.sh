@@ -20,11 +20,9 @@ echo "=== [3/5] ruff format (check) ==="
 uv run ruff format --check src/acp tests/
 echo "PASS"
 
-echo "=== [4/5] mypy (type check — non-blocking baseline) ==="
-# Mypy is configured with a lenient baseline. Once existing type errors are
-# resolved, remove the `|| true` to make this step blocking.
-uv run mypy src/acp || echo "WARN: mypy reported errors (non-blocking baseline — see pyproject.toml [tool.mypy])"
-echo "PASS (non-blocking)"
+echo "=== [4/5] mypy (type check — strict) ==="
+uv run mypy src/acp
+echo "PASS"
 
 echo "=== [5/5] pytest (with coverage) ==="
 uv run python -m pytest -q --cov=acp --cov-report=term-missing

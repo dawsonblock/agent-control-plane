@@ -126,7 +126,8 @@ class DurableEventStore:
             raise RuntimeError("DurableEventStore not initialized — call .init() first")
         self._conn.execute(
             "INSERT INTO events "
-            "(task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, signature_algorithm) "
+            "(task_id, event_id, type, timestamp, payload, "
+            "prev_hash, hash, signature, signature_algorithm) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.task_id,
@@ -150,7 +151,8 @@ class DurableEventStore:
             for event in events:
                 self._conn.execute(
                     "INSERT INTO events "
-                    "(task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, signature_algorithm) "
+                    "(task_id, event_id, type, timestamp, payload, "
+                    "prev_hash, hash, signature, signature_algorithm) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         event.task_id,
@@ -282,7 +284,7 @@ class DurableEventStore:
         self.close()
 
 
-def _row_to_event(row: tuple) -> Event:
+def _row_to_event(row: tuple[str, str, str, str, str, str, str, str, str]) -> Event:
     """Convert a SQLite row to an Event model.
 
     Column order matches the SELECT statements: task_id, event_id, type,

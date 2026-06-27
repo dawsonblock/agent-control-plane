@@ -24,6 +24,7 @@ import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -102,7 +103,7 @@ class MissionStore:
         repo_path: Path,
         base_branch: str = "main",
         description: str = "",
-        steps: list[dict] | None = None,
+        steps: list[dict[str, Any]] | None = None,
     ) -> Mission:
         """Initialize a mission directory, write mission.yaml, and emit mission.created.
 

@@ -87,6 +87,8 @@ def can_fast_forward(
     try:
         base_commit = repo.commit(base_branch)
         task_commit = repo.commit(task_branch)
-        return repo.git.merge_base("--is-ancestor", base_commit.hexsha, task_commit.hexsha) == ""
+        return bool(
+            repo.git.merge_base("--is-ancestor", base_commit.hexsha, task_commit.hexsha) == ""
+        )
     except (GitCommandError, ValueError, BadName):
         return False

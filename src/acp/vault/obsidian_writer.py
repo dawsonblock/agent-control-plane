@@ -21,11 +21,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from acp.gitops.diff import DiffCapture
-from acp.models import EventType, MemoryStatus, ReviewResult, Task
+from acp.models import Event, EventType, MemoryStatus, ReviewResult, Task
 from acp.vault.frontmatter import (
     build_frontmatter,
     parse_frontmatter,
@@ -69,8 +70,8 @@ def write_vault_note(
         if frontmatter.approved:
             raise PermissionError(f"refusing to overwrite an approved note: {note_path}")
 
-    frontmatter = build_frontmatter(task=task, review=review, diff=diff, today=today)
-    note = f"{frontmatter}\n\n{report_body.lstrip()}\n"
+    fm_block = build_frontmatter(task=task, review=review, diff=diff, today=today)
+    note = f"{fm_block}\n\n{report_body.lstrip()}\n"
     note_path.write_text(note)
     return note_path
 
@@ -82,7 +83,7 @@ def rerender_vault_note(
     task: Task,
     review: ReviewResult,
     diff: DiffCapture,
-    events: list,
+    events: list[Event],
     vault_root: Path,
     today: datetime | None = None,
 ) -> Path:
@@ -152,7 +153,7 @@ def rerender_vault_note(
     # always sets approved=false). We need the event-log-derived values.
     created = (today or datetime.now(UTC)).strftime("%Y-%m-%d")
     sources = ["diff.patch", "diff_stat.txt", "review.json", "commands.json"]
-    data = {
+    data: dict[str, Any] = {
         "type": "task_report",
         "task_id": task.task_id,
         "repo": task.repo_name,

@@ -105,7 +105,7 @@ def test_scan_diff_with_custom_regexes():
 
     custom = [("custom:jwt_internal", re.compile(r"INTJWT-[A-Z0-9]{20}"))]
     patch = '+jwt = "INTJWT-ABCDEFGHIJKLMNOPQRST"\n'
-    findings = scan_diff(patch, custom_regexes=custom, use_trufflehog=False)
+    findings, _ = scan_diff(patch, custom_regexes=custom, use_trufflehog=False)
     kinds = [f.kind for f in findings]
     assert "custom:jwt_internal" in kinds
 

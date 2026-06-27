@@ -10,7 +10,9 @@ test-only equivalence checks.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -335,7 +337,8 @@ def _verify_impl(
                 malformed_lines.append(i)
         if malformed_lines:
             console.print(
-                f"[red]✗[/] event log malformed at line(s): {', '.join(str(n) for n in malformed_lines[:5])}"
+                f"[red]✗[/] event log malformed at line(s): "
+                f"{', '.join(str(n) for n in malformed_lines[:5])}"
             )
             all_ok = False
             has_malformed_events = True
@@ -344,7 +347,8 @@ def _verify_impl(
             all_ok = False
         elif verify_event_chain(events):
             console.print(
-                f"[green]✓[/] event chain valid ({len(events)} events, head={events[-1].hash[:16]}...)"
+                f"[green]✓[/] event chain valid ({len(events)} events, "
+                f"head={events[-1].hash[:16]}...)"
             )
         else:
             console.print("[red]✗[/] event chain INVALID — log has been tampered with")
@@ -470,7 +474,8 @@ def _verify_impl(
                     all_ok = False
             except ImportError:
                 console.print(
-                    "[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto"
+                    "[yellow]![/] cryptography package not installed — "
+                    "install with: uv sync --extra crypto"
                 )
             except Exception as exc:
                 console.print(f"[red]✗[/] signature verification error: {exc}")
@@ -636,7 +641,8 @@ def events(
         short_hash = evt.hash[:12] if evt.hash else "—"
         signed = " ✓" if evt.signature else ""
         console.print(
-            f"  {i + 1:>3}  {evt.event_id:<14}  {evt.type.value:<24}  {evt.timestamp:<22}  {short_hash}{signed}"
+            f"  {i + 1:>3}  {evt.event_id:<14}  {evt.type.value:<24}  "
+            f"{evt.timestamp:<22}  {short_hash}{signed}"
         )
 
 
@@ -956,7 +962,10 @@ def cleanup(
     force: bool = typer.Option(
         True,
         "--force/--no-force",
-        help="Force-remove the worktree even if it has uncommitted changes (default: on, since agent worktrees typically have untracked files).",
+        help=(
+            "Force-remove the worktree even if it has uncommitted changes "
+            "(default: on, since agent worktrees typically have untracked files)."
+        ),
     ),
 ) -> None:
     """Remove the worktree and branch for a completed task.
@@ -1102,7 +1111,7 @@ def memory_promote(
 
     # Filter to eligible notes.
     store = TaskStore(runs_root=runs_root)
-    eligible: list[tuple[Task, Path, dict]] = []
+    eligible: list[tuple[Task, Path, dict[str, Any]]] = []
 
     for note_path in candidates:
         if not note_path.is_file():
@@ -1755,6 +1764,16 @@ def serve(
         "--reload",
         help="Enable auto-reload for development.",
     ),
+    api_token: str = typer.Option(
+        "",
+        "--api-token",
+        help=(
+            "Bearer token for API authentication. When set, all non-public "
+            "endpoints require an 'Authorization: Bearer <token>' header. "
+            "Can also be set via the ACP_API_TOKEN env var. If neither is "
+            "set, auth is disabled (local dev only)."
+        ),
+    ),
 ) -> None:
     """Start the ACP HTTP API server.
 
@@ -1772,13 +1791,15 @@ def serve(
       GET  /tasks/{id}/events  — get event log
       GET  /tasks/{id}/report  — get report content
       GET  /memory/search      — search temporal memory
-      GET  /health             — health check
+      GET  /health             — health check (no auth required)
 
     The server binds to 127.0.0.1 (localhost) by default. Do NOT expose
     to the network without authentication — this API can run arbitrary
-    code via POST /tasks/run.
+    code via POST /tasks/run. Use ``--api-token`` or set the
+    ``ACP_API_TOKEN`` env var to enable bearer token auth.
     """
     try:
+        from acp.api.server import set_api_token
         from acp.api.server import state as server_state
     except ImportError as exc:
         console.print(
@@ -1795,9 +1816,34 @@ def serve(
 
     server_state.set_config(str(config))
 
+    # Configure bearer token auth if provided via --api-token or env var.
+    if api_token:
+        set_api_token(api_token)
+
+    # Read CORS settings from the repo config and set env vars so the
+    # server module picks them up at import time (uvicorn imports the app
+    # module fresh, so env vars set here are visible to the server).
+    cfg = load_repo_config(config)
+    if not cfg.api.cors_enabled:
+        os.environ["ACP_CORS_ENABLED"] = "false"
+    elif cfg.api.cors_origins:
+        os.environ["ACP_CORS_ORIGINS"] = ",".join(cfg.api.cors_origins)
+
     console.print(f"[bold]ACP API server[/] · config={config}")
     console.print(f"  listening on http://{host}:{port}")
     console.print(f"  docs at http://{host}:{port}/docs")
+    from acp.api.server import get_api_token
+
+    if get_api_token() is not None:
+        console.print("  [green]auth: bearer token enabled[/]")
+    else:
+        console.print("  [yellow]auth: disabled (set --api-token or ACP_API_TOKEN)[/]")
+    if not cfg.api.cors_enabled:
+        console.print("  [dim]CORS: disabled (same-origin)[/]")
+    elif cfg.api.cors_origins:
+        console.print(f"  [dim]CORS: {', '.join(cfg.api.cors_origins)}[/]")
+    else:
+        console.print("  [dim]CORS: dev defaults (localhost:5173, :3000)[/]")
     console.print("  [dim]Ctrl+C to stop[/]")
 
     import uvicorn

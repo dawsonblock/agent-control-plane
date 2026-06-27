@@ -116,7 +116,8 @@ def test_durable_store_old_schema_migration(tmp_path):
         )
     """)
     conn.execute(
-        "INSERT INTO events VALUES ('evt_000001', 'task_1', 'task.created', '2024-01-01', '{}', '', 'h1', '')"
+        "INSERT INTO events VALUES ('evt_000001', 'task_1', 'task.created', "
+        "'2024-01-01', '{}', '', 'h1', '')"
     )
     conn.commit()
     conn.close()

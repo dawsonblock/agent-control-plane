@@ -5,7 +5,7 @@ Covers:
   - reviewer summary wording: "no validation commands ran" vs "validation passed"
     vs "validation failed" (never "tests pass" for the no-validation case)
   - repair routing triggers only on actual failed non-skipped commands, not on
-    the no-validation case that ``all_passed([])`` used to mask as a pass
+    the no-validation case that the old empty-list-as-pass pattern masked
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from acp.models import CommandResult, EventType, TaskStatus
 from acp.review.diff_reviewer import review_diff
 from acp.store import TaskStore
 from acp.testing.runner import (
-    all_passed,
     validation_passed,
     validation_ran,
     validation_status,
@@ -99,21 +98,6 @@ def test_validation_status_three_states() -> None:
     assert validation_status([_cmd(0), _cmd(0)]) == "passed"
     assert validation_status([_cmd(0), _cmd(1)]) == "failed"
     assert validation_status([_cmd(0, skipped=True), _cmd(1)]) == "failed"
-
-
-def test_all_passed_returns_false_for_empty() -> None:
-    """all_passed([]) now returns False — 'no validation ran' is not 'passed'.
-
-    Previously this returned True (mathematically vacuous), which was
-    operationally ambiguous. The function is now deprecated; use
-    validation_passed() or validation_status() instead.
-    """
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        assert all_passed([]) is False
-        assert all_passed([_cmd(0, skipped=True)]) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -195,8 +179,9 @@ def _event_types(store, task_id):
 def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspace):
     """All commands skipped + max_repair_attempts=2 → no repair attempts.
 
-    Previously ``all_passed([])`` returned True so repair was skipped, but for
-    the wrong reason. Now routing checks for actual failures explicitly, so
+    Previously the empty-list-as-pass pattern returned True so repair was
+    skipped, but for the wrong reason. Now routing checks for actual failures
+    explicitly, so
     no-validation flows straight to capture_diff → review → NEEDS_REVIEW.
     """
     result, store = _run_graph(

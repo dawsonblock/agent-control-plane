@@ -40,13 +40,17 @@ MOCK_SERVER_SCRIPT = textwrap.dedent("""\
             return {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}
         if method == "tools/list":
             return {"tools": [
-                {"name": "search", "description": "Search the codebase", "inputSchema": {"type": "object"}},
-                {"name": "analyze", "description": "Analyze a file", "inputSchema": {"type": "object"}},
+                {"name": "search", "description": "Search the codebase",
+                 "inputSchema": {"type": "object"}},
+                {"name": "analyze", "description": "Analyze a file",
+                 "inputSchema": {"type": "object"}},
             ]}
         if method == "tools/call":
             name = params.get("name", "")
             args = params.get("arguments", {})
-            return {"content": [{"type": "text", "text": f"Result of {name} with {json.dumps(args)}"}]}
+            return {"content": [
+                {"type": "text", "text": f"Result of {name} with {json.dumps(args)}"}
+            ]}
         return {}
 
     for line in sys.stdin:

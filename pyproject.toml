@@ -50,6 +50,7 @@ dev = [
     "cryptography>=43,<46",
     "ruff>=0.6,<1",
     "mypy>=1.11,<2",
+    "types-PyYAML>=6.0,<7",
 ]
 # v0.6.0 (M6): Local Haystack RAG context retrieval.
 # Optional — install with: uv sync --extra rag
@@ -102,40 +103,41 @@ src = ["src", "tests"]
 # I  = isort (import sorting)
 # UP = pyupgrade (modernize syntax for py312)
 select = ["F", "E", "W", "I", "UP"]
-# E501  = line-too-long — not previously enforced; fix long lines over time.
+# E501  = line-too-long — now enforced (line-length = 100 above).
 # UP042 = replace-str-enum — changes class hierarchy (str, Enum → StrEnum);
 #         behavioral edge cases, defer until audited.
 # BLE001 is used intentionally throughout for broad exception handlers that
 # are documented as best-effort. We manage those with inline `# noqa: BLE001`
 # comments rather than enabling the rule globally.
-ignore = ["E501", "UP042"]
+ignore = ["UP042"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["acp"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests may use short variable names and long lines in fixtures.
-"tests/**" = ["E501", "E741"]
+# Tests may use short variable names in fixtures.
+"tests/**" = ["E741"]
 
 # --------------------------------------------------------------------------- #
 # Mypy — static type checking.
-# Lenient baseline so the gate can adopt mypy without blocking on 17k LOC of
-# previously-untyped code. Tighten `strict = true` once existing errors are
-# resolved.
+# Strict mode is enforced. All functions must have type annotations, no
+# implicit Any returns, and missing import stubs are errors (install
+# types-PyYAML via the `dev` extra).
 # --------------------------------------------------------------------------- #
 [tool.mypy]
 python_version = "3.12"
-warn_return_any = true
-warn_unused_configs = true
-warn_redundant_casts = true
-warn_unused_ignores = false
-disallow_untyped_defs = false
-check_untyped_defs = true
-ignore_missing_imports = true
+strict = true
+ignore_missing_imports = false
 # LangGraph state uses Any intentionally (opaque to the framework).
 [[tool.mypy.overrides]]
 module = "acp.graph.state"
 disable_error_code = ["attr-defined"]
+# Optional extras — not installed in every environment (e.g. CI without
+# --extra rag --extra memory). These modules are imported lazily inside
+# try/except ImportError guards, so missing stubs are expected.
+[[tool.mypy.overrides]]
+module = ["graphiti_core.*", "haystack.*", "sentence_transformers.*", "gitdb.*"]
+ignore_missing_imports = true
 
 # --------------------------------------------------------------------------- #
 # Coverage — measure test coverage of src/acp.

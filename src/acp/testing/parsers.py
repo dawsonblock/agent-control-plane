@@ -9,6 +9,7 @@ repair agent uses this to fix the failing tests rather than guess blindly.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypedDict
 
 from acp.models import CommandResult
 
@@ -17,7 +18,16 @@ from acp.models import CommandResult
 _MAX_STREAM_BYTES = 8 * 1024
 
 
-def summarize(results: list[CommandResult]) -> dict[str, object]:
+class CommandSummary(TypedDict):
+    """Coarse pass/fail summary returned by :func:`summarize`."""
+
+    passed: bool
+    total: int
+    failed: list[str]
+    skipped: list[str]
+
+
+def summarize(results: list[CommandResult]) -> CommandSummary:
     """Coarse pass/fail summary for the report.
 
     Returns ``{passed: bool, total: int, failed: list[name], skipped: list[name]}``.

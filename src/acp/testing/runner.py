@@ -166,34 +166,6 @@ def _skipped(name: str, command: str, cwd: Path, artifact_dir: Path) -> CommandR
     )
 
 
-def all_passed(results: list[CommandResult]) -> bool:
-    """True iff at least one non-skipped command ran AND all non-skipped passed.
-
-    .. deprecated::
-        This function previously returned ``True`` for an empty/all-skipped
-        list, which is operationally ambiguous — "no failures" is not the
-        same as "validation ran and passed". It now returns ``False`` for
-        empty/all-skipped lists and emits a ``DeprecationWarning``.
-
-        Prefer :func:`validation_ran` + :func:`validation_passed` (or
-        :func:`validation_status`) in new code so "skipped" is never
-        represented as a flavor of "passed".
-    """
-    import warnings
-
-    warnings.warn(
-        "all_passed() is deprecated — use validation_status() or "
-        "validation_passed() + validation_ran() instead. "
-        "all_passed() will be removed in a future version.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    ran = [r for r in results if not r.skipped]
-    if not ran:
-        return False
-    return all(r.passed for r in ran)
-
-
 def validation_ran(results: list[CommandResult]) -> bool:
     """True iff at least one non-skipped command actually ran."""
     return any(not r.skipped for r in results)
@@ -220,8 +192,8 @@ def validation_status(results: list[CommandResult]) -> str:
     * ``passed``  — at least one command ran and every non-skipped one passed.
     * ``failed``  — at least one non-skipped command ran and one of them failed.
 
-    This replaces the ambiguous ``all_passed([]) == True`` pattern: "no
-    validation ran" must never be worded as "tests pass".
+    This replaces the ambiguous empty-list-as-pass pattern: "no validation
+    ran" must never be worded as "tests pass".
     """
     if not validation_ran(results):
         return "skipped"

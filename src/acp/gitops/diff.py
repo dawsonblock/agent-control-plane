@@ -42,7 +42,7 @@ class DiffCapture:
     deletions: int
     binary_files: list[str] = None  # type: ignore[assignment]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.binary_files is None:
             self.binary_files = []
 

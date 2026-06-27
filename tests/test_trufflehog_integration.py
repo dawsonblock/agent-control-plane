@@ -67,22 +67,29 @@ class TestScanDiffFallback:
 +AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 """
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=False):
-            findings = scan_diff(patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True)
+            findings, info = scan_diff(
+                patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
+            )
             # The regex scanner should catch the AWS key pattern.
             assert len(findings) > 0
             assert any(f.kind == "aws_access_key" for f in findings)
+            # Degradation should be surfaced.
+            assert info["degraded"] == "true"
+            assert info["scanner"] == "regex_only"
 
     def test_use_trufflehog_false_skips_trufflehog(self):
         """scan_diff skips TruffleHog when use_trufflehog=False."""
         patch_text = '+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"'
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=True):
             with patch("acp.review.secret_scanner.scan_with_trufflehog") as mock_th:
-                findings = scan_diff(
+                findings, info = scan_diff(
                     patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=False
                 )
                 mock_th.assert_not_called()
                 # Regex scanner still runs.
                 assert len(findings) > 0
+                assert info["scanner"] == "regex_only"
+                assert info["degraded"] == "false"
 
 
 # --------------------------------------------------------------------------- #
@@ -100,11 +107,12 @@ class TestScanDiffWithTruffleHog:
             with patch(
                 "acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_findings
             ):
-                findings = scan_diff(
+                findings, scan_info = scan_diff(
                     patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
                 )
                 # Should include the TruffleHog finding.
                 assert any(f.kind == "trufflehog:aws" for f in findings)
+                assert scan_info["scanner"] == "trufflehog+regex"
 
 
 # --------------------------------------------------------------------------- #
@@ -122,7 +130,7 @@ class TestScanDiffMerges:
             with patch(
                 "acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_th_findings
             ):
-                findings = scan_diff(
+                findings, scan_info = scan_diff(
                     patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
                 )
                 kinds = {f.kind for f in findings}
@@ -147,7 +155,7 @@ class TestScanDiffMerges:
                         SecretFinding(kind="aws_access_key", snippet="AKIA…LE", line_no=1),
                     ],
                 ):
-                    findings = scan_diff(
+                    findings, scan_info = scan_diff(
                         patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
                     )
                     # Should not duplicate.

@@ -63,12 +63,12 @@ from acp.graph.nodes import (
     write_report_node,
 )
 from acp.graph.state import ACPState
-from acp.models import EventType, TaskStatus
+from acp.models import Event, EventType, TaskStatus
 from acp.store import TaskStore
 from acp.testing.runner import validation_passed, validation_ran
 
 
-def node_error_handler(node_fn: Callable) -> Callable:
+def node_error_handler(node_fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Wrap a graph node so unhandled exceptions produce a FAILED state.
 
     If the wrapped node raises, instead of crashing the graph we return a
@@ -79,7 +79,8 @@ def node_error_handler(node_fn: Callable) -> Callable:
 
     def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         try:
-            return node_fn(state, ctx)
+            result: dict[str, Any] = node_fn(state, ctx)
+            return result
         except Exception as exc:
             # Write a node failure event directly (best effort). If the event
             # write itself fails, surface that in the state so it's not silent.
@@ -206,12 +207,33 @@ def _route_after_worktree(state: dict[str, Any]) -> str:
     return "failed" if _is_failed(state) else "build_context"
 
 
+def _route_after_agent(state: dict[str, Any]) -> str:
+    """Route after run_agent: failed (sentinel abort) OR run_tests (normal).
+
+    v0.7.3: When the StreamSentinel kills the agent mid-execution (secret
+    leak, strange loop, dangerous path), the node returns FAILED status.
+    Route to `failed` instead of running tests/review on a partial diff
+    from a killed agent.
+    """
+    return "failed" if _is_failed(state) else "run_tests"
+
+
+def _route_after_repair(state: dict[str, Any]) -> str:
+    """Route after run_repair: failed (sentinel abort) OR run_tests (normal).
+
+    v0.7.3: Same logic as _route_after_agent, but for the repair loop.
+    When the StreamSentinel kills the repair agent, route to `failed`
+    instead of re-running tests on a partial repair diff.
+    """
+    return "failed" if _is_failed(state) else "run_tests"
+
+
 def _route_after_tests(state: dict[str, Any]) -> str:
     """Route after run_tests: repair only on actual failures, else proceed.
 
     Repair triggers iff validation ran AND at least one non-skipped command
-    failed — never on the "no validation ran" case (``all_passed([])`` used
-    to mask that as a pass and skip repair accidentally). When
+    failed — never on the "no validation ran" case (the old empty-list-as-pass
+    behavior used to mask that and skip repair accidentally). When
     ``max_repair_attempts`` is 0, or attempts are exhausted, a failing test
     falls straight through to capture_diff → review → FAILED report.
 
@@ -274,7 +296,7 @@ def build_workflow(
 
     # Wrap every node with the error handler so unhandled exceptions produce
     # a FAILED state instead of crashing the graph.
-    def _wrap(n: Callable) -> Callable:
+    def _wrap(n: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
         return partial(node_error_handler(n), ctx=ctx)
 
     # Bind ctx into each node so LangGraph sees a single-arg callable.
@@ -308,13 +330,21 @@ def build_workflow(
     g.add_conditional_edges("create_worktree", _route_after_worktree)
 
     g.add_edge("build_context", "run_agent")
-    g.add_edge("run_agent", "run_tests")
+    # v0.7.3: run_agent → failed (sentinel abort) OR run_tests (normal).
+    # When the StreamSentinel kills the agent mid-execution, the node
+    # returns FAILED status. Route to `failed` instead of running tests
+    # on a partial, potentially dangerous diff.
+    g.add_conditional_edges("run_agent", _route_after_agent)
 
     # run_tests → repair_plan (if failing + attempts remain) OR capture_diff.
     # The repair loop: repair_plan → run_repair → run_tests (re-evaluated).
     g.add_conditional_edges("run_tests", _route_after_tests)
     g.add_edge("repair_plan", "run_repair")
-    g.add_edge("run_repair", "run_tests")
+    # v0.7.3: run_repair → failed (sentinel abort) OR run_tests (normal).
+    # When the StreamSentinel kills the repair agent mid-execution, the
+    # node returns FAILED status. Route to `failed` instead of re-running
+    # tests on a partial repair diff from a killed agent.
+    g.add_conditional_edges("run_repair", _route_after_repair)
 
     g.add_edge("capture_diff", "review_diff")
     # v0.6.0: review_diff → repair_plan (if TESTS_MISSING + dynamic_test_generation)
@@ -455,7 +485,7 @@ def run_workflow(
             # raise — the run cannot succeed without durable evidence.
             original_write = events.write
 
-            def _dual_write(type, payload=None):
+            def _dual_write(type: EventType, payload: dict[str, Any] | None = None) -> Event:
                 evt = original_write(type, payload)
                 try:
                     durable_store.append(evt)
@@ -490,7 +520,7 @@ def run_workflow(
         state["mission_id"] = mission_id
         state["mission_step_index"] = mission_step_index
         state["parent_task_id"] = parent_task_id
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
+    result: dict[str, Any] = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
 
     # Close the durable stores if they were opened.
     if durable_store is not None:

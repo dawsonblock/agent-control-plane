@@ -189,15 +189,25 @@ def _evaluate(
     # --- secret scanning (HARD BLOCK) ------------------------------------- #
     # v0.5.14: Use TruffleHog for verified detection when available.
     # v0.7.0 (Phase 3.2): Pass custom user-defined regexes from config.
+    # v0.7.3 (Phase 2.4): Surface TruffleHog degradation in review notes.
     if cfg.review.block_secret_leaks:
         use_th = getattr(cfg.review, "use_trufflehog", True)
         custom_regexes = _compile_custom_regexes(cfg.review.custom_secret_regexes)
-        findings = scan_diff(
+        findings, scan_info = scan_diff(
             diff.patch,
             worktree_path=worktree_path,
             use_trufflehog=use_th,
             custom_regexes=custom_regexes,
         )
+        if scan_info.get("degraded") == "true":
+            engine.add(
+                RiskCategory.SECRET,
+                "TruffleHog was configured but not installed — "
+                "secret scan used regex-only fallback. "
+                "Install TruffleHog for verified detection.",
+                level=RiskLevel.LOW,
+                hard_block=False,
+            )
         if findings:
             kinds = sorted({f.kind for f in findings})
             engine.add(

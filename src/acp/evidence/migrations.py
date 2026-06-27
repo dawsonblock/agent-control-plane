@@ -222,18 +222,6 @@ def run_migrations(
     return target
 
 
-def get_user_version(conn: sqlite3.Connection) -> int:
-    """Read the current database-level schema version from ``PRAGMA user_version``.
-
-    .. deprecated::
-        Use :func:`get_store_version` instead. This function is kept for
-        backward compatibility but should not be used for new multi-store
-        databases since ``PRAGMA user_version`` is shared across all stores.
-    """
-    row = conn.execute("PRAGMA user_version").fetchone()
-    return int(row[0]) if row else 0
-
-
 def needs_rebuild(conn: sqlite3.Connection) -> bool:
     """Check if the database is catastrophically corrupted and needs rebuild.
 

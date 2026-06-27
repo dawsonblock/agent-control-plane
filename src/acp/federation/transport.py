@@ -29,7 +29,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class StdioTransport:
         self.env = env
         self.timeout_seconds = timeout_seconds
         self.server_name = server_name
-        self._proc: subprocess.Popen | None = None
+        self._proc: subprocess.Popen[str] | None = None
 
     def start(self) -> None:
         if self._proc is not None:
@@ -183,7 +183,7 @@ class StdioTransport:
         if "error" in response:
             error = response["error"]
             raise MCPError(f"MCP server '{self.server_name}' error: {error.get('message', error)}")
-        return response.get("result", {})
+        return cast(dict[str, Any], response.get("result", {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -291,7 +291,7 @@ class HTTPTransport:
             raise MCPError(
                 f"MCP HTTP server '{self.server_name}' error: {error.get('message', error)}"
             )
-        return response.get("result", {})
+        return cast(dict[str, Any], response.get("result", {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -395,7 +395,7 @@ class SSETransport:
             raise MCPError(
                 f"MCP SSE server '{self.server_name}' error: {error.get('message', error)}"
             )
-        return response.get("result", {})
+        return cast(dict[str, Any], response.get("result", {}))
 
     @staticmethod
     def _parse_sse_response(raw: str) -> dict[str, Any]:
@@ -426,7 +426,7 @@ class SSETransport:
             if data_lines:
                 payload = "\n".join(data_lines)
                 try:
-                    return json.loads(payload)
+                    return cast(dict[str, Any], json.loads(payload))
                 except json.JSONDecodeError:
                     continue
         raise MCPError("SSE response contained no parseable JSON-RPC event")

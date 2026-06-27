@@ -34,12 +34,6 @@ import json
 import logging
 from pathlib import Path
 
-from haystack import Document, Pipeline
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder
-from haystack.components.preprocessors import DocumentSplitter
-from haystack.components.writers import DocumentWriter
-from haystack.document_stores.in_memory import InMemoryDocumentStore
-
 from acp.config import ContextSection
 from acp.context.scanner import scan_context
 from acp.evidence.manifest import DigestCache
@@ -72,6 +66,8 @@ class HaystackIndexer:
         *,
         persist_path: Path | None = None,
     ) -> None:
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
         self.repo_path = Path(repo_path)
         self.vault_root = Path(vault_root)
         self.context_config = context_config
@@ -115,6 +111,8 @@ class HaystackIndexer:
         store_loaded = False
         if store_path.is_file():
             try:
+                from haystack import Document
+
                 data = json.loads(store_path.read_text())
                 docs = [Document.from_dict(d) for d in data.get("documents", [])]
                 if docs:
@@ -201,6 +199,8 @@ class HaystackIndexer:
         re-embedded. Unchanged files (same size + mtime) are skipped.
         Deleted files are removed from the index.
         """
+        from haystack import Document
+
         is_persistent = self.persist_path is not None
         self._index_stats = {
             "total_files": 0,
@@ -304,6 +304,11 @@ class HaystackIndexer:
             return
 
         # 4. Build and run the indexing pipeline (only for new/changed docs)
+        from haystack import Pipeline
+        from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+        from haystack.components.preprocessors import DocumentSplitter
+        from haystack.components.writers import DocumentWriter
+
         indexing_pipeline = Pipeline()
 
         indexing_pipeline.add_component(

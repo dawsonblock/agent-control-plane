@@ -125,6 +125,11 @@ class EventType(str, Enum):
     STORE_INTEGRITY_BREACH = "store.integrity_breach"
     # v0.7.1: Autonomous mode — repair loop aborted by circuit breaker.
     AUTO_REPAIR_LOOP_ABORTED = "auto.repair_loop_aborted"
+    # v0.7.3: Mid-stream sentinel — agent killed during execution by the
+    # StreamSentinel for safety (secret leak) or attractor (strange loop).
+    # The payload includes "reason" (secret_detected | strange_loop) and
+    # "chunk_preview" of the offending output.
+    STREAM_ABORTED = "stream.aborted"
 
 
 class RiskLevel(str, Enum):
@@ -224,6 +229,15 @@ class AgentResult(BaseModel):
     stdout_path: Path
     stderr_path: Path
     summary: str = "Agent completed"
+    # v0.7.3: Set by the streaming CLIAgent when the StreamSentinel killed
+    # the agent mid-execution (secret leak, strange loop, dangerous path).
+    # The graph uses this to short-circuit to `failed` instead of running
+    # tests and review on a partial, potentially dangerous diff.
+    aborted_by_sentinel: bool = False
+    # v0.7.3: When aborted_by_sentinel is True, this carries the abort
+    # reason ("secret_detected", "strange_loop", "dangerous_path") for
+    # the agent.finished event payload.
+    sentinel_abort_reason: str = ""
 
     @property
     def passed(self) -> bool:

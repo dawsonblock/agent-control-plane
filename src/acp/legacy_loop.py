@@ -26,7 +26,7 @@ from acp.errors import RepoDirtyError, WorktreeError
 from acp.events import EventWriter
 from acp.gitops.diff import DiffCapture, capture_diff
 from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, Task, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import GateOutcome, evaluate_final_gates
@@ -172,7 +172,7 @@ class EvidenceLoop:
 
     def _run_after_worktree(
         self,
-        task,
+        task: Task,
         events: EventWriter,
         worktree_path: Path,
         artifacts: Path,

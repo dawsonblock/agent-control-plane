@@ -42,7 +42,7 @@ from acp.evidence.manifest import (
 from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
 from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean
-from acp.models import EventType, RiskLevel, TaskStatus
+from acp.models import EventType, ReviewResult, RiskLevel, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
 from acp.review.gates import GateOutcome, evaluate_final_gates
@@ -515,7 +515,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
     # --- docker_sbx backend: run agent inside sandbox, then fetch remote -- #
     if cfg.executor.backend == "docker_sbx":
-        executor = SbxExecutor(cfg.executor)
+        executor: Any = SbxExecutor(cfg.executor)
         task.status = TaskStatus.EXECUTING
         ctx.store.save(task)
         ctx.events.write(
@@ -731,11 +731,9 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         # This is the security gate that prevents supply-chain attacks
         # via hijacked dependency lockfiles.
         try:
-            from acp.agents.agent_file import (
-                AgentConfigError,
-                verify_environment_hash,
-            )
+            from acp.agents.agent_file import verify_environment_hash
             from acp.agents.registry import get_agent_file
+            from acp.errors import AgentConfigError
 
             agent_file = get_agent_file(cfg)
             if agent_file:
@@ -790,6 +788,14 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
     # --- worktree backend (default): current behavior --------------------- #
     agent = ctx.agent_factory(cfg)
+    # v0.7.3: Pass the event writer to agents that support mid-stream
+    # analysis (CLIAgent). The sentinel uses it to write stream.aborted
+    # events during execution. Set via duck-typing to avoid changing the
+    # AgentProtocol interface.
+    if hasattr(agent, "event_writer"):
+        agent.event_writer = ctx.events
+    if hasattr(agent, "task_id"):
+        agent.task_id = state["task_id"]
     task.status = TaskStatus.EXECUTING
     ctx.store.save(task)
 
@@ -829,6 +835,35 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             f"agent '{agent.name}' returned None instead of an AgentResult — "
             f"this is a bug in the agent implementation"
         )
+
+    # v0.7.3: If the StreamSentinel killed the agent mid-execution, short-
+    # circuit to FAILED. Running tests and review on a partial diff from a
+    # killed agent is pointless and potentially dangerous (the agent may
+    # have written a secret to a file before the sentinel caught it in
+    # stdout). The stream.aborted event was already written by the sentinel;
+    # here we write agent.finished and return FAILED state. The terminal
+    # task.failed event is written by failed_node (the ONLY node that writes
+    # it) — the error field carries the abort reason to failed_node.
+    if getattr(agent_result, "aborted_by_sentinel", False):
+        abort_reason = getattr(agent_result, "sentinel_abort_reason", "")
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+                "aborted_by_sentinel": True,
+                "sentinel_abort_reason": abort_reason,
+            },
+        )
+        task.status = TaskStatus.FAILED
+        ctx.store.save(task)
+        return {
+            "agent_result": agent_result,
+            "status": TaskStatus.FAILED,
+            "error": f"Agent killed by StreamSentinel: {abort_reason}",
+        }
+
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {
@@ -947,7 +982,7 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         return {"diff": diff}
 
     # --- worktree backend (default): current behavior --------------------- #
-    diff: DiffCapture = capture_diff(
+    diff = capture_diff(
         worktree_path=state["worktree_path"],
         base_branch=cfg.repo.default_branch,
         artifacts_dir=state["artifacts_dir"],
@@ -1059,7 +1094,7 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
 
 def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
-    review = state.get("review_result")
+    review: ReviewResult = state["review_result"]
     agent_result = state.get("agent_result")
     command_results = state.get("command_results", [])
     diff = state.get(
@@ -1177,7 +1212,7 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
         if cfg.executor.backend == "gvisor":
             from acp.executor.gvisor import GvisorExecutor
 
-            executor = GvisorExecutor(cfg.executor)
+            executor: Any = GvisorExecutor(cfg.executor)
             executor._container_name = sandbox_name
         else:
             executor = SbxExecutor(cfg.executor)
@@ -1797,9 +1832,20 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
     ``agent_stdout.txt`` / ``agent_stderr.txt`` (overwritten per attempt; the
     distinct ``repair_prompt_<n>.txt`` artifacts preserve the per-attempt
     evidence trail).
+
+    v0.7.3: Like ``run_agent_node``, this node passes the event writer and
+    task ID to agents that support mid-stream analysis (CLIAgent). If the
+    StreamSentinel kills the repair agent mid-execution, the node short-
+    circuits to FAILED — re-running tests on a partial repair diff from a
+    killed agent is pointless.
     """
     cfg = state["config"]
     agent = ctx.agent_factory(cfg)
+    # v0.7.3: Pass the event writer to agents that support mid-stream analysis.
+    if hasattr(agent, "event_writer"):
+        agent.event_writer = ctx.events
+    if hasattr(agent, "task_id"):
+        agent.task_id = state["task_id"]
     ctx.events.write(
         EventType.AGENT_STARTED,
         {
@@ -1820,6 +1866,32 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
             f"agent '{agent.name}' returned None instead of an AgentResult — "
             f"this is a bug in the agent implementation"
         )
+
+    # v0.7.3: If the StreamSentinel killed the repair agent, short-circuit.
+    # The terminal task.failed event is written by failed_node.
+    if getattr(agent_result, "aborted_by_sentinel", False):
+        abort_reason = getattr(agent_result, "sentinel_abort_reason", "")
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "phase": "repair",
+                "attempt": state.get("repair_attempts", 1),
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+                "aborted_by_sentinel": True,
+                "sentinel_abort_reason": abort_reason,
+            },
+        )
+        task = state["task"]
+        task.status = TaskStatus.FAILED
+        ctx.store.save(task)
+        return {
+            "agent_result": agent_result,
+            "status": TaskStatus.FAILED,
+            "error": f"Repair agent killed by StreamSentinel: {abort_reason}",
+        }
+
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {

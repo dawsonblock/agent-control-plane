@@ -1,29 +1,20 @@
 """Tests for the technical debt cleanup and stabilization fixes.
 
-Tests the 6 immediate action items from the comprehensive codebase review:
+Tests the immediate action items from the comprehensive codebase review:
 
   1. Context __init__.py docstring updated (no longer says "stub")
-  2. all_passed() deprecated — returns False on empty, emits DeprecationWarning
-  3. RiskEngine.recommend() respects require_human_approval
-  4. remove_worktree logs errors instead of silent except: pass
-  5. _cleanup_sandbox logs errors instead of silent except: pass
-  6. lifecycle.py logs errors instead of silent except: pass
+  2. RiskEngine.recommend() respects require_human_approval
+  3. remove_worktree logs errors instead of silent except: pass
+  4. _cleanup_sandbox logs errors instead of silent except: pass
+  5. lifecycle.py logs errors instead of silent except: pass
 """
 
 from __future__ import annotations
 
-import warnings
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from acp.models import CommandResult, Recommendation, RiskLevel
+from acp.models import Recommendation, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
-from acp.testing.runner import (
-    all_passed,
-    validation_passed,
-    validation_status,
-)
 
 # --------------------------------------------------------------------------- #
 # 1. Context docstring (structural test — verifies the docstring is updated)
@@ -51,79 +42,7 @@ def test_context_docstring_mentions_haystack():
 
 
 # --------------------------------------------------------------------------- #
-# 2. all_passed() deprecation
-# --------------------------------------------------------------------------- #
-
-
-def _cmd(exit_code: int, *, skipped: bool = False) -> CommandResult:
-    from pathlib import Path
-
-    return CommandResult(
-        command="echo test",
-        cwd=Path("/tmp"),
-        exit_code=exit_code,
-        stdout_path=Path("/tmp/out.txt"),
-        stderr_path=Path("/tmp/err.txt"),
-        duration_seconds=0.1,
-        skipped=skipped,
-    )
-
-
-def test_all_passed_returns_false_for_empty():
-    """all_passed([]) returns False — 'no validation ran' is not 'passed'."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        assert all_passed([]) is False
-
-
-def test_all_passed_returns_false_for_all_skipped():
-    """all_passed([skipped]) returns False — skipped is not passed."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        assert all_passed([_cmd(0, skipped=True)]) is False
-
-
-def test_all_passed_returns_true_for_all_passing():
-    """all_passed([passing]) returns True when at least one command ran and passed."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        assert all_passed([_cmd(0)]) is True
-        assert all_passed([_cmd(0), _cmd(0)]) is True
-
-
-def test_all_passed_returns_false_for_failure():
-    """all_passed([failing]) returns False when any command failed."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        assert all_passed([_cmd(1)]) is False
-        assert all_passed([_cmd(0), _cmd(1)]) is False
-
-
-def test_all_passed_emits_deprecation_warning():
-    """all_passed() emits a DeprecationWarning."""
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        all_passed([_cmd(0)])
-
-
-def test_validation_passed_returns_false_for_empty():
-    """validation_passed([]) returns False — the correct replacement."""
-    assert validation_passed([]) is False
-    assert validation_passed([_cmd(0, skipped=True)]) is False
-
-
-def test_validation_passed_returns_true_for_all_passing():
-    """validation_passed([passing]) returns True."""
-    assert validation_passed([_cmd(0)]) is True
-
-
-def test_validation_status_for_empty():
-    """validation_status([]) returns 'skipped'."""
-    assert validation_status([]) == "skipped"
-    assert validation_status([_cmd(0, skipped=True)]) == "skipped"
-
-
-# --------------------------------------------------------------------------- #
-# 3. RiskEngine.recommend() respects require_human_approval
+# 2. RiskEngine.recommend() respects require_human_approval
 # --------------------------------------------------------------------------- #
 
 
@@ -181,7 +100,7 @@ def test_risk_engine_reject_on_failing_tests_regardless_of_approval():
 
 
 # --------------------------------------------------------------------------- #
-# 4. remove_worktree logs errors (not silent)
+# 3. remove_worktree logs errors (not silent)
 # --------------------------------------------------------------------------- #
 
 
@@ -217,7 +136,7 @@ def test_remove_worktree_logs_error(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 5. _cleanup_sandbox logs errors (not silent)
+# 4. _cleanup_sandbox logs errors (not silent)
 # --------------------------------------------------------------------------- #
 
 
@@ -260,7 +179,7 @@ def test_cleanup_sandbox_logs_error(caplog):
 
 
 # --------------------------------------------------------------------------- #
-# 6. lifecycle.py logs errors (not silent) — structural verification
+# 5. lifecycle.py logs errors (not silent) — structural verification
 # --------------------------------------------------------------------------- #
 
 

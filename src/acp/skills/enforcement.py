@@ -49,7 +49,7 @@ def get_skill_prompt_instructions(
     if skill is None:
         return ""
 
-    return skill.get("prompt_instructions", "")
+    return str(skill.get("prompt_instructions", ""))
 
 
 def apply_skill_review_gates(

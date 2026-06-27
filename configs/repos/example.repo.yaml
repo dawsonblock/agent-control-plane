@@ -151,3 +151,35 @@ executor:
 federation:
   servers: []
 
+# v0.7.3: Mid-stream sentinel — real-time safety gating during agent execution.
+# When enabled, the CLIAgent switches from blocking subprocess.run to an async
+# streaming path. Each line of agent stdout is fed to a StreamSentinel that
+# runs safety checks BEFORE the agent finishes:
+#
+#   1. Kill-switch: known credential patterns (AWS, GitHub, private keys, etc.)
+#      in the output stream → kill the agent immediately, write stream.aborted
+#      event. This closes the risk window between agent start and post-run review.
+#   2. Strange-loop detection: near-duplicate output cycles (token n-gram
+#      Jaccard similarity) → kill the agent, write stream.aborted event.
+#   3. Dangerous-path detection: configurable regex patterns → kill the agent.
+#
+# When the sentinel kills the agent, the graph short-circuits to `failed` —
+# tests and review are skipped (the partial diff from a killed agent is not
+# worth reviewing). All event writes are serialized via asyncio.Lock to
+# preserve the hash-chain invariant.
+#
+# Default: disabled (streaming.enabled: false). Enable per-repo when using
+# the `custom` agent (CLIAgent). Has no effect on `shell` or `docker_sbx`.
+streaming:
+  enabled: false
+  # secret_detection: true     # scan each chunk for known credential patterns
+  # strange_loop_detection: true  # detect near-duplicate output cycles
+  # strange_loop_threshold: 8.0   # repetition score at which the loop detector fires
+  # strange_loop_window: 10       # number of recent chunks in the rolling window
+  # strange_loop_similarity: 0.65  # Jaccard threshold (0.0–1.0) for near-duplicate
+  # dangerous_path_patterns: []   # regex patterns that trigger an immediate kill
+  # Example dangerous_path_patterns:
+  #   - r"rm\s+-rf\s+/"
+  #   - r"policy\.json"
+  #   - r"\.env\b"
+

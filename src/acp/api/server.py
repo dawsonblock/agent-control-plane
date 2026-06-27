@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,95 @@ except ImportError:
 import logging
 
 _logger = logging.getLogger("acp.api")
+
+# --------------------------------------------------------------------------- #
+# Bearer token auth middleware
+# --------------------------------------------------------------------------- #
+
+# Endpoints that don't require authentication (always public).
+_PUBLIC_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+
+# The expected bearer token. When None, auth is disabled (backwards-
+# compatible for local development). Set via ``ACP_API_TOKEN`` env var
+# or the ``--api-token`` CLI flag. Uses ``secrets.compare_digest`` to
+# prevent timing attacks on token comparison.
+_api_token: str | None = None
+
+
+def set_api_token(token: str | None) -> None:
+    """Set the expected bearer token for the API.
+
+    When set to a non-empty string, all non-public endpoints require an
+    ``Authorization: Bearer <token>`` header. When None or empty, auth
+    is disabled (for local development only).
+    """
+    global _api_token
+    _api_token = token if token else None
+
+
+def get_api_token() -> str | None:
+    """Return the configured API token, or None if auth is disabled."""
+    return _api_token
+
+
+def _init_token_from_env() -> None:
+    """Initialize the API token from the ``ACP_API_TOKEN`` env var if set."""
+    env_token = os.environ.get("ACP_API_TOKEN", "").strip()
+    if env_token:
+        set_api_token(env_token)
+
+
+# Initialize from env var on module import (so the server picks it up
+# even when started via uvicorn directly rather than the CLI).
+_init_token_from_env()
+
+
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    class BearerTokenMiddleware(BaseHTTPMiddleware):
+        """Validate ``Authorization: Bearer <token>`` on non-public routes.
+
+        When ``_api_token`` is set, every request to a non-public path
+        must include a valid bearer token. Returns 401 if the header is
+        missing or malformed, 403 if the token doesn't match.
+        """
+
+        async def dispatch(self, request: Request, call_next: Any) -> Any:
+            # Public paths are always accessible.
+            if request.url.path in _PUBLIC_PATHS:
+                return await call_next(request)
+
+            # If no token is configured, auth is disabled (local dev).
+            expected = get_api_token()
+            if expected is None:
+                return await call_next(request)
+
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Missing or invalid Authorization header. "
+                        "Expected: Bearer <token>"
+                    },
+                )
+
+            provided = auth_header[7:]  # strip "Bearer "
+            if not secrets.compare_digest(provided, expected):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Invalid API token."},
+                )
+
+            return await call_next(request)
+
+except ImportError:
+    # Starlette is a FastAPI dependency — if FastAPI isn't installed,
+    # the import at the top already raised. This guard is defensive.
+    BearerTokenMiddleware = None  # type: ignore[assignment, misc]
 
 
 def _recover_orphaned_tasks() -> None:
@@ -87,7 +178,7 @@ def _recover_orphaned_tasks() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> Any:
     """Startup: recover orphaned tasks. Shutdown: nothing to clean up."""
     _recover_orphaned_tasks()
     yield
@@ -312,22 +403,54 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: allow the Vite dev server (5173) and localhost:3000 to call the API.
-# In production, the UI is served from the same origin via /ui/ so CORS
-# isn't needed — but during development (npm run dev on :5173, API on :8000)
-# the browser blocks cross-origin requests without this.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Default CORS origins for local development (Vite dev server on :5173,
+# and localhost:3000 for alternative dev setups). In production, operators
+# should set ``api.cors_origins`` in the repo config — the CLI ``serve``
+# command reads it and sets the ``ACP_CORS_ORIGINS`` env var before
+# starting uvicorn, so the server picks it up at import time. Set
+# ``ACP_CORS_ENABLED=false`` to disable CORS entirely (same-origin deploys).
+_DEV_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+
+def _resolve_cors_origins() -> list[str]:
+    """Resolve CORS origins from env var or dev defaults.
+
+    The ``ACP_CORS_ORIGINS`` env var (comma-separated) takes precedence.
+    The CLI ``serve`` command sets this from ``api.cors_origins`` in the
+    repo config before starting uvicorn.
+    """
+    env_origins = os.environ.get("ACP_CORS_ORIGINS", "").strip()
+    if env_origins:
+        return [o.strip() for o in env_origins.split(",") if o.strip()]
+    return _DEV_CORS_ORIGINS
+
+
+def _cors_enabled() -> bool:
+    """Whether CORS middleware should be added."""
+    return os.environ.get("ACP_CORS_ENABLED", "true").strip().lower() != "false"
+
+
+# CORS middleware — origins resolved from env var at import time.
+if _cors_enabled():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_resolve_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+# Bearer token auth — added after CORS so CORS preflight (OPTIONS) is
+# handled before the auth check. When no token is configured, the
+# middleware is a pass-through.
+if BearerTokenMiddleware is not None:
+    app.add_middleware(BearerTokenMiddleware)
 
 
 # --------------------------------------------------------------------------- #
@@ -750,7 +873,7 @@ async def list_skills(
                 "has_hard_blocks": bool(s.get("review_gates", {}).get("hard_blocks")),
                 "has_risk_elevators": bool(s.get("review_gates", {}).get("risk_elevators")),
             }
-            for s in skills
+            for s in skills.values()
         ]
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {exc}")

@@ -13,6 +13,7 @@ hash is verified before execution. A hash mismatch raises
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from acp.agents.agent_file import AgentFile
@@ -24,7 +25,7 @@ from acp.config import RepoConfig
 from acp.errors import AgentConfigError
 
 # Known agent kinds, keyed by config string. Lowercased on lookup.
-_AGENTS = {
+_AGENTS: dict[str, Callable[[RepoConfig], AgentProtocol]] = {
     "shell": lambda cfg: ShellAgent(),
     "custom": lambda cfg: CLIAgent(cfg),
 }

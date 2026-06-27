@@ -13,7 +13,7 @@ Tests the new hermetic isolation feature:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import yaml
@@ -388,6 +388,43 @@ def test_venv_get_environment_info():
         info = executor.get_environment_info()
     assert info["backend"] == "venv"
     assert info["uv_version"] == "uv 0.4.0"
+
+
+def test_venv_stop_no_process():
+    """stop() returns True when no process is running."""
+    config = ExecutorSection(backend="venv", agent="python -m my_agent")
+    executor = VenvExecutor(config)
+    assert executor.stop() is True
+
+
+def test_venv_stop_terminated_process():
+    """stop() returns True when the process has already exited."""
+    config = ExecutorSection(backend="venv", agent="python -m my_agent")
+    executor = VenvExecutor(config)
+    # Simulate a completed process.
+    mock_proc = Mock()
+    mock_proc.poll.return_value = 0  # process has exited
+    executor._proc = mock_proc
+    assert executor.stop() is True
+
+
+def test_venv_stop_kills_runaway_process():
+    """stop() sends SIGTERM then SIGKILL to a running process."""
+    import subprocess as sp
+
+    # Start a real long-running subprocess.
+    proc = sp.Popen(
+        ["sleep", "30"],
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    config = ExecutorSection(backend="venv", agent="python -m my_agent")
+    executor = VenvExecutor(config)
+    executor._proc = proc
+    assert executor.stop() is True
+    assert proc.poll() is not None  # process is dead
 
 
 # --------------------------------------------------------------------------- #

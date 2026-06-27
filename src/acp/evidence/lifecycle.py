@@ -57,7 +57,7 @@ def rerender_vault_note_from_state(
     """
     try:
         from acp.gitops.diff import DiffCapture
-        from acp.models import ReviewResult
+        from acp.models import Recommendation, ReviewResult, RiskLevel
         from acp.vault.obsidian_writer import rerender_vault_note
 
         # Read the current report.
@@ -70,7 +70,7 @@ def rerender_vault_note_from_state(
 
         # Read the review result if it exists.
         review_path = run_dir / "artifacts" / "review.json"
-        review = ReviewResult(risk="low", recommendation="merge")
+        review = ReviewResult(risk=RiskLevel.LOW, recommendation=Recommendation.MERGE)
         if review_path.is_file():
             try:
                 review = ReviewResult.model_validate_json(review_path.read_text())
@@ -135,7 +135,7 @@ def record_lifecycle_event(
     task_id: str,
     run_dir: Path,
     event_type: EventType,
-    payload: dict,
+    payload: dict[str, Any],
 ) -> str | None:
     """Append a post-run lifecycle event with full transactional integrity.
 
@@ -176,7 +176,7 @@ def record_lifecycle_event(
 
     if signing_key_path is not None:
         try:
-            key_bytes = signing_key_path.read_bytes()
+            key_bytes = Path(signing_key_path).read_bytes()
         except OSError as exc:
             raise EvidenceConfigError(
                 f"run was signed but signing key is not readable: {signing_key_path} ({exc})"
@@ -284,7 +284,7 @@ def record_lifecycle_event(
                 durable_warning = f"durable store write failed: {exc}"
 
         # 6. Commit the durable transaction (both events at once).
-        if durable_tx_active:
+        if durable_tx_active and durable_db is not None:
             try:
                 durable_db.commit()
                 durable_tx_active = False

@@ -375,3 +375,185 @@ class TestApproveReject:
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
+
+
+# --------------------------------------------------------------------------- #
+# Bearer token auth middleware
+# --------------------------------------------------------------------------- #
+
+
+@api_skip
+class TestBearerTokenAuth:
+    """Tests for the bearer token authentication middleware."""
+
+    def test_no_token_auth_disabled(self, tmp_path):
+        """When no token is configured, all endpoints are accessible."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token(None)
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        client = TestClient(app)
+
+        resp = client.get("/health")
+        assert resp.status_code == 200
+
+        resp = client.get("/tasks")
+        assert resp.status_code == 200
+
+    def test_health_always_public(self, tmp_path):
+        """The /health endpoint is always accessible, even with auth on."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token("secret-token-123")
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        try:
+            client = TestClient(app)
+
+            resp = client.get("/health")
+            assert resp.status_code == 200
+        finally:
+            set_api_token(None)
+
+    def test_missing_auth_header(self, tmp_path):
+        """Protected endpoints return 401 without an Authorization header."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token("secret-token-123")
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        try:
+            client = TestClient(app)
+
+            resp = client.get("/tasks")
+            assert resp.status_code == 401
+            assert "Authorization" in resp.json()["detail"]
+        finally:
+            set_api_token(None)
+
+    def test_wrong_token(self, tmp_path):
+        """Protected endpoints return 403 with an incorrect token."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token("secret-token-123")
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        try:
+            client = TestClient(app)
+
+            resp = client.get("/tasks", headers={"Authorization": "Bearer wrong-token"})
+            assert resp.status_code == 403
+        finally:
+            set_api_token(None)
+
+    def test_valid_token(self, tmp_path):
+        """Protected endpoints return 200 with the correct token."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token("secret-token-123")
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        try:
+            client = TestClient(app)
+
+            resp = client.get("/tasks", headers={"Authorization": "Bearer secret-token-123"})
+            assert resp.status_code == 200
+        finally:
+            set_api_token(None)
+
+    def test_malformed_auth_header(self, tmp_path):
+        """Non-Bearer auth schemes are rejected with 401."""
+        from acp.api.server import app, set_api_token, state
+
+        set_api_token("secret-token-123")
+        config_path = _make_repo_config(tmp_path)
+        state.set_config(str(config_path))
+        try:
+            client = TestClient(app)
+
+            resp = client.get("/tasks", headers={"Authorization": "Basic abc123"})
+            assert resp.status_code == 401
+        finally:
+            set_api_token(None)
+
+
+# --------------------------------------------------------------------------- #
+# CORS configuration via ApiSection
+# --------------------------------------------------------------------------- #
+
+
+@api_skip
+class TestCORSConfig:
+    """Tests for CORS configuration via the ApiSection in RepoConfig."""
+
+    def test_api_section_defaults(self):
+        """ApiSection has sensible defaults (CORS enabled, dev origins)."""
+        from acp.config import ApiSection
+
+        api = ApiSection()
+        assert api.cors_enabled is True
+        assert api.cors_origins == []
+
+    def test_api_section_custom_origins(self):
+        """ApiSection accepts custom cors_origins."""
+        from acp.config import ApiSection
+
+        api = ApiSection(cors_origins=["https://acp.internal.corp"])
+        assert api.cors_origins == ["https://acp.internal.corp"]
+
+    def test_api_section_cors_disabled(self):
+        """ApiSection can disable CORS."""
+        from acp.config import ApiSection
+
+        api = ApiSection(cors_enabled=False)
+        assert api.cors_enabled is False
+
+    def test_repo_config_includes_api_section(self, tmp_path):
+        """RepoConfig loads the api section from YAML."""
+        from acp.config import load_repo_config
+
+        config_path = tmp_path / "test.repo.yaml"
+        config_path.write_text(
+            f"repo:\n"
+            f"  name: test-repo\n"
+            f"  path: {tmp_path}\n"
+            f"  default_branch: main\n"
+            f"agent:\n"
+            f"  default: shell\n"
+            f"api:\n"
+            f"  cors_origins:\n"
+            f"    - https://acp.internal.corp\n"
+            f"    - https://ui.acp.internal.corp\n"
+        )
+        cfg = load_repo_config(config_path)
+        assert cfg.api.cors_enabled is True
+        assert cfg.api.cors_origins == [
+            "https://acp.internal.corp",
+            "https://ui.acp.internal.corp",
+        ]
+
+    def test_cors_env_var_origins(self, tmp_path, monkeypatch):
+        """ACP_CORS_ORIGINS env var sets custom origins."""
+        from acp.api.server import _resolve_cors_origins
+
+        monkeypatch.setenv("ACP_CORS_ORIGINS", "https://a.com,https://b.com")
+        origins = _resolve_cors_origins()
+        assert origins == ["https://a.com", "https://b.com"]
+
+    def test_cors_env_var_disabled(self, tmp_path, monkeypatch):
+        """ACP_CORS_ENABLED=false disables CORS."""
+        from acp.api.server import _cors_enabled
+
+        monkeypatch.setenv("ACP_CORS_ENABLED", "false")
+        assert _cors_enabled() is False
+
+    def test_cors_env_var_defaults(self, tmp_path, monkeypatch):
+        """Without env vars, dev defaults are used."""
+        from acp.api.server import _cors_enabled, _resolve_cors_origins
+
+        monkeypatch.delenv("ACP_CORS_ORIGINS", raising=False)
+        monkeypatch.delenv("ACP_CORS_ENABLED", raising=False)
+        assert _cors_enabled() is True
+        origins = _resolve_cors_origins()
+        assert "http://localhost:5173" in origins

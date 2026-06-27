@@ -422,7 +422,7 @@ class DurableTaskStore:
         self.close()
 
 
-def _row_to_task(row: tuple) -> Task:
+def _row_to_task(row: tuple[str, str, str, str, str, str, str, str, str, str, str]) -> Task:
     """Convert a SQLite row to a Task model."""
     return Task(
         task_id=row[0],

@@ -25,10 +25,12 @@ Supported placeholders in ``command_template``:
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from acp.config import RepoConfig
 from acp.errors import AgentConfigError
@@ -61,6 +63,13 @@ class CLIAgent:
         self.template = template
         self._backend = config.executor.backend
         self._allow_shell = config.agent.allow_shell
+        # v0.7.3: Optional EventWriter for mid-stream sentinel event writes.
+        # Set by run_agent_node when streaming is enabled. When None, the
+        # sentinel still runs safety checks but doesn't write events.
+        self.event_writer: Any = None
+        # v0.7.3: Task ID for the current run (set by run_agent_node).
+        # Used by the sentinel in stream.aborted event payloads.
+        self.task_id: str = ""
 
     def run(
         self,
@@ -104,6 +113,21 @@ class CLIAgent:
                 )
 
         argv = command if use_shell else shlex.split(command)
+
+        # v0.7.3: Mid-stream sentinel — when streaming is enabled, use the
+        # async streaming path instead of blocking subprocess.run. The
+        # sentinel feeds each line of stdout to real-time safety checks
+        # (secret detection, strange-loop detection, dangerous paths).
+        if self.config.streaming.enabled:
+            return self._run_streaming(
+                argv=argv,
+                cwd=str(worktree_path),
+                use_shell=use_shell,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout_seconds=timeout_seconds,
+                command=command,
+            )
 
         start = time.monotonic()
         try:
@@ -167,3 +191,77 @@ class CLIAgent:
     def preview_command(template: str, **kwargs: object) -> list[str]:
         """Debug helper: show how a template would split into argv."""
         return shlex.split(template.format(**kwargs))
+
+    def _run_streaming(
+        self,
+        *,
+        argv: list[str] | str,
+        cwd: str,
+        use_shell: bool,
+        stdout_path: Path,
+        stderr_path: Path,
+        timeout_seconds: int,
+        command: str,
+    ) -> AgentResult:
+        """Run the agent via the async streaming path with mid-stream safety checks.
+
+        This is the v0.7.3 streaming execution path. Instead of blocking on
+        ``subprocess.run``, it uses ``asyncio.run`` to drive
+        :func:`~acp.streaming.midstream.run_agent_streaming`, which feeds
+        each line of agent stdout to a
+        :class:`~acp.streaming.midstream.StreamSentinel` for real-time
+        safety gating.
+
+        The sentinel can kill the agent mid-stream if a secret leak,
+        strange-loop, or dangerous-path pattern is detected. The abort is
+        recorded as a ``stream.aborted`` event in the hash-chained event log.
+
+        This method is safe to call from the sync graph node because the
+        graph is invoked via ``wf.invoke()`` (sync) — there is no running
+        event loop in the calling thread, so ``asyncio.run`` is valid.
+        """
+        from acp.streaming.midstream import StreamSentinel, run_agent_streaming
+
+        # Build custom secret regexes from the review config.
+        custom_regexes: list[tuple[str, Any]] = []
+        for entry in self.config.review.custom_secret_regexes:
+            import re
+
+            custom_regexes.append((entry["name"], re.compile(entry["pattern"])))
+
+        sentinel = StreamSentinel(
+            task_id=self.task_id,
+            events=self.event_writer,
+            config=self.config.streaming,
+            custom_secret_regexes=custom_regexes or None,
+        )
+
+        start = time.monotonic()
+        exit_code, out, err = asyncio.run(
+            run_agent_streaming(
+                cmd=argv if isinstance(argv, list) else [argv],
+                cwd=cwd,
+                sentinel=sentinel,
+                timeout=timeout_seconds,
+                use_shell=use_shell,
+            )
+        )
+        duration = time.monotonic() - start
+
+        stdout_path.write_text(out)
+        stderr_path.write_text(err)
+
+        # If the sentinel aborted, note it in the summary and result fields.
+        summary = f"CLI agent ran (streaming): {command} (exit {exit_code}, {duration:.2f}s)"
+        if sentinel.is_aborted:
+            summary += f" [ABORTED by sentinel: {sentinel.abort_reason}]"
+
+        return AgentResult(
+            agent_name=self.name,
+            exit_code=exit_code,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            summary=summary,
+            aborted_by_sentinel=sentinel.is_aborted,
+            sentinel_abort_reason=sentinel.abort_reason,
+        )

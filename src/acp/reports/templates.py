@@ -66,7 +66,8 @@ def render_report(
         f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}"
     )
     lines.append(
-        f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped"
+        f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, "
+        f"{len(summary['skipped'])} skipped"
     )
     if repair_history:
         lines.append(f"- **Repair attempts:** {len(repair_history)}")
@@ -91,17 +92,20 @@ def render_report(
             lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
         else:
             lines.append(
-                f"| Validation commands ran | ✅ passed | {gr.validation_commands_ran} commands ran |"
+                f"| Validation commands ran | ✅ passed | "
+                f"{gr.validation_commands_ran} commands ran |"
             )
 
         if gr.validation_commands_failed > 0:
             passed = gr.validation_commands_ran - gr.validation_commands_failed
             lines.append(
-                f"| Validation commands passed | ❌ failed | {passed}/{gr.validation_commands_ran} passed |"
+                f"| Validation commands passed | ❌ failed | "
+                f"{passed}/{gr.validation_commands_ran} passed |"
             )
         elif gr.validation_commands_ran > 0:
             lines.append(
-                f"| Validation commands passed | ✅ passed | {gr.validation_commands_ran}/{gr.validation_commands_ran} passed |"
+                f"| Validation commands passed | ✅ passed | "
+                f"{gr.validation_commands_ran}/{gr.validation_commands_ran} passed |"
             )
         else:
             lines.append("| Validation commands passed | 🔶 needs review | n/a |")
@@ -128,8 +132,8 @@ def render_report(
         if gr.reasons:
             lines.append("")
             lines.append("**Gate reasons:**")
-            for r in gr.reasons:
-                lines.append(f"- {r}")
+            for reason in gr.reasons:
+                lines.append(f"- {reason}")
     else:
         # Fallback: render from raw data.
         if agent_result is None:
@@ -150,11 +154,13 @@ def render_report(
         failed_cmds = [r for r in non_skipped if not r.passed]
         if failed_cmds:
             lines.append(
-                f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |"
+                f"| Validation commands passed | ❌ failed | "
+                f"{len(failed_cmds)}/{len(non_skipped)} passed |"
             )
         elif non_skipped:
             lines.append(
-                f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |"
+                f"| Validation commands passed | ✅ passed | "
+                f"{len(non_skipped)}/{len(non_skipped)} passed |"
             )
         else:
             lines.append("| Validation commands passed | 🔶 needs review | n/a |")
@@ -241,10 +247,12 @@ def render_report(
         lines.append("This task **may** become a memory candidate once approved.")
         lines.append("")
         lines.append(
-            "- All gates passed. Review the vault note and set `approved: true` to enable memory promotion."
+            "- All gates passed. Review the vault note and set `approved: true` "
+            "to enable memory promotion."
         )
         lines.append(
-            "- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria."
+            "- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) "
+            "for eligibility criteria."
         )
     else:
         lines.append(
@@ -262,7 +270,8 @@ def render_report(
         if review.hard_block:
             lines.append("- **Hard block:** active -- must be resolved before promotion")
         lines.append(
-            f"- **Risk:** {review.risk.value} -- see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)"
+            f"- **Risk:** {review.risk.value} -- see "
+            "[memory-promotion-rules](vault/rules/memory-promotion-rules.md)"
         )
     lines.append("")
 
@@ -316,7 +325,8 @@ def render_report(
         for i, evt in enumerate(events):
             short_hash = evt.hash[:12] if evt.hash else "—"
             lines.append(
-                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | {evt.timestamp} | `{short_hash}` |"
+                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | "
+                f"{evt.timestamp} | `{short_hash}` |"
             )
         lines.append("")
         lines.append(
@@ -335,7 +345,7 @@ def _status_word(status: TaskStatus) -> str:
         return "\u274c failed"
     if status == TaskStatus.NEEDS_REVIEW:
         return "\U0001f536 needs review"
-    return status.value
+    return str(status.value)
 
 
 def render_failure_report(
@@ -395,7 +405,8 @@ def render_failure_report(
         for i, evt in enumerate(events):
             short_hash = evt.hash[:12] if evt.hash else "—"
             lines.append(
-                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | {evt.timestamp} | `{short_hash}` |"
+                f"| {i + 1} | `{evt.event_id}` | `{evt.type.value}` | "
+                f"{evt.timestamp} | `{short_hash}` |"
             )
         lines.append("")
 

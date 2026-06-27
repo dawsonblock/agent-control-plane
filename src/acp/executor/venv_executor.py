@@ -25,8 +25,10 @@ Configuration (ExecutorSection):
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -35,6 +37,11 @@ from acp.errors import AgentConfigError
 from acp.models import AgentResult
 
 logger = logging.getLogger(__name__)
+
+# Grace period (seconds) between SIGTERM and SIGKILL when stopping a
+# runaway agent process. Gives the agent a chance to clean up before
+# force-killing.
+_SIGTERM_GRACE_SECONDS = 5
 
 
 class VenvNotInstalledError(Exception):
@@ -58,6 +65,7 @@ class VenvExecutor:
             "python_version": self._detect_python_version(),
             "isolated": "true",
         }
+        self._proc: subprocess.Popen[str] | None = None
 
     @property
     def backend_name(self) -> str:
@@ -157,26 +165,63 @@ class VenvExecutor:
 
         try:
             prompt_content = prompt_path.read_text()
-            proc = subprocess.run(
-                cmd,
-                input=prompt_content,
-                cwd=str(repo_path),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
+        except OSError as exc:
+            return self._error_result(
+                stdout_path, stderr_path, 127, "", f"venv: cannot read prompt: {exc}"
             )
-            exit_code = proc.returncode
-            out, err = proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired:
-            exit_code = 124
-            out, err = "", f"venv: agent timed out after {timeout_seconds}s"
-        except FileNotFoundError as exc:
-            exit_code = 127
-            out, err = "", f"venv: uv not found: {exc}"
 
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(repo_path),
+                text=True,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            return self._error_result(
+                stdout_path, stderr_path, 127, "", f"venv: uv not found: {exc}"
+            )
+
+        try:
+            out, err = self._proc.communicate(input=prompt_content, timeout=timeout_seconds)
+            exit_code = self._proc.returncode
+        except subprocess.TimeoutExpired:
+            self.stop()
+            # Drain any partial output after termination.
+            try:
+                out, err = self._proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                out, err = "", f"venv: agent timed out after {timeout_seconds}s"
+            else:
+                err = (err or "") + f"\nvenv: agent timed out after {timeout_seconds}s"
+            exit_code = 124
+        finally:
+            self._proc = None
+
+        stdout_path.write_text(out or "")
+        stderr_path.write_text(err or "")
+
+        return AgentResult(
+            agent_name=f"venv:{self.config.agent}",
+            exit_code=exit_code,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+
+    def _error_result(
+        self,
+        stdout_path: Path,
+        stderr_path: Path,
+        exit_code: int,
+        out: str,
+        err: str,
+    ) -> AgentResult:
+        """Write captured output and return an AgentResult for error cases."""
         stdout_path.write_text(out)
         stderr_path.write_text(err)
-
         return AgentResult(
             agent_name=f"venv:{self.config.agent}",
             exit_code=exit_code,
@@ -213,9 +258,44 @@ class VenvExecutor:
     # Cleanup (no-op — uv venvs are ephemeral)
     # ------------------------------------------------------------------ #
 
-    def stop(self) -> None:
-        """Stop the agent. No-op for venv (subprocess.run is blocking)."""
-        pass
+    def stop(self) -> bool:
+        """Stop the running agent process.
+
+        Sends SIGTERM for a graceful shutdown, then escalates to SIGKILL
+        after a grace period if the process hasn't exited. Returns True
+        if the process was stopped (or was already gone), False if it
+        couldn't be terminated.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return True
+
+        # Send SIGTERM to the process group so child processes also terminate.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                return True
+
+        # Wait for the grace period, then escalate to SIGKILL.
+        try:
+            proc.wait(timeout=_SIGTERM_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                logger.warning("venv: process %d did not exit after SIGKILL", proc.pid)
+                return False
+        return True
 
     def cleanup(self) -> None:
         """Clean up resources. No-op for venv (ephemeral venvs are GC'd by uv)."""

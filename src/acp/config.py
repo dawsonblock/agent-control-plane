@@ -484,7 +484,9 @@ class EvidenceSection(BaseModel):
       over its hash, proving authenticity in addition to integrity. The key
       file must contain exactly 32 raw bytes (not PEM). Generate with::
 
-          python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; Ed25519PrivateKey.generate().private_bytes_raw()" > key.bin
+          python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 \\
+          import Ed25519PrivateKey; Ed25519PrivateKey.generate() \\
+          .private_bytes_raw()" > key.bin
 
     - ``durable_store``: path to a SQLite database file. When set, events
       are dual-written to both the JSONL log (canonical source) and the
@@ -545,6 +547,131 @@ class EvidenceSection(BaseModel):
         return self
 
 
+class ApiSection(BaseModel):
+    """HTTP API server settings (v0.7.3+, Phase 2.3).
+
+    Controls the CORS and authentication behavior of the FastAPI server
+    (``acp serve``). By default, CORS allows only localhost dev origins.
+    In production, operators should set ``cors_origins`` to the exact
+    origins that need access, or set ``cors_enabled: false`` to disable
+    CORS entirely (when the UI is served from the same origin).
+
+    - ``cors_origins``: list of allowed origin URLs. When empty (default),
+      uses the built-in dev origins (localhost:5173, localhost:3000).
+      Set to specific origins in production to restrict cross-origin
+      access. Example: ``["https://acp.internal.corp"]``.
+    - ``cors_enabled``: when False, CORS middleware is not added at all.
+      Use this when the UI is served from the same origin as the API
+      (production deployment via ``/ui/`` static files).
+    """
+
+    cors_origins: list[str] = Field(default_factory=list)
+    cors_enabled: bool = True
+
+
+class StreamingSection(BaseModel):
+    """Mid-stream sentinel settings (v0.7.3+).
+
+    When ``enabled``, the CLIAgent switches from blocking ``subprocess.run``
+    to an async streaming execution path. Each line of agent stdout is fed
+    to a :class:`~acp.streaming.midstream.StreamSentinel` that runs real-time
+    safety checks *before* the agent finishes:
+
+    1. **Kill-switch (secret detection)**: If a known credential pattern
+       (AWS key, GitHub PAT, private key block, etc.) appears in the agent's
+       output stream, the agent process is killed immediately and a
+       ``stream.aborted`` event is written to the hash-chained event log.
+       This closes the risk window between agent start and post-run review.
+
+    2. **Strange-loop detection**: If the agent's output becomes stuck in a
+       near-duplicate cycle (detected via token n-gram Jaccard similarity),
+       the process is killed and a ``stream.aborted`` event is written.
+       This catches attractor/hallucination loops without waiting for timeout.
+
+    3. **Dangerous-path detection**: If the agent's output matches any
+       configured dangerous-path patterns (e.g., modifying ``policy.json``,
+       ``.env``, ``IAM`` files), the process is killed.
+
+    All event writes from the sentinel are serialized via an ``asyncio.Lock``
+    to preserve the hash-chain invariant — the :class:`EventWriter` is
+    thread-unsafe by design, and the sentinel is the sole writer during the
+    stream (the graph node writes ``agent.started`` before and
+    ``agent.finished`` after).
+
+    - ``enabled``: when True, use the streaming execution path. Default
+      False — must be explicitly opted in. When False, the existing
+      blocking ``subprocess.run`` path is used unchanged.
+
+    - ``secret_detection``: when True (default), scan each chunk for known
+      credential patterns. Uses the same provider patterns as the post-run
+      :func:`~acp.review.secret_scanner.detect_hard_block_secrets` but
+      adapted for raw text streams (no ``+``-prefix diff-line requirement).
+
+    - ``strange_loop_detection``: when True (default), track token n-gram
+      similarity across a rolling window of recent chunks. If the agent
+      repeats near-identical output, abort.
+
+    - ``strange_loop_threshold``: the repetition score at which the
+      strange-loop detector fires (default 8.0). Each near-duplicate chunk
+      adds to the score; each unique chunk decays it. Higher = more tolerant.
+
+    - ``strange_loop_window``: number of recent chunks to keep in the
+      rolling similarity window (default 10).
+
+    - ``strange_loop_similarity``: Jaccard similarity threshold (0.0–1.0)
+      above which two chunks are considered "near-duplicate" (default 0.65).
+      At 1.0, only exact token-set matches count.
+
+    - ``dangerous_path_patterns``: list of regex patterns. If any pattern
+      matches a chunk, the agent is killed immediately. Empty by default —
+      operators configure repo-specific patterns (e.g.,
+      ``r"rm\\s+-rf\\s+/"`` or ``r"policy\\.json"``).
+    """
+
+    enabled: bool = False
+    secret_detection: bool = True
+    strange_loop_detection: bool = True
+    strange_loop_threshold: float = 8.0
+    strange_loop_window: int = 10
+    strange_loop_similarity: float = 0.65
+    dangerous_path_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("strange_loop_threshold")
+    @classmethod
+    def _validate_threshold(cls, v: float) -> float:
+        if v <= 0 or v > 100:
+            raise ValueError("streaming.strange_loop_threshold must be between 0 and 100")
+        return v
+
+    @field_validator("strange_loop_window")
+    @classmethod
+    def _validate_window(cls, v: int) -> int:
+        if v < 2 or v > 100:
+            raise ValueError("streaming.strange_loop_window must be between 2 and 100")
+        return v
+
+    @field_validator("strange_loop_similarity")
+    @classmethod
+    def _validate_similarity(cls, v: float) -> float:
+        if v <= 0.0 or v > 1.0:
+            raise ValueError("streaming.strange_loop_similarity must be between 0.0 and 1.0")
+        return v
+
+    @field_validator("dangerous_path_patterns")
+    @classmethod
+    def _validate_dangerous_patterns(cls, v: list[str]) -> list[str]:
+        import re
+
+        for pattern in v:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"streaming.dangerous_path_patterns: invalid regex '{pattern}': {exc}"
+                ) from exc
+        return v
+
+
 # --------------------------------------------------------------------------- #
 # Top-level
 # --------------------------------------------------------------------------- #
@@ -566,6 +693,8 @@ class RepoConfig(BaseModel):
     mission: MissionSection = Field(default_factory=MissionSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
     reranking: RerankingSection = Field(default_factory=RerankingSection)
+    api: ApiSection = Field(default_factory=ApiSection)
+    streaming: StreamingSection = Field(default_factory=StreamingSection)
 
     # Path the config was loaded from; convenient for messages + events.
     source_path: Path | None = None

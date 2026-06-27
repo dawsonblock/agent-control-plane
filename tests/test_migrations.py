@@ -209,7 +209,8 @@ def test_migration_preserves_data(tmp_path: Path):
 
     # Insert an event at v1 schema (no signature_algorithm column yet).
     conn.execute(
-        "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
+        "INSERT INTO events (task_id, event_id, type, timestamp, payload, "
+        "prev_hash, hash, signature) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "task_001",

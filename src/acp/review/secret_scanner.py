@@ -23,12 +23,15 @@ when TruffleHog is not available.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # --- known credential prefixes / shapes ------------------------------------ #
 # Each entry: (label, compiled regex). Matched against added lines.
@@ -288,7 +291,7 @@ def scan_diff(
     worktree_path: Path | None = None,
     use_trufflehog: bool = True,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
-) -> list[SecretFinding]:
+) -> tuple[list[SecretFinding], dict[str, str]]:
     """Scan a diff for secrets, using TruffleHog if available.
 
     This is the v0.5.14 entry point for secret scanning. It uses
@@ -304,23 +307,65 @@ def scan_diff(
     (name, pattern) pair is checked in addition to the built-in patterns.
     Custom matches are tagged with kind ``custom:<name>`` and are
     included in hard-block detection.
+
+    v0.7.3 (Phase 2.4): Returns a tuple ``(findings, scan_info)`` where
+    ``scan_info`` is a dict with ``"scanner"`` (``"trufflehog+regex"``
+    or ``"regex_only"``) and ``"degraded"`` (``"true"`` if TruffleHog
+    was expected but not installed, ``"false"`` otherwise). This lets
+    the review surface degradation in the report and event log.
+
+    Backwards compatibility: callers that expect only a list will get a
+    tuple — use ``scan_diff_compat()`` for the old list-only return.
     """
     # Always run the regex scanner — it catches patterns TruffleHog might
     # miss (e.g., private key blocks that TruffleHog doesn't verify).
     findings = scan_patch(patch, custom_regexes=custom_regexes)
 
+    degraded = "false"
+    scanner = "regex_only"
+
     # If TruffleHog is available and a worktree path is provided, run it
     # for verified detection. Merge any new findings.
-    if use_trufflehog and worktree_path is not None and trufflehog_installed():
-        trufflehog_findings = scan_with_trufflehog(worktree_path)
-        # Dedupe by (kind, line_no) — a finding from both scanners should
-        # only appear once. Prefer the TruffleHog finding (verified).
-        existing_keys = {(f.kind, f.line_no) for f in findings}
-        for tf in trufflehog_findings:
-            key = (tf.kind, tf.line_no)
-            if key not in existing_keys:
-                findings.append(tf)
+    if use_trufflehog and worktree_path is not None:
+        if trufflehog_installed():
+            scanner = "trufflehog+regex"
+            trufflehog_findings = scan_with_trufflehog(worktree_path)
+            # Dedupe by (kind, line_no) — a finding from both scanners
+            # should only appear once. Prefer the TruffleHog finding.
+            existing_keys = {(f.kind, f.line_no) for f in findings}
+            for tf in trufflehog_findings:
+                key = (tf.kind, tf.line_no)
+                if key not in existing_keys:
+                    findings.append(tf)
+        else:
+            # TruffleHog was requested but is not installed — surface
+            # this as a degradation so the operator knows the scan is
+            # less thorough than configured.
+            degraded = "true"
+            logger.warning(
+                "review.use_trufflehog=true but trufflehog is not installed — "
+                "falling back to regex-only secret scanning. "
+                "Install TruffleHog: https://github.com/trufflesecurity/trufflehog"
+            )
 
+    scan_info = {"scanner": scanner, "degraded": degraded}
+    return findings, scan_info
+
+
+def scan_diff_compat(
+    patch: str,
+    *,
+    worktree_path: Path | None = None,
+    use_trufflehog: bool = True,
+    custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+) -> list[SecretFinding]:
+    """Backwards-compatible wrapper that returns only findings (no info dict)."""
+    findings, _ = scan_diff(
+        patch,
+        worktree_path=worktree_path,
+        use_trufflehog=use_trufflehog,
+        custom_regexes=custom_regexes,
+    )
     return findings
 
 

@@ -29,7 +29,7 @@ import asyncio
 import logging
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from acp.models import Task
 from acp.vault.frontmatter import Frontmatter, parse_frontmatter
@@ -339,7 +339,7 @@ def search_graphiti_facts(
         finally:
             await client.close()
 
-    return _run_async(_search())
+    return cast(list[dict[str, Any]], _run_async(_search()))
 
 
 def get_temporal_relationships(
@@ -388,7 +388,7 @@ def get_temporal_relationships(
         finally:
             await client.close()
 
-    return _run_async(_get_relationships())
+    return cast(list[dict[str, Any]], _run_async(_get_relationships()))
 
 
 # --------------------------------------------------------------------------- #
@@ -523,7 +523,7 @@ def find_superseded_nodes(
         finally:
             await client.close()
 
-    return _run_async(_find())
+    return cast(list[dict[str, Any]], _run_async(_find()))
 
 
 def prune_superseded_nodes(

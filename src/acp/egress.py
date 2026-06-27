@@ -243,4 +243,4 @@ def has_egress_violations(
     except (json.JSONDecodeError, OSError):
         return False
 
-    return data.get("summary", {}).get("violation_count", 0) > 0
+    return bool(data.get("summary", {}).get("violation_count", 0) > 0)
