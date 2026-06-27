@@ -370,7 +370,7 @@ class TestSecretVerifier:
             assert SecretVerifier().verify("http://x/verify", "sekret") == "unverified"
 
     def test_verify_request_shape_post_json_timeout(self):
-        """The request is POST with a JSON secret body, JSON content-type, and the configured timeout."""
+        """Request is POST with JSON secret body, JSON content-type, configured timeout."""
         from acp.review.secret_scanner import SecretVerifier
 
         captured: dict = {}
@@ -397,7 +397,6 @@ class TestSecretVerifier:
         assert kind == "custom:foo"
 
     def test_verify_finding_verified_keeps_kind(self):
-        from acp.review.secret_scanner import SecretVerifier
 
         v = _FakeVerifier(status="verified")
         # Use the real verify_finding via _FakeVerifier's shim.
@@ -406,7 +405,6 @@ class TestSecretVerifier:
         assert kind == "custom:foo"
 
     def test_verify_finding_unverified_suffixes_kind(self):
-        from acp.review.secret_scanner import SecretVerifier
 
         v = _FakeVerifier(status="unverified")
         status, kind = v.verify_finding("custom:foo", "s", verify_map={"custom:foo": "http://x"})

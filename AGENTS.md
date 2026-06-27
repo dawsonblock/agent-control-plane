@@ -56,13 +56,15 @@ bash scripts/validate.sh   # compileall + ruff + ruff format + mypy + pytest --c
 - `acp serve` — start FastAPI HTTP API server
 - `acp cleanup` — clean up run artifacts
 
-## Architecture (v0.7.2)
+## Architecture (v0.9.0)
 
 ### SQLite Migrations
 The durable stores (events + tasks) use a forward-rolling migration engine
-(`acp/evidence/migrations.py`) via `PRAGMA user_version`. Migrations are
-immutable lists of SQL strings — never modify a published migration, only
-append new ones. The JSONL log remains the canonical source of truth;
+(`acp/evidence/migrations.py`) via a per-store `schema_versions` table
+(not `PRAGMA user_version`, which is a single integer per database and
+can't track per-store versions independently). Migrations are immutable
+lists of SQL strings — never modify a published migration, only append
+new ones. The JSONL log remains the canonical source of truth;
 `rebuild_from_jsonl` is a fallback for catastrophic corruption only.
 
 ### Hermetic Agent Isolation
@@ -109,3 +111,26 @@ carries `aborted_by_sentinel=True` and `sentinel_abort_reason` for the
 
 Default: disabled (`streaming.enabled: false`). Enable per-repo when using
 the `custom` agent (CLIAgent). Has no effect on `shell` or `docker_sbx`.
+
+### SQLite-Primary Event Writes (v0.9.0)
+When `evidence.durable_mode="required"`, regular run events (not just
+lifecycle events) use SQLite-first write ordering: the event is built,
+written to the SQLite durable store (authoritative), then appended to
+`events.jsonl` (best-effort mirror). If the SQLite write fails, the event
+is nowhere and the run fails cleanly — no orphan JSONL events. If the
+JSONL append fails after SQLite succeeds, the event is durable in SQLite
+and the JSONL can be rebuilt on startup via
+`DurableEventStore.rebuild_jsonl_from_store()`.
+
+### macOS Seatbelt Executor (v0.9.0)
+`executor.backend="seatbelt"` runs the agent inside a macOS `sandbox-exec`
+kernel sandbox — lightweight OS-level filesystem and network restrictions
+without a container runtime. The sandbox profile is generated dynamically
+based on the worktree path and `network_policy`, or a custom profile can
+be provided via `executor.seatbelt_profile_path`. macOS-only.
+
+### Mission-Aware Memory (v0.9.0)
+Mission context (goal, description, step index) is persisted on the
+durable `Task` model and threaded into Graphiti episode text, making
+memory extraction mission-aware. On `mission.completed`, a best-effort
+mission rollup is performed (gated by `promote_reports_by_default`).

@@ -374,6 +374,10 @@ class ExecutorSection(BaseModel):
     - ``firecracker_rootfs_path``: path to the Firecracker root filesystem
       image (ext4) used when ``backend="firecracker"``. Required for the
       Firecracker microVM backend. Ignored for other backends.
+    - ``seatbelt_profile_path``: path to a custom macOS sandbox-exec profile
+      (v0.9.0 Step 4) used when ``backend="seatbelt"``. When empty (default),
+      a built-in profile is generated dynamically based on the worktree path
+      and ``network_policy``. Ignored for other backends.
     """
 
     backend: str = "venv"
@@ -386,11 +390,20 @@ class ExecutorSection(BaseModel):
     gvisor_image: str = "ubuntu:22.04"
     firecracker_kernel_path: str = ""
     firecracker_rootfs_path: str = ""
+    seatbelt_profile_path: str = ""
 
     @field_validator("backend")
     @classmethod
     def _validate_backend(cls, v: str) -> str:
-        allowed = ("worktree", "docker_sbx", "gvisor", "openhands", "venv", "firecracker")
+        allowed = (
+            "worktree",
+            "docker_sbx",
+            "gvisor",
+            "openhands",
+            "venv",
+            "firecracker",
+            "seatbelt",
+        )
         if v not in allowed:
             raise ValueError(
                 f"executor.backend='{v}' is not valid. Must be one of: {', '.join(allowed)}."

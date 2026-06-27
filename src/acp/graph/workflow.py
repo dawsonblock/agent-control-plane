@@ -290,6 +290,7 @@ def build_workflow(
     events: EventWriter,
     agent_factory: Callable[[Any], Any] | None = None,
     checkpoint_db_path: Path | None = None,
+    durable_event_store: Any = None,
 ) -> Any:
     """Build + compile the ACP workflow graph.
 
@@ -314,6 +315,7 @@ def build_workflow(
         store=store,
         events=events,
         agent_factory=agent_factory or _default_build_agent,
+        durable_event_store=durable_event_store,
     )
 
     g = StateGraph(ACPState)
@@ -580,13 +582,33 @@ async def run_workflow_async(
             original_write = events.write
 
             def _dual_write(type: EventType, payload: dict[str, Any] | None = None) -> Event:
-                evt = original_write(type, payload)
-                try:
-                    durable_store.append(evt)
-                except Exception as exc:  # noqa: BLE001
-                    durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
-                    if durable_mode == "required":
-                        raise
+                if durable_mode == "required":
+                    # v0.9.0 (Step 1): SQLite-first ordering for crash safety.
+                    # Build the event, write to SQLite (authoritative), then
+                    # append to JSONL (best-effort mirror). If the SQLite
+                    # write fails, the event is nowhere — raise so the run
+                    # fails cleanly. If the JSONL append fails after SQLite
+                    # succeeds, the event is durable in SQLite and the JSONL
+                    # can be rebuilt via rebuild_jsonl_from_store on startup.
+                    evt = events.build_event(type, payload)
+                    durable_store.append(evt)  # raises on failure
+                    try:
+                        events.append_event(evt)
+                    except Exception as exc:  # noqa: BLE001
+                        durable_store_failures.append(
+                            f"{evt.event_id} ({evt.type.value}): "
+                            f"JSONL append failed after SQLite commit — {exc}"
+                        )
+                        events._count += 1
+                        events._prev_hash = evt.hash
+                else:
+                    # Best-effort mode: JSONL first (backwards compatible),
+                    # then SQLite. Failures are warnings, not fatal.
+                    evt = original_write(type, payload)
+                    try:
+                        durable_store.append(evt)
+                    except Exception as exc:  # noqa: BLE001
+                        durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
                 return evt
 
             events.write = _dual_write  # type: ignore[method-assign]
@@ -609,6 +631,7 @@ async def run_workflow_async(
         events=events,
         agent_factory=agent_factory,
         checkpoint_db_path=checkpoint_db_path,
+        durable_event_store=durable_store,
     )
 
     state: dict[str, Any] = {

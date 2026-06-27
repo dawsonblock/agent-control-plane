@@ -3,15 +3,17 @@
 The executor determines HOW the coding agent runs — in a git worktree
 (default), inside a Docker Sandbox microVM (``docker_sbx``), via
 OpenHands' Docker runtime (``openhands``), inside a gVisor-sandboxed
-container (``gvisor``), or inside a Firecracker microVM
-(``firecracker``). The agent determines WHICH agent runs (Claude
-Code, Codex, etc.). These are separate concerns: the executor provides
-the isolation boundary; the agent provides the coding capability.
+container (``gvisor``), inside a Firecracker microVM
+(``firecracker``), or inside a macOS seatbelt sandbox (``seatbelt``).
+The agent determines WHICH agent runs (Claude Code, Codex, etc.). These
+are separate concerns: the executor provides the isolation boundary;
+the agent provides the coding capability.
 
 v0.5.13: ``worktree`` (default) and ``docker_sbx`` backends.
 v0.7.0 (Phase 2.1): ``openhands`` backend + :class:`Executor` protocol.
 v0.7.1 (Phase 3.1): ``gvisor`` backend — gVisor (runsc) OS-level sandbox.
 v0.7.6: ``firecracker`` backend — Firecracker microVM hardware-level isolation.
+v0.9.0 (Step 4): ``seatbelt`` backend — macOS sandbox-exec OS-level sandbox.
 
 See:
   - ``worktree`` backend: traditional git worktree isolation (default)
@@ -19,6 +21,7 @@ See:
   - ``openhands`` backend: OpenHands headless mode with Docker runtime
   - ``gvisor`` backend: gVisor (runsc) syscall-level container isolation
   - ``firecracker`` backend: Firecracker microVM hardware-level isolation
+  - ``seatbelt`` backend: macOS sandbox-exec kernel-level filesystem/network sandbox
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from acp.executor.gvisor import GvisorExecutor
 from acp.executor.openhands import OpenHandsExecutor
 from acp.executor.protocol import Executor
 from acp.executor.sbx import SbxExecutor
+from acp.executor.seatbelt import SeatbeltExecutor
 from acp.executor.venv_executor import VenvExecutor
 
 __all__ = [
@@ -37,4 +41,5 @@ __all__ = [
     "GvisorExecutor",
     "FirecrackerExecutor",
     "VenvExecutor",
+    "SeatbeltExecutor",
 ]

@@ -62,11 +62,17 @@ class NodeContext:
     ``agent_factory`` is injectable so tests can substitute a controllable
     agent (e.g. one that fixes the failure on a repair attempt). Defaults to
     the registry's ``build_agent``.
+
+    ``durable_event_store`` (v0.9.0 Step 1) is the optional SQLite event
+    store. When set, ``create_task`` attempts to rebuild ``events.jsonl``
+    from SQLite on startup if the JSONL is missing or empty — the crash
+    recovery path for SQLite-primary mode.
     """
 
     store: TaskStore
     events: EventWriter
     agent_factory: Callable[[RepoConfig], AgentProtocol] = _default_build_agent
+    durable_event_store: Any = None  # DurableEventStore | None
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +262,7 @@ async def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     # The EventWriter was constructed with a placeholder id; point it at the
     # real run dir now that we know the task id.
     ctx.events.relocate(task_id, ctx.store.run_dir(task_id))
+
     task = ctx.store.create(
         task_id=task_id,
         repo_name=cfg.repo.name,
@@ -271,6 +278,35 @@ async def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         mission_description=state.get("mission_description", ""),
         mission_step_index=state.get("mission_step_index", 0),
     )
+
+    # v0.9.0 (Step 1): Startup rebuild-from-SQLite. If the JSONL log is
+    # missing or empty (crash before first write, or corrupt file), but the
+    # durable SQLite store has events for this task, rebuild the JSONL from
+    # SQLite. This is the crash-recovery path for SQLite-primary mode:
+    # SQLite is authoritative, JSONL is a mirror. Must run AFTER
+    # store.create() (which creates the run_dir) and BEFORE the first
+    # events.write() so the new event appends to the rebuilt chain.
+    if ctx.durable_event_store is not None and ctx.events.count == 0:
+        try:
+            sqlite_count = ctx.durable_event_store.get_event_count(task_id)
+            if sqlite_count > 0:
+                rebuilt = ctx.durable_event_store.rebuild_jsonl_from_store(task_id, ctx.events.path)
+                if rebuilt > 0:
+                    # Re-relocate to pick up the rebuilt JSONL (recompute
+                    # count + prev_hash from the rebuilt file).
+                    ctx.events.relocate(task_id, ctx.store.run_dir(task_id))
+                    logger.info(
+                        "rebuilt events.jsonl from SQLite for task %s (%d events)",
+                        task_id,
+                        rebuilt,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "startup rebuild-from-SQLite failed for task %s: %s — continuing with empty JSONL",
+                task_id,
+                exc,
+            )
+
     ctx.events.write(EventType.TASK_CREATED, {"request": state["user_request"]})
     return {
         "task_id": task_id,
@@ -880,10 +916,63 @@ async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
         agent_result = await executor.start(
             task_id=state["task_id"],
             prompt_path=state["prompt_path"],
-            repo_path=state["repo_path"],
+            repo_path=state["worktree_path"],
             artifact_dir=state["artifacts_dir"],
             timeout_seconds=cfg.agent.timeout_seconds,
         )
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
+    # --- seatbelt backend: macOS sandbox-exec OS-level sandbox ----------- #
+    # v0.9.0 (Step 4): Runs the agent inside a macOS seatbelt sandbox.
+    # Provides kernel-enforced filesystem and network restrictions without
+    # a container runtime. macOS-only.
+    if cfg.executor.backend == "seatbelt":
+        from acp.executor.seatbelt import SeatbeltExecutor, SeatbeltNotAvailableError
+
+        executor = SeatbeltExecutor(cfg.executor)
+
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"seatbelt:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "environment": executor.get_environment_info(),
+            },
+        )
+        try:
+            agent_result = await executor.start(
+                task_id=state["task_id"],
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except SeatbeltNotAvailableError as exc:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "reason": "seatbelt not available", "detail": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.FAILED,
+                "error": str(exc),
+            }
         ctx.events.write(
             EventType.AGENT_FINISHED,
             {

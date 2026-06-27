@@ -52,6 +52,7 @@ tasks without collision.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -204,6 +205,7 @@ class DurableEventStore:
         since: str | None = None,
         until: str | None = None,
         limit: int = 1000,
+        offset: int = 0,
     ) -> list[Event]:
         """Query events by task, type, and/or time range.
 
@@ -229,10 +231,12 @@ class DurableEventStore:
             params.append(until)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
+        params.append(offset)
         rows = self._conn.execute(
             f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, "
             f"signature_algorithm "
-            f"FROM events{where} ORDER BY task_id ASC, event_id ASC LIMIT ?",
+            f"FROM events{where} ORDER BY task_id ASC, event_id ASC "
+            f"LIMIT ? OFFSET ?",
             params,
         ).fetchall()
         return [_row_to_event(row) for row in rows]
@@ -269,6 +273,57 @@ class DurableEventStore:
         ]
         self.append_batch(events)
         return len(events)
+
+    def rebuild_jsonl_from_store(
+        self,
+        task_id: str,
+        jsonl_path: Path | str,
+    ) -> int:
+        """Rebuild events.jsonl for a task from the SQLite store (v0.9.0 Step 1).
+
+        This is the inverse of :meth:`rebuild_from_jsonl`: it reads all
+        events for ``task_id`` from SQLite and writes them to ``jsonl_path``
+        in log order. Used on startup when ``events.jsonl`` is missing or
+        corrupt but the SQLite durable store has the events.
+
+        The file is written atomically: events are collected, written to a
+        temp file, fsync'd, then renamed to the target path. Returns the
+        number of events written.
+        """
+        if self._conn is None:
+            raise RuntimeError("DurableEventStore not initialized — call .init() first")
+        jsonl_path = Path(jsonl_path)
+
+        # Paginate to avoid truncation on tasks with many events.
+        page_size = 50000
+        all_events: list[Event] = []
+        offset = 0
+        while True:
+            page = self.query(
+                task_id=task_id, limit=page_size, offset=offset
+            )
+            if not page:
+                break
+            all_events.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        if not all_events:
+            return 0
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [evt.model_dump_json() + "\n" for evt in all_events]
+        tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
+        with tmp_path.open("wb") as f:
+            f.write("".join(lines).encode())
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(jsonl_path)
+        return len(all_events)
+
+    def get_event_count(self, task_id: str) -> int:
+        """Return the number of events for a task in the SQLite store."""
+        return self.count(task_id=task_id)
 
     def close(self) -> None:
         """Close the database connection."""
