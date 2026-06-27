@@ -5,14 +5,15 @@ A Tauri-based desktop wrapper for the Agent Control Plane.
 ## How it works
 
 The desktop app spawns `acp serve` as a background sidecar process on
-startup, then opens a WebView pointing to `http://localhost:8000/ui/`
-where the React dashboard is served. When the app window is closed,
-the sidecar process is killed.
+startup, waits for the server to be ready (polls `/health`), then opens
+a WebView pointing to `http://localhost:8000/ui/` where the React
+dashboard is served. When the app window is closed, the sidecar process
+is killed so no orphaned server processes remain.
 
 ## Prerequisites
 
 1. [Rust](https://rustup.rs/) (stable)
-2. [Tauri CLI](https://tauri.app/v1/guides/getting-started/setup):
+2. [Tauri CLI](https://tauri.app/v2/guides/getting-started/setup):
    ```bash
    cargo install tauri-cli --version "^2"
    ```
@@ -44,6 +45,53 @@ Windows, `.AppImage` on Linux) in `desktop/src-tauri/target/release/bundle/`.
 
 ## Configuration
 
-The sidecar is configured to use `configs/repos/example.repo.yaml` by
-default. To use a different config, edit `src/main.rs` and change the
-`--config` argument.
+The sidecar config path is determined in priority order:
+
+1. `--config <path>` CLI flag passed to the desktop app
+2. `ACP_CONFIG` environment variable
+3. Default: `configs/repos/example.repo.yaml`
+
+```bash
+# Use a custom config via env var
+ACP_CONFIG=configs/repos/my.repo.yaml cargo tauri dev
+
+# Or via CLI flag
+cargo tauri dev -- --config configs/repos/my.repo.yaml
+```
+
+## Auto-Update (v0.7.5)
+
+The app includes the Tauri updater plugin. When a new release is published
+to GitHub Releases with a `latest.json` manifest, the app will check for
+updates on startup and prompt the user to install.
+
+To enable signed updates, generate a keypair and set the `pubkey` in
+`tauri.conf.json`:
+
+```bash
+cargo tauri signer generate -w ~/.tauri/acp.key
+# Copy the public key into tauri.conf.json plugins.updater.pubkey
+# Set TAURI_SIGNING_PRIVATE_KEY env var when building releases
+```
+
+## Code Signing
+
+### macOS
+
+Set `APPLE_SIGNING_IDENTITY` env var and update `tauri.conf.json`:
+
+```json
+"macOS": {
+  "signingIdentity": "Developer ID Application: Your Name (XXXXXXXXXX)"
+}
+```
+
+### Windows
+
+Set `TAURI_SIGNING_PRIVATE_KEY` and update `tauri.conf.json`:
+
+```json
+"windows": {
+  "certificateThumbprint": "ABC123..."
+}
+```

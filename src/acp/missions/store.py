@@ -251,6 +251,35 @@ class MissionStore:
         )
         return mission
 
+    def abort(self, mission_id: str) -> Mission:
+        """Mark a mission as aborted and emit mission.aborted event.
+
+        v0.7.5: Added for API parity with the CLI. A mission can be
+        aborted at any time — remaining pending/running steps are marked
+        as failed.
+        """
+        mission = self.load(mission_id)
+        mission.status = MissionStatus.ABORTED
+        mission.completed_at = _utcnow_iso()
+        # Mark any non-terminal steps as failed.
+        for step in mission.steps:
+            if step.status not in ("completed", "failed"):
+                step.status = "failed"
+        self.save(mission)
+
+        events = EventWriter(mission_id, self.mission_dir(mission_id))
+        events.write(
+            EventType.MISSION_COMPLETED,
+            {
+                "mission_id": mission_id,
+                "aborted": True,
+                "step_count": len(mission.steps),
+                "completed_steps": sum(1 for s in mission.steps if s.status == "completed"),
+                "failed_steps": sum(1 for s in mission.steps if s.status == "failed"),
+            },
+        )
+        return mission
+
     # ------------------------------------------------------------------ #
     # Cross-task artifact sharing (Phase 5.2)
     # ------------------------------------------------------------------ #

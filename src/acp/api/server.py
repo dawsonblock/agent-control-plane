@@ -33,7 +33,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 except ImportError:
     raise ImportError("FastAPI is not installed. Install with: uv sync --extra api") from None
 
@@ -1024,6 +1024,32 @@ class MissionDetailResponse(BaseModel):
     completed_at: str
 
 
+class CreateMissionRequest(BaseModel):
+    """Request body for POST /missions."""
+
+    goal: str
+    repo_name: str
+    repo_path: str
+    base_branch: str = "main"
+    description: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AddStepRequest(BaseModel):
+    """Request body for POST /missions/{id}/steps."""
+
+    description: str
+
+
+class CreateMissionResponse(BaseModel):
+    mission_id: str
+    goal: str
+    status: str
+    repo_name: str
+    steps_total: int
+    created_at: str
+
+
 @app.get("/missions", response_model=list[MissionSummary])
 async def list_missions(
     missions_root: str = "data/missions",
@@ -1047,6 +1073,48 @@ async def list_missions(
     ]
 
 
+@app.post("/missions", response_model=CreateMissionResponse, status_code=201)
+async def create_mission(
+    request: CreateMissionRequest,
+    missions_root: str = "data/missions",
+) -> CreateMissionResponse:
+    """Create a new mission epic with optional initial steps.
+
+    v0.7.5: Enables creating missions from the dashboard UI without
+    needing the CLI. The mission is created with status ``created``
+    and a ``mission.created`` event is written to the event log.
+    """
+    from acp.missions.store import MissionStore
+
+    safe_missions_root = _validate_path_param(missions_root, "missions_root")
+    store = MissionStore(missions_dir=safe_missions_root)
+    mission_id = store.next_mission_id()
+
+    try:
+        mission = store.create(
+            mission_id=mission_id,
+            goal=request.goal,
+            repo_name=request.repo_name,
+            repo_path=Path(request.repo_path),
+            base_branch=request.base_branch,
+            description=request.description,
+            steps=request.steps,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return CreateMissionResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        status=mission.status.value,
+        repo_name=mission.repo_name,
+        steps_total=len(mission.steps),
+        created_at=mission.created_at,
+    )
+
+
 @app.get("/missions/{mission_id}", response_model=MissionDetailResponse)
 async def get_mission(
     mission_id: str,
@@ -1061,6 +1129,107 @@ async def get_mission(
     mission = store.load(mission_id)
     if mission is None:
         raise HTTPException(status_code=404, detail="Mission not found")
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/steps", response_model=MissionDetailResponse)
+async def add_mission_step(
+    mission_id: str,
+    request: AddStepRequest,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Add a step to an existing mission.
+
+    v0.7.5: Enables step management from the dashboard UI. The step is
+    appended to the end of the steps list with status ``pending``.
+    """
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.add_step(mission_id, request.description)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/complete", response_model=MissionDetailResponse)
+async def complete_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Mark a mission as completed.
+
+    All steps must be in a terminal state (completed or failed) before
+    the mission can be completed.
+    """
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.complete(mission_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/abort", response_model=MissionDetailResponse)
+async def abort_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Mark a mission as aborted."""
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.abort(mission_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return MissionDetailResponse(
         mission_id=mission.mission_id,
         goal=mission.goal,

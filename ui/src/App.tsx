@@ -5,6 +5,7 @@ import { RunForm } from "./RunForm";
 import { MemorySearch } from "./MemorySearch";
 import { MissionList } from "./MissionList";
 import { MissionDetail } from "./MissionDetail";
+import { MissionForm } from "./MissionForm";
 import { Skills } from "./Skills";
 import "./App.css";
 
@@ -21,6 +22,11 @@ function App() {
   const handleSubmitted = (taskId: string) => {
     refresh();
     setSelectedTask(taskId);
+  };
+
+  const handleMissionCreated = (missionId: string) => {
+    refresh();
+    setSelectedMission(missionId);
   };
 
   return (
@@ -78,6 +84,7 @@ function App() {
         {view === "missions" && (
           <>
             <div className="sidebar">
+              <MissionForm onCreated={handleMissionCreated} />
               <MissionList
                 onSelect={setSelectedMission}
                 selectedId={selectedMission}

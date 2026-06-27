@@ -333,3 +333,168 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .error { color: var(--red); }
 .success { color: var(--green); margin-top: 8px; font-size: 13px; }
+
+/* v0.7.5: Mission form and step management */
+.mission-form {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mission-form h3 {
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.form-group input,
+.form-group textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.form-group textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.step-number {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.step-row input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.step-remove {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--red);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.step-add {
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.step-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.form-actions {
+  margin-top: 12px;
+}
+
+.form-actions button {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.form-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Mission step add and lifecycle actions */
+.mission-step-add {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.mission-step-add h4 {
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+}
+
+.mission-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.btn-complete {
+  padding: 8px 16px;
+  background: var(--green);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-complete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-abort {
+  padding: 8px 16px;
+  background: var(--red);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-abort:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

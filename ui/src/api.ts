@@ -81,6 +81,24 @@ export interface MissionDetail {
   completed_at: string;
 }
 
+export interface CreateMissionRequest {
+  goal: string;
+  repo_name: string;
+  repo_path: string;
+  base_branch?: string;
+  description?: string;
+  steps?: { description: string }[];
+}
+
+export interface CreateMissionResponse {
+  mission_id: string;
+  goal: string;
+  status: string;
+  repo_name: string;
+  steps_total: number;
+  created_at: string;
+}
+
 export interface SkillSummary {
   name: string;
   purpose: string;
@@ -148,6 +166,28 @@ export const api = {
 
   getMission: (missionId: string, missionsRoot = "data/missions") =>
     fetchJSON<MissionDetail>(`/missions/${missionId}?missions_root=${encodeURIComponent(missionsRoot)}`),
+
+  createMission: (req: CreateMissionRequest, missionsRoot = "data/missions") =>
+    fetchJSON<CreateMissionResponse>(`/missions?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  addMissionStep: (missionId: string, description: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}/steps?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+      body: JSON.stringify({ description }),
+    }),
+
+  completeMission: (missionId: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}/complete?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+    }),
+
+  abortMission: (missionId: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}/abort?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+    }),
 
   listSkills: (skillsDir = "skills") =>
     fetchJSON<SkillSummary[]>(`/skills?skills_dir=${encodeURIComponent(skillsDir)}`),
