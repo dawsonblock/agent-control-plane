@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,9 +30,9 @@ from acp.config import (
     EvidenceSection,
     ExecutorSection,
     FederationServerConfig,
-    RerankingSection,
     RepoConfig,
     RepoSection,
+    RerankingSection,
     ReviewSection,
 )
 from acp.egress import (
@@ -46,7 +46,6 @@ from acp.federation.transport import (
     SSETransport,
 )
 from acp.review.secret_scanner import SecretFinding, detect_hard_block_secrets
-
 
 # --------------------------------------------------------------------------- #
 # 1. OpenHands executor — LLM_MODEL env var + --override-with-envs
@@ -66,9 +65,11 @@ def test_openhands_start_uses_env_var_not_model_flag(tmp_path):
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("test")
 
-    with patch.object(OpenHandsExecutor, "check_installed", return_value=True), \
-         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"), \
-         patch("subprocess.run", return_value=mock_result) as mock_run:
+    with (
+        patch.object(OpenHandsExecutor, "check_installed", return_value=True),
+        patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
+        patch("subprocess.run", return_value=mock_result) as mock_run,
+    ):
         executor.start(
             task_id="task_001",
             prompt_path=prompt_path,
@@ -103,9 +104,11 @@ def test_openhands_start_without_agent_no_override(tmp_path):
     mock_result.stdout = ""
     mock_result.stderr = ""
 
-    with patch.object(OpenHandsExecutor, "_validate", return_value=None), \
-         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"), \
-         patch("subprocess.run", return_value=mock_result) as mock_run:
+    with (
+        patch.object(OpenHandsExecutor, "_validate", return_value=None),
+        patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
+        patch("subprocess.run", return_value=mock_result) as mock_run,
+    ):
         executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
@@ -253,20 +256,14 @@ def test_sse_parser_handles_empty_data_line():
     # An empty data: line followed by a real one — the empty string
     # is part of the data but json.loads should skip it and find the
     # real payload in the next event.
-    raw = (
-        'data: {"jsonrpc": "2.0", "result": {"value": 42}}\n'
-        "\n"
-    )
+    raw = 'data: {"jsonrpc": "2.0", "result": {"value": 42}}\n\n'
     result = SSETransport._parse_sse_response(raw)
     assert result["result"]["value"] == 42
 
 
 def test_sse_parser_handles_crlf_line_endings():
     """SSE parser handles \\r\\n\\r\\n event delimiters."""
-    raw = (
-        'data: {"jsonrpc": "2.0", "result": {"ok": true}}\r\n'
-        '\r\n'
-    )
+    raw = 'data: {"jsonrpc": "2.0", "result": {"ok": true}}\r\n\r\n'
     result = SSETransport._parse_sse_response(raw)
     assert result == {"jsonrpc": "2.0", "result": {"ok": True}}
 
@@ -274,11 +271,7 @@ def test_sse_parser_handles_crlf_line_endings():
 def test_sse_parser_handles_multiple_data_lines():
     """SSE parser concatenates multiple data: lines with newlines."""
     # Multi-line data payload (JSON with embedded newline)
-    raw = (
-        'data: {"jsonrpc": "2.0",\n'
-        'data:  "result": {"ok": true}}\n'
-        '\n'
-    )
+    raw = 'data: {"jsonrpc": "2.0",\ndata:  "result": {"ok": true}}\n\n'
     result = SSETransport._parse_sse_response(raw)
     assert result["result"]["ok"] is True
 
@@ -286,11 +279,11 @@ def test_sse_parser_handles_multiple_data_lines():
 def test_sse_parser_ignores_event_id_retry_fields():
     """SSE parser ignores event:, id:, retry: fields."""
     raw = (
-        'event: message\n'
-        'id: 12345\n'
-        'retry: 5000\n'
+        "event: message\n"
+        "id: 12345\n"
+        "retry: 5000\n"
         'data: {"jsonrpc": "2.0", "result": {"ok": true}}\n'
-        '\n'
+        "\n"
     )
     result = SSETransport._parse_sse_response(raw)
     assert result["result"]["ok"] is True

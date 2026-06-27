@@ -41,7 +41,7 @@ Schema:
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +50,7 @@ from acp.models import Task, TaskStatus
 
 def _now_iso() -> str:
     """Current UTC time in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class DurableTaskStore:
@@ -283,7 +283,7 @@ class DurableTaskStore:
                 wt_path = task.worktree_path
                 if wt_path and Path(wt_path).is_dir():
                     try:
-                        remove_worktree(Path(wt_path))
+                        remove_worktree(task.repo_path, Path(wt_path))
                     except Exception:  # noqa: BLE001
                         pass  # best-effort cleanup
 
@@ -315,6 +315,7 @@ class DurableTaskStore:
         event and refuse to proceed with the affected tasks.
         """
         import logging
+
         logger = logging.getLogger(__name__)
 
         runs_root = Path(runs_root)
@@ -336,14 +337,17 @@ class DurableTaskStore:
             task_json_path = runs_root / task_id / "task.json"
             if not task_json_path.is_file():
                 # task.json missing but SQLite has it — that's a breach.
-                breaches.append({
-                    "task_id": task_id,
-                    "json_status": "(missing)",
-                    "sqlite_status": sqlite_status,
-                })
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": "(missing)",
+                        "sqlite_status": sqlite_status,
+                    }
+                )
                 logger.warning(
-                    "integrity breach: task %s — task.json missing, "
-                    "SQLite status=%s", task_id, sqlite_status,
+                    "integrity breach: task %s — task.json missing, SQLite status=%s",
+                    task_id,
+                    sqlite_status,
                 )
                 if on_breach is not None:
                     on_breach(task_id, "(missing)", sqlite_status)
@@ -353,28 +357,36 @@ class DurableTaskStore:
                 task = Task.model_validate_json(task_json_path.read_text())
                 json_status = task.status.value
             except Exception as exc:  # noqa: BLE001
-                breaches.append({
-                    "task_id": task_id,
-                    "json_status": f"(parse error: {exc})",
-                    "sqlite_status": sqlite_status,
-                })
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": f"(parse error: {exc})",
+                        "sqlite_status": sqlite_status,
+                    }
+                )
                 logger.warning(
-                    "integrity breach: task %s — task.json parse error: %s, "
-                    "SQLite status=%s", task_id, exc, sqlite_status,
+                    "integrity breach: task %s — task.json parse error: %s, SQLite status=%s",
+                    task_id,
+                    exc,
+                    sqlite_status,
                 )
                 if on_breach is not None:
                     on_breach(task_id, "(parse error)", sqlite_status)
                 continue
 
             if json_status != sqlite_status:
-                breaches.append({
-                    "task_id": task_id,
-                    "json_status": json_status,
-                    "sqlite_status": sqlite_status,
-                })
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": json_status,
+                        "sqlite_status": sqlite_status,
+                    }
+                )
                 logger.warning(
-                    "integrity breach: task %s — task.json status=%s, "
-                    "SQLite status=%s", task_id, json_status, sqlite_status,
+                    "integrity breach: task %s — task.json status=%s, SQLite status=%s",
+                    task_id,
+                    json_status,
+                    sqlite_status,
                 )
                 if on_breach is not None:
                     on_breach(task_id, json_status, sqlite_status)

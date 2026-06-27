@@ -43,9 +43,7 @@ def create_worktree(
     Returns ``(worktree_path, base_commit_sha)``.
     """
     if not is_clean(repo_path):
-        raise RuntimeError(
-            f"repo is dirty; refusing to create worktree: {repo_path}"
-        )
+        raise RuntimeError(f"repo is dirty; refusing to create worktree: {repo_path}")
     target_path = target_path.resolve()
     if target_path.exists():
         raise FileExistsError(f"worktree target already exists: {target_path}")
@@ -80,9 +78,10 @@ def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -
         # The worktree dir may have been removed out-of-band — that's fine.
         # But log it so orphaned worktrees can be debugged if they accumulate.
         logger.warning(
-            "worktree remove failed (path=%s, force=%s): %s — "
-            "continuing with prune",
-            worktree_path, force, exc,
+            "worktree remove failed (path=%s, force=%s): %s — continuing with prune",
+            worktree_path,
+            force,
+            exc,
         )
     # Always prune to clean up stale worktree metadata, even after successful
     # removal. Without this, git may still consider the branch "checked out"

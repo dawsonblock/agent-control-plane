@@ -15,9 +15,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from acp.legacy_loop import EvidenceLoop
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.errors import AgentConfigError
+from acp.legacy_loop import EvidenceLoop
 from acp.models import EventType
 from acp.store import TaskStore
 
@@ -61,7 +61,7 @@ def test_agent_swap_shell_vs_custom(disposable_repo, isolated_workspace):
     # CLI coding agent (Claude Code, Codex, ...); the point is that the
     # workflow treats it identically to the shell agent.
     passthrough = (
-        "sh -c \"cat {prompt_path} > {artifact_dir}/agent_stdout.txt && "
+        'sh -c "cat {prompt_path} > {artifact_dir}/agent_stdout.txt && '
         "echo 'agent ran' > {worktree_path}/AGENT_NOTES.md && "
         "mkdir -p {worktree_path}/tests && "
         "echo 'def test_agent(): assert True' > {worktree_path}/tests/test_agent.py\""
@@ -89,7 +89,9 @@ def test_agent_swap_shell_vs_custom(disposable_repo, isolated_workspace):
 
     # --- only the agent identity in events differs ---------------------- #
     def _agent_finished_payload(run_dir: Path) -> dict:
-        events = [json.loads(l) for l in (run_dir / "events.jsonl").read_text().splitlines() if l.strip()]
+        events = [
+            json.loads(l) for l in (run_dir / "events.jsonl").read_text().splitlines() if l.strip()
+        ]
         return next(e["payload"] for e in events if e["type"] == EventType.AGENT_FINISHED.value)
 
     p1 = _agent_finished_payload(r1.run_dir)
@@ -102,7 +104,9 @@ def test_agent_swap_shell_vs_custom(disposable_repo, isolated_workspace):
     # --- main untouched in both cases ----------------------------------- #
     main_now = subprocess.run(
         ["git", "-C", str(repo.path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert main_now == repo.main_head
 
@@ -120,6 +124,7 @@ def test_custom_agent_requires_template(disposable_repo, isolated_workspace):
     # The loop creates the worktree first, then builds the agent, so the
     # AgentConfigError surfaces at agent build time.
     import pytest
+
     with pytest.raises(AgentConfigError):
         loop.run()
 
@@ -127,4 +132,5 @@ def test_custom_agent_requires_template(disposable_repo, isolated_workspace):
 def test_registry_known_agents():
     """The registry is the single dispatch point and knows both kinds."""
     from acp.agents.registry import known_agents
+
     assert set(known_agents()) >= {"shell", "custom"}

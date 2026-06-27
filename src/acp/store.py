@@ -14,12 +14,17 @@ This enables gradual migration — operators can flip the flag per-repo.
 
 from __future__ import annotations
 
+import fcntl
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from acp.models import Task, TaskStatus
+
+# File-based locking for atomic task-id allocation. Prevents two concurrent
+# processes (e.g., the API server handling parallel requests) from generating
+# the same task id. Uses fcntl.flock on Unix (Mac-first project).
 
 # task_20260621_0001
 _TASK_ID_RE = re.compile(r"^task_(\d{8})_(\d{4})$")
@@ -53,7 +58,7 @@ def _highest_branch_seq(repo_path: Path, prefix: str) -> int:
     for head in repo.heads:
         name = head.name
         if name.startswith("agent/"):
-            tail = name[len("agent/"):]
+            tail = name[len("agent/") :]
             m = _TASK_ID_RE.match(tail)
             if m and tail.startswith(prefix) and int(m.group(2)) > seq:
                 seq = int(m.group(2))
@@ -101,18 +106,28 @@ class TaskStore:
         Scans existing run dirs for today's sequence number. If ``repo_path``
         is given, also scans that repo's ``agent/task_*`` branches so two
         runs-roots pointed at the same repo can't collide on a branch name.
+
+        Uses a file lock (``flock``) on a lock file in the runs root to
+        prevent two concurrent processes from generating the same id.
         """
-        today = (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
+        today = (now or datetime.now(UTC)).strftime("%Y%m%d")
         prefix = f"task_{today}_"
-        seq = 0
-        for child in self.root.iterdir():
-            if child.is_dir() and child.name.startswith(prefix):
-                m = _TASK_ID_RE.match(child.name)
-                if m and int(m.group(2)) > seq:
-                    seq = int(m.group(2))
-        if repo_path is not None:
-            seq = max(seq, _highest_branch_seq(repo_path, prefix))
-        return f"{prefix}{seq + 1:04d}"
+        lock_path = self.root / ".next_id_lock"
+        # Atomically create + lock. The lock file persists (harmless).
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                seq = 0
+                for child in self.root.iterdir():
+                    if child.is_dir() and child.name.startswith(prefix):
+                        m = _TASK_ID_RE.match(child.name)
+                        if m and int(m.group(2)) > seq:
+                            seq = int(m.group(2))
+                if repo_path is not None:
+                    seq = max(seq, _highest_branch_seq(repo_path, prefix))
+                return f"{prefix}{seq + 1:04d}"
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     # ------------------------------------------------------------------ #
     # Layout
@@ -171,9 +186,7 @@ class TaskStore:
         v0.7.0: When a durable store is configured, also writes to SQLite.
         """
         task.touch()
-        self.task_json_path(task.task_id).write_text(
-            task.model_dump_json(indent=2)
-        )
+        self.task_json_path(task.task_id).write_text(task.model_dump_json(indent=2))
         if self._durable is not None:
             self._durable.save(task)
 
@@ -189,6 +202,4 @@ class TaskStore:
             if task is not None:
                 return task
             # Fall back to JSON if not in SQLite (e.g., pre-migration task).
-        return Task.model_validate_json(
-            self.task_json_path(task_id).read_text()
-        )
+        return Task.model_validate_json(self.task_json_path(task_id).read_text())

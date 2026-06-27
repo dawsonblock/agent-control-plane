@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-control-plane"
-version = "0.6.6"
+version = "0.7.1"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Dawson Block" }]
 keywords = ["agents", "control-plane", "langgraph", "evidence", "obsidian"]
 
@@ -46,7 +46,10 @@ crypto = [
 ]
 dev = [
     "pytest>=8.2,<9",
+    "pytest-cov>=4.1,<7",
     "cryptography>=43,<46",
+    "ruff>=0.6,<1",
+    "mypy>=1.11,<2",
 ]
 # v0.6.0 (M6): Local Haystack RAG context retrieval.
 # Optional — install with: uv sync --extra rag
@@ -83,3 +86,71 @@ packages = ["src/acp"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra -q"
+
+# --------------------------------------------------------------------------- #
+# Ruff — linter + formatter (replaces flake8 --select=F).
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# F  = pyflakes (undefined names, unused imports, redefinitions)
+# E  = pycodestyle errors
+# W  = pycodestyle warnings
+# I  = isort (import sorting)
+# UP = pyupgrade (modernize syntax for py312)
+select = ["F", "E", "W", "I", "UP"]
+# E501  = line-too-long — not previously enforced; fix long lines over time.
+# UP042 = replace-str-enum — changes class hierarchy (str, Enum → StrEnum);
+#         behavioral edge cases, defer until audited.
+# BLE001 is used intentionally throughout for broad exception handlers that
+# are documented as best-effort. We manage those with inline `# noqa: BLE001`
+# comments rather than enabling the rule globally.
+ignore = ["E501", "UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["acp"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use short variable names and long lines in fixtures.
+"tests/**" = ["E501", "E741"]
+
+# --------------------------------------------------------------------------- #
+# Mypy — static type checking.
+# Lenient baseline so the gate can adopt mypy without blocking on 17k LOC of
+# previously-untyped code. Tighten `strict = true` once existing errors are
+# resolved.
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+# LangGraph state uses Any intentionally (opaque to the framework).
+[[tool.mypy.overrides]]
+module = "acp.graph.state"
+disable_error_code = ["attr-defined"]
+
+# --------------------------------------------------------------------------- #
+# Coverage — measure test coverage of src/acp.
+# --------------------------------------------------------------------------- #
+[tool.coverage.run]
+source = ["src/acp"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

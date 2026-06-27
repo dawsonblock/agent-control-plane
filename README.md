@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.6.0 alpha — Autonomous mode
+## Current scope: v0.7.1 alpha — Engineering execution plan
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
@@ -93,10 +93,11 @@ The non-negotiable rule: **no new layer until the previous layer produces eviden
 
 ```bash
 cd agent-control-plane
-uv venv
 uv sync                    # deps: typer, pydantic, pyyaml, rich, gitpython, langgraph
 uv sync --extra dev        # add pytest for local testing
-bash scripts/validate.sh   # compileall + pytest gate (uses uv run internally)
+# install all optional extras for full test coverage:
+uv sync --extra rag --extra memory --extra dev --extra crypto --extra api
+bash scripts/validate.sh   # compileall + ruff + mypy + pytest gate
 
 # run one task against a configured repo
 uv run acp run \

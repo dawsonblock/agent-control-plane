@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from acp.legacy_loop import EvidenceLoop
 from acp.config import CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.errors import RepoDirtyError
+from acp.legacy_loop import EvidenceLoop
 from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 
@@ -116,7 +116,11 @@ def test_e2e_manual_loop_passes(disposable_repo, isolated_workspace):
     body = report_path.read_text()
     assert result.task_id in body
     assert review["risk"] in body
-    assert "Changed files" in body or "Changed Files" in body.lower() or "file(s) changed" in body.lower()
+    assert (
+        "Changed files" in body
+        or "Changed Files" in body.lower()
+        or "file(s) changed" in body.lower()
+    )
 
     # --- diff artifacts ------------------------------------------------- #
     assert (artifacts / "diff.patch").is_file()
@@ -136,9 +140,12 @@ def test_e2e_manual_loop_passes(disposable_repo, isolated_workspace):
 
     # --- CORE SAFETY INVARIANT: main is untouched ----------------------- #
     import subprocess
+
     main_now = subprocess.run(
         ["git", "-C", str(repo.path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert main_now == repo.main_head, "MAIN BRANCH WAS MODIFIED — critical safety violation"
 
@@ -176,7 +183,7 @@ def test_e2e_failing_test_still_writes_report(disposable_repo, isolated_workspac
         commands=CommandsSection(
             lint="",
             typecheck="",
-            test="exit 1",   # always fails
+            test="exit 1",  # always fails
             build="",
         ),
         review=ReviewSection(),
@@ -193,14 +200,17 @@ def test_e2e_failing_test_still_writes_report(disposable_repo, isolated_workspac
     # Failed test → task FAILED, but evidence was still captured.
     assert result.status == TaskStatus.FAILED
     assert (result.run_dir / "artifacts" / "final_report.md").is_file()
-    note = (isolated_workspace["vault_root"] / "tasks" / f"{result.task_id}.md")
+    note = isolated_workspace["vault_root"] / "tasks" / f"{result.task_id}.md"
     assert note.is_file()
 
     # Safety invariant still holds even on failure.
     import subprocess
+
     main_now = subprocess.run(
         ["git", "-C", str(repo.path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert main_now == repo.main_head
 

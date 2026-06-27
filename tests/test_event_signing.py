@@ -22,7 +22,6 @@ import pytest
 from acp.events import EventWriter, verify_event_chain, verify_event_signatures
 from acp.models import EventType, Task, TaskStatus
 
-
 # --------------------------------------------------------------------------- #
 # Ed25519 signing
 # --------------------------------------------------------------------------- #
@@ -31,6 +30,7 @@ from acp.models import EventType, Task, TaskStatus
 def _generate_ed25519_keypair():
     """Generate an Ed25519 key pair for testing."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     return private_key, public_key
@@ -95,10 +95,12 @@ def test_signing_key_requires_cryptography_package(tmp_path: Path):
     # in the dev environment). The real protection is the ImportError in
     # the source code.
     from acp.events import EventWriter
+
     w = EventWriter("test", tmp_path / "run")
     # If cryptography is installed, this should work with a valid key.
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         key = Ed25519PrivateKey.generate()
         w.set_signing_key(key.private_bytes_raw())
         # No error — cryptography is available.
@@ -112,9 +114,9 @@ def test_signing_key_requires_cryptography_package(tmp_path: Path):
 
 
 def test_report_includes_event_timeline(tmp_path: Path):
-    from acp.reports.templates import render_report
     from acp.gitops.diff import DiffCapture
-    from acp.models import ReviewResult, RiskLevel, Recommendation
+    from acp.models import Recommendation, ReviewResult, RiskLevel
+    from acp.reports.templates import render_report
 
     w = EventWriter("task_001", tmp_path / "run")
     w.write(EventType.TASK_CREATED, {"request": "test"})
@@ -156,9 +158,9 @@ def test_report_includes_event_timeline(tmp_path: Path):
 
 def test_report_without_events_still_works(tmp_path: Path):
     """Backward compatibility: events=None should not break the report."""
-    from acp.reports.templates import render_report
     from acp.gitops.diff import DiffCapture
-    from acp.models import ReviewResult, RiskLevel, Recommendation
+    from acp.models import Recommendation, ReviewResult, RiskLevel
+    from acp.reports.templates import render_report
 
     task = Task(
         task_id="task_001",

@@ -35,7 +35,6 @@ from acp.vault.approval import approve_vault_note, reject_vault_note
 from acp.vault.frontmatter import build_frontmatter, parse_frontmatter
 from acp.vault.obsidian_writer import write_vault_note
 
-
 runner = CliRunner()
 
 
@@ -64,8 +63,12 @@ def _make_diff() -> DiffCapture:
     return DiffCapture(patch="", stat="", changed_files=["a.py"], insertions=1, deletions=0)
 
 
-def _setup_run(runs_root: Path, vault_root: Path, task_id: str = "task_20260624_0001",
-               status: TaskStatus = TaskStatus.PASSED) -> tuple[Task, Path]:
+def _setup_run(
+    runs_root: Path,
+    vault_root: Path,
+    task_id: str = "task_20260624_0001",
+    status: TaskStatus = TaskStatus.PASSED,
+) -> tuple[Task, Path]:
     store = TaskStore(runs_root=runs_root)
     task = _make_task(task_id, status)
     run_dir = store.run_dir(task_id)
@@ -90,6 +93,7 @@ def _setup_run(runs_root: Path, vault_root: Path, task_id: str = "task_20260624_
 def test_frontmatter_audit_trail_field_exists():
     """Frontmatter model should have an audit_trail field (bug fix)."""
     from acp.vault.frontmatter import Frontmatter
+
     fm = Frontmatter(type="task_report")
     assert hasattr(fm, "audit_trail")
     assert fm.audit_trail == []
@@ -130,6 +134,7 @@ def test_approve_then_reject_preserves_audit_trail(tmp_path: Path):
 
     # Try to reject — should fail.
     import pytest
+
     with pytest.raises(PermissionError):
         reject_vault_note(note_path, rejecter="bob")
 
@@ -153,10 +158,16 @@ def test_cli_verify_no_event_log(tmp_path: Path):
     run_dir.mkdir(parents=True)
     (run_dir / "task.json").write_text(_make_task(task_id).model_dump_json(indent=2))
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(runs_root),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
     assert r.exit_code == 1
     assert "event log not found" in r.output
 
@@ -176,10 +187,16 @@ def test_cli_verify_no_manifest(tmp_path: Path):
     events.write(EventType.TASK_CREATED, {"request": "test"})
     events.write(EventType.TASK_COMPLETED, {"status": "passed"})
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(runs_root),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
     # Should pass (manifest is optional for pre-v0.5.5 runs).
     assert r.exit_code == 0
     assert "event chain valid" in r.output
@@ -198,11 +215,18 @@ def test_cli_verify_with_public_key_no_event_log(tmp_path: Path):
     pub_key = tmp_path / "pubkey.bin"
     pub_key.write_bytes(b"\x00" * 32)
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(runs_root),
-        "--public-key", str(pub_key),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+            "--public-key",
+            str(pub_key),
+        ],
+    )
     assert r.exit_code == 1
     assert "event log not found" in r.output
 
@@ -223,11 +247,18 @@ def test_cli_events_with_limit(tmp_path: Path):
     for i in range(10):
         events.write(EventType.TASK_CREATED, {"i": i})
 
-    r = runner.invoke(app, [
-        "events", "--task", task_id,
-        "--runs-root", str(runs_root),
-        "--limit", "3",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+            "--limit",
+            "3",
+        ],
+    )
     assert r.exit_code == 0
     # Should only show 3 events.
     assert "evt_000001" in r.output
@@ -247,12 +278,20 @@ def test_cli_approve_needs_review_task(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(runs_root, vault_root, status=TaskStatus.NEEDS_REVIEW)
 
-    r = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-        "--approver", "alice",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+            "--approver",
+            "alice",
+        ],
+    )
     assert r.exit_code == 0
     assert "approved by alice" in r.output
 
@@ -272,13 +311,22 @@ def test_cli_reject_failed_task(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(runs_root, vault_root, status=TaskStatus.FAILED)
 
-    r = runner.invoke(app, [
-        "reject", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-        "--rejecter", "bob",
-        "--reason", "tests failed",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+            "--rejecter",
+            "bob",
+            "--reason",
+            "tests failed",
+        ],
+    )
     assert r.exit_code == 0
     assert "rejected by bob" in r.output
 
@@ -321,19 +369,33 @@ def test_cli_reject_already_archived(tmp_path: Path):
     task, note_path = _setup_run(runs_root, vault_root)
 
     # First reject succeeds.
-    r1 = runner.invoke(app, [
-        "reject", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r1.exit_code == 0
 
     # Second reject fails.
-    r2 = runner.invoke(app, [
-        "reject", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r2.exit_code == 1
     assert "already rejected" in r2.output
 
@@ -351,11 +413,18 @@ def test_cli_approve_no_vault_note(tmp_path: Path):
     run_dir.mkdir(parents=True)
     (run_dir / "task.json").write_text(_make_task(task_id).model_dump_json(indent=2))
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(tmp_path / "vault"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(tmp_path / "vault"),
+        ],
+    )
     assert r.exit_code == 1
     assert "vault note not found" in r.output
 
@@ -374,9 +443,15 @@ def test_cli_verify_empty_event_log(tmp_path: Path):
     (run_dir / "task.json").write_text(_make_task(task_id).model_dump_json(indent=2))
     (run_dir / "events.jsonl").write_text("")  # empty file
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(runs_root),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
     assert r.exit_code == 1
     assert "event log is empty" in r.output

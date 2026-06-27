@@ -26,7 +26,6 @@ from git import Repo
 from acp.config import AgentSection, RepoConfig, RepoSection, ReviewSection
 from acp.models import EventType, Task, TaskStatus
 
-
 # --------------------------------------------------------------------------- #
 # 1. Config fields
 # --------------------------------------------------------------------------- #
@@ -206,12 +205,8 @@ class TestAutoApproveNode:
         assert result.get("status") == TaskStatus.APPROVED
 
         all_events = events.read_all()
-        assert any(
-            e.type == EventType.AUTO_APPROVED for e in all_events
-        )
-        approved = [
-            e for e in all_events if e.type == EventType.AUTO_APPROVED
-        ]
+        assert any(e.type == EventType.AUTO_APPROVED for e in all_events)
+        approved = [e for e in all_events if e.type == EventType.AUTO_APPROVED]
         assert approved[0].payload["approver"] == "ACP-Autonomous-Bot"
 
     def test_auto_approve_noop_when_disabled(self, tmp_path):
@@ -247,7 +242,8 @@ class TestAutoApproveNode:
         assert len(events.read_all()) == 0
 
     def test_auto_approve_refused_on_broken_event_chain(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """auto_approve_node refuses when the event chain is empty/broken.
 
@@ -321,7 +317,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -398,7 +396,8 @@ class TestAutoMergeNode:
         assert result == {}
 
     def test_auto_merge_conflict_downgrades_to_needs_review(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """auto_merge_node downgrades to NEEDS_REVIEW on conflict."""
         from acp.events import EventWriter
@@ -429,7 +428,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -480,7 +481,7 @@ class TestAutoMergeNode:
         """
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
-        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.models import Recommendation, ReviewResult, RiskLevel
         from acp.store import TaskStore
 
         repo_path = tmp_path / "repo"
@@ -499,7 +500,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -572,7 +575,7 @@ class TestAutoMergeNode:
         """
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
-        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.models import Recommendation, ReviewResult, RiskLevel
         from acp.store import TaskStore
 
         repo_path = tmp_path / "repo"
@@ -591,7 +594,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -649,7 +654,7 @@ class TestAutoMergeNode:
         """
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
-        from acp.models import ReviewResult, RiskLevel, Recommendation
+        from acp.models import Recommendation, ReviewResult, RiskLevel
         from acp.store import TaskStore
 
         repo_path = tmp_path / "repo"
@@ -668,7 +673,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -699,6 +706,7 @@ class TestAutoMergeNode:
         log_path = run_dir / "events.jsonl"
         lines = log_path.read_text().splitlines()
         import json as _json
+
         first = _json.loads(lines[0])
         first["hash"] = "0" * 64  # bogus hash
         log_path.write_text(_json.dumps(first) + "\n")
@@ -1054,7 +1062,9 @@ class TestTestsMissingPrompt:
     def test_tests_missing_event_written(self, tmp_path):
         """repair_plan_node writes TEST_GENERATION_ATTEMPTED when tests_missing."""
         from acp.config import (
-            AgentSection, RepoConfig, RepoSection,
+            AgentSection,
+            RepoConfig,
+            RepoSection,
         )
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, repair_plan_node
@@ -1126,10 +1136,10 @@ class TestAutoEventEvidenceClassification:
         """auto.approved after evidence.finalized doesn't break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
+            _sha256_file,
             build_evidence_manifest,
             compute_artifact_content_hash,
             verify_evidence_manifest,
-            _sha256_file,
         )
 
         run_dir = tmp_path / "run"
@@ -1140,30 +1150,43 @@ class TestAutoEventEvidenceClassification:
 
         events = EventWriter("task_001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
-        events.write(EventType.SANDBOX_CONFIGURED, {
-            "sandbox_name": "acp-test",
-            "executor": {
-                "network_policy": "locked_down",
-                "clone_mode": True,
+        events.write(
+            EventType.SANDBOX_CONFIGURED,
+            {
+                "sandbox_name": "acp-test",
+                "executor": {
+                    "network_policy": "locked_down",
+                    "clone_mode": True,
+                },
             },
-        })
+        )
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {
-            "artifact_content_hash": real_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_FINALIZED,
+            {
+                "artifact_content_hash": real_hash,
+            },
+        )
         report_hash = _sha256_file(
             artifacts_dir / "final_report.md",
         )
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {
-            "report_hash": report_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_REPORT_BOUND,
+            {
+                "report_hash": report_hash,
+            },
+        )
         # auto.approved AFTER finalization.
-        events.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
+        events.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
 
         manifest = build_evidence_manifest(
-            run_dir=run_dir, events_writer=events,
+            run_dir=run_dir,
+            events_writer=events,
         )
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -1175,10 +1198,10 @@ class TestAutoEventEvidenceClassification:
         """auto.merged after evidence.finalized doesn't break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
+            _sha256_file,
             build_evidence_manifest,
             compute_artifact_content_hash,
             verify_evidence_manifest,
-            _sha256_file,
         )
 
         run_dir = tmp_path / "run"
@@ -1189,32 +1212,48 @@ class TestAutoEventEvidenceClassification:
 
         events = EventWriter("task_001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
-        events.write(EventType.SANDBOX_CONFIGURED, {
-            "sandbox_name": "acp-test",
-            "executor": {
-                "network_policy": "locked_down",
-                "clone_mode": True,
+        events.write(
+            EventType.SANDBOX_CONFIGURED,
+            {
+                "sandbox_name": "acp-test",
+                "executor": {
+                    "network_policy": "locked_down",
+                    "clone_mode": True,
+                },
             },
-        })
+        )
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {
-            "artifact_content_hash": real_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_FINALIZED,
+            {
+                "artifact_content_hash": real_hash,
+            },
+        )
         report_hash = _sha256_file(
             artifacts_dir / "final_report.md",
         )
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {
-            "report_hash": report_hash,
-        })
-        events.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
-        events.write(EventType.AUTO_MERGED, {
-            "merge_commit_sha": "abc123",
-        })
+        events.write(
+            EventType.EVIDENCE_REPORT_BOUND,
+            {
+                "report_hash": report_hash,
+            },
+        )
+        events.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
+        events.write(
+            EventType.AUTO_MERGED,
+            {
+                "merge_commit_sha": "abc123",
+            },
+        )
 
         manifest = build_evidence_manifest(
-            run_dir=run_dir, events_writer=events,
+            run_dir=run_dir,
+            events_writer=events,
         )
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -1274,7 +1313,10 @@ class TestVaultNoteAutoApproved:
         from acp.events import EventWriter
         from acp.gitops.diff import DiffCapture
         from acp.models import (
-            Recommendation, ReviewResult, RiskLevel, Task,
+            Recommendation,
+            ReviewResult,
+            RiskLevel,
+            Task,
         )
         from acp.vault.obsidian_writer import rerender_vault_note
 
@@ -1308,9 +1350,12 @@ class TestVaultNoteAutoApproved:
         run_dir.mkdir()
         events_writer = EventWriter("task_001", run_dir)
         events_writer.write(EventType.TASK_CREATED, {})
-        events_writer.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
+        events_writer.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
         all_events = events_writer.read_all()
 
         vault_root = tmp_path / "vault"

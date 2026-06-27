@@ -18,7 +18,6 @@ from acp.memory.tiers import (
     MemoryItem,
 )
 
-
 # --------------------------------------------------------------------------- #
 # MemoryItem + MemoryBundle tests
 # --------------------------------------------------------------------------- #
@@ -35,8 +34,17 @@ class TestMemoryBundle:
     def test_bundle_with_items(self):
         bundle = MemoryBundle(
             working=[MemoryItem(tier="working", source="rag", content="auth.py uses OAuth2")],
-            episodic=[MemoryItem(tier="episodic", source="events", content="Last auth task failed", metadata={"task_id": "task_001"})],
-            semantic=[MemoryItem(tier="semantic", source="graphiti", content="Auth module uses PKCE flow")],
+            episodic=[
+                MemoryItem(
+                    tier="episodic",
+                    source="events",
+                    content="Last auth task failed",
+                    metadata={"task_id": "task_001"},
+                )
+            ],
+            semantic=[
+                MemoryItem(tier="semantic", source="graphiti", content="Auth module uses PKCE flow")
+            ],
         )
         assert bundle.total_items == 3
         section = bundle.to_prompt_section()
@@ -79,12 +87,20 @@ class TestEpisodicMemoryStore:
     def test_recall_finds_matching_episodes(self, tmp_path: Path):
         """EpisodicMemoryStore finds past events matching the query."""
         runs_root = tmp_path / "runs"
-        self._create_run(runs_root, "task_20260625_0001", [
-            {"type": "task.created", "payload": {"user_request": "Add OAuth to auth module"}},
-        ])
-        self._create_run(runs_root, "task_20260625_0002", [
-            {"type": "task.created", "payload": {"user_request": "Fix database migration"}},
-        ])
+        self._create_run(
+            runs_root,
+            "task_20260625_0001",
+            [
+                {"type": "task.created", "payload": {"user_request": "Add OAuth to auth module"}},
+            ],
+        )
+        self._create_run(
+            runs_root,
+            "task_20260625_0002",
+            [
+                {"type": "task.created", "payload": {"user_request": "Fix database migration"}},
+            ],
+        )
 
         store = EpisodicMemoryStore(runs_root)
         results = store.recall("OAuth")
@@ -97,9 +113,13 @@ class TestEpisodicMemoryStore:
     def test_recall_returns_empty_when_no_matches(self, tmp_path: Path):
         """EpisodicMemoryStore returns empty list when nothing matches."""
         runs_root = tmp_path / "runs"
-        self._create_run(runs_root, "task_20260625_0001", [
-            {"type": "task.created", "payload": {"user_request": "Fix database migration"}},
-        ])
+        self._create_run(
+            runs_root,
+            "task_20260625_0001",
+            [
+                {"type": "task.created", "payload": {"user_request": "Fix database migration"}},
+            ],
+        )
 
         store = EpisodicMemoryStore(runs_root)
         results = store.recall("nonexistent_query_xyz")
@@ -114,9 +134,13 @@ class TestEpisodicMemoryStore:
         """EpisodicMemoryStore limits results to max_episodes."""
         runs_root = tmp_path / "runs"
         for i in range(5):
-            self._create_run(runs_root, f"task_20260625_{i:04d}", [
-                {"type": "task.created", "payload": {"user_request": "auth change"}},
-            ])
+            self._create_run(
+                runs_root,
+                f"task_20260625_{i:04d}",
+                [
+                    {"type": "task.created", "payload": {"user_request": "auth change"}},
+                ],
+            )
 
         store = EpisodicMemoryStore(runs_root)
         results = store.recall("auth", max_episodes=3)
@@ -125,12 +149,20 @@ class TestEpisodicMemoryStore:
     def test_recall_most_recent_first(self, tmp_path: Path):
         """EpisodicMemoryStore returns most recent runs first."""
         runs_root = tmp_path / "runs"
-        self._create_run(runs_root, "task_20260625_0001", [
-            {"type": "task.created", "payload": {"user_request": "auth old"}},
-        ])
-        self._create_run(runs_root, "task_20260625_0002", [
-            {"type": "task.created", "payload": {"user_request": "auth new"}},
-        ])
+        self._create_run(
+            runs_root,
+            "task_20260625_0001",
+            [
+                {"type": "task.created", "payload": {"user_request": "auth old"}},
+            ],
+        )
+        self._create_run(
+            runs_root,
+            "task_20260625_0002",
+            [
+                {"type": "task.created", "payload": {"user_request": "auth new"}},
+            ],
+        )
 
         store = EpisodicMemoryStore(runs_root)
         results = store.recall("auth")
@@ -153,17 +185,26 @@ class TestEpisodicMemoryStore:
     def test_summarize_event_types(self):
         """_summarize_event produces readable summaries for key event types."""
         from acp.memory.tiers import EpisodicMemoryStore as EMS
+
         assert "Task started" in EMS._summarize_event(
-            "task.created", {"user_request": "Add tests"}, "task_001",
+            "task.created",
+            {"user_request": "Add tests"},
+            "task_001",
         )
         assert "Task failed" in EMS._summarize_event(
-            "task.failed", {"error": "timeout"}, "task_001",
+            "task.failed",
+            {"error": "timeout"},
+            "task_001",
         )
         assert "Review" in EMS._summarize_event(
-            "review.completed", {"risk": "high", "recommendation": "reject"}, "task_001",
+            "review.completed",
+            {"risk": "high", "recommendation": "reject"},
+            "task_001",
         )
         assert "Auto-merge refused" in EMS._summarize_event(
-            "auto.merge.refused", {"reason": "risk_exceeds_max"}, "task_001",
+            "auto.merge.refused",
+            {"reason": "risk_exceeds_max"},
+            "task_001",
         )
 
 
@@ -205,7 +246,8 @@ class TestCognitiveMemoryRetriever:
         run_dir = runs_root / "task_20260625_0001"
         run_dir.mkdir(parents=True)
         (run_dir / "events.jsonl").write_text(
-            json.dumps({"type": "task.failed", "payload": {"error": "auth module import error"}}) + "\n"
+            json.dumps({"type": "task.failed", "payload": {"error": "auth module import error"}})
+            + "\n"
         )
 
         retriever = CognitiveMemoryRetriever(runs_root=runs_root)

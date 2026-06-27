@@ -20,6 +20,8 @@ from acp.errors import ACPError
 from acp.events import EventWriter
 from acp.evidence.lifecycle import (
     record_lifecycle_event as _record_lifecycle_event,
+)
+from acp.evidence.lifecycle import (
     rerender_vault_note_from_state as _rerender_vault_note_from_state,
 )
 from acp.models import EventType, Task, TaskStatus
@@ -39,6 +41,7 @@ console = Console()
 # filesystem path must reject anything that isn't ``task_<YYYYMMDD>_<NNNN>``.
 # A local control plane that manipulates files must not accept path-shaped ids.
 # --------------------------------------------------------------------------- #
+
 
 def _require_valid_task_id(task_id: str) -> None:
     """Exit nonzero if ``task_id`` is not a canonical task id."""
@@ -66,6 +69,7 @@ def _revert_vault_note(note_path: Path, original_content: str) -> None:
 # --------------------------------------------------------------------------- #
 # Typer commands
 # --------------------------------------------------------------------------- #
+
 
 @app.command()
 def run(
@@ -115,14 +119,14 @@ def run(
         console.print(f"[red]✗[/] config file not found: {exc}")
         raise typer.Exit(code=1) from exc
     console.print(
-        f"[bold]ACP run[/] · repo={cfg.repo.name} · "
-        f"agent={cfg.agent.default} · task={task!r}"
+        f"[bold]ACP run[/] · repo={cfg.repo.name} · agent={cfg.agent.default} · task={task!r}"
     )
 
     # v0.7.0 (M14): Resolve mission context for cross-task artifact sharing.
     parent_task_id = ""
     if mission_id:
         from acp.missions.store import MissionStore, is_valid_mission_id
+
         if not is_valid_mission_id(mission_id):
             console.print(f"[red]✗[/] invalid mission id: {mission_id!r}")
             raise typer.Exit(code=1)
@@ -139,6 +143,7 @@ def run(
 
     try:
         from acp.graph.workflow import run_workflow
+
         result = run_workflow(
             config=cfg,
             user_request=task,
@@ -181,9 +186,7 @@ def run(
             console.print(f"[red]✗[/] report: {report_path or '(missing)'}")
             console.print(f"[red]✗[/] vault: {vault_note_path or '(missing)'}")
             error = result.get("error", "unknown")
-            console.print(
-                f"\n[dim]Task {result.get('task_id')} → failed: {error}.[/]"
-            )
+            console.print(f"\n[dim]Task {result.get('task_id')} → failed: {error}.[/]")
             raise typer.Exit(code=1)
     except ACPError as exc:
         console.print(f"[red]✗[/] {exc}")
@@ -194,6 +197,7 @@ def run(
 def version() -> None:
     """Print the ACP version."""
     from acp import __version__
+
     console.print(f"agent-control-plane {__version__}")
 
 
@@ -224,7 +228,7 @@ def verify(
         False,
         "--check-durable",
         help="Check that the SQLite durable store contains the same events as events.jsonl. "
-             "Automatically enabled when durable_mode=required.",
+        "Automatically enabled when durable_mode=required.",
     ),
     debug: bool = typer.Option(
         False,
@@ -301,6 +305,7 @@ def _verify_impl(
     if task_json_path.is_file():
         try:
             import json as _json
+
             task_json_id = _json.loads(task_json_path.read_text()).get("task_id")
         except Exception:
             console.print("[red]✗[/] task.json is malformed — cannot read task_id")
@@ -338,7 +343,9 @@ def _verify_impl(
             console.print("[red]✗[/] event log is empty")
             all_ok = False
         elif verify_event_chain(events):
-            console.print(f"[green]✓[/] event chain valid ({len(events)} events, head={events[-1].hash[:16]}...)")
+            console.print(
+                f"[green]✓[/] event chain valid ({len(events)} events, head={events[-1].hash[:16]}...)"
+            )
         else:
             console.print("[red]✗[/] event chain INVALID — log has been tampered with")
             all_ok = False
@@ -358,8 +365,12 @@ def _verify_impl(
     # v0.6.8: auto.merge.refused is a lifecycle event (it downgrades the
     # task to NEEDS_REVIEW, so it affects the derived status).
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged", "auto.merge.refused",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
+        "auto.merge.refused",
     }
     has_lifecycle = any(e.type.value in lifecycle_types for e in events)
     has_evidence_finalized = any(e.type == EventType.EVIDENCE_FINALIZED for e in events)
@@ -369,8 +380,10 @@ def _verify_impl(
     # derived from the event log, the projection is stale or tampered.
     if events and task_json_path.is_file():
         from acp.evidence.manifest import derive_status_from_events
+
         try:
             import json as _json_status
+
             task_data = _json_status.loads(task_json_path.read_text())
             task_json_status = task_data.get("status")
             expected_status = derive_status_from_events(events)
@@ -391,13 +404,18 @@ def _verify_impl(
         if has_evidence_finalized:
             # v0.5.10+ run — the manifest is required evidence. Its absence
             # means the evidence set has been tampered with.
-            console.print("[red]✗[/] evidence manifest not found — required for runs with evidence.finalized")
+            console.print(
+                "[red]✗[/] evidence manifest not found — required for runs with evidence.finalized"
+            )
             all_ok = False
         else:
-            console.print("[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)")
+            console.print(
+                "[yellow]![/] evidence manifest not found (runs before v0.5.5 don't have one)"
+            )
     else:
         try:
             import json as _json
+
             manifest = _json.loads(manifest_path.read_text())
             manifest_task_id = manifest.get("task_id")
             if manifest_task_id is not None and manifest_task_id != task_id:
@@ -430,26 +448,30 @@ def _verify_impl(
             console.print("[red]✗[/] cannot verify signatures without event log")
             all_ok = False
         elif has_malformed_events:
-            console.print(
-                "[red]✗[/] signature verification skipped because event log is malformed"
-            )
+            console.print("[red]✗[/] signature verification skipped because event log is malformed")
             all_ok = False
         else:
             try:
                 pk_bytes = public_key.read_bytes()
                 if len(pk_bytes) != 32:
-                    console.print(f"[red]✗[/] public key must be exactly 32 bytes, got {len(pk_bytes)}")
+                    console.print(
+                        f"[red]✗[/] public key must be exactly 32 bytes, got {len(pk_bytes)}"
+                    )
                     all_ok = False
                 elif not events:
                     console.print("[red]✗[/] cannot verify signatures on empty event log")
                     all_ok = False
                 elif verify_event_signatures(events, pk_bytes):
-                    console.print(f"[green]✓[/] Ed25519 signatures valid ({len(events)} events signed)")
+                    console.print(
+                        f"[green]✓[/] Ed25519 signatures valid ({len(events)} events signed)"
+                    )
                 else:
                     console.print("[red]✗[/] Ed25519 signature verification FAILED")
                     all_ok = False
             except ImportError:
-                console.print("[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto")
+                console.print(
+                    "[yellow]![/] cryptography package not installed — install with: uv sync --extra crypto"
+                )
             except Exception as exc:
                 console.print(f"[red]✗[/] signature verification error: {exc}")
                 all_ok = False
@@ -458,6 +480,7 @@ def _verify_impl(
     # lifecycle manifest with lifecycle events in the log means the lifecycle
     # record has been deleted (tampering).
     from acp.evidence.manifest import verify_lifecycle_manifest
+
     lifecycle_path = run_dir / "lifecycle_manifest.json"
     if has_lifecycle:
         if not lifecycle_path.is_file():
@@ -482,10 +505,8 @@ def _verify_impl(
     # Report final approval state if present.
     if events:
         from acp.models import EventType as _ET
-        approved = any(
-            e.type == _ET.HUMAN_APPROVED or e.type == _ET.AUTO_APPROVED
-            for e in events
-        )
+
+        approved = any(e.type == _ET.HUMAN_APPROVED or e.type == _ET.AUTO_APPROVED for e in events)
         rejected = any(e.type == _ET.HUMAN_REJECTED for e in events)
         if approved:
             console.print("[dim]Final approval state: approved[/]")
@@ -497,6 +518,7 @@ def _verify_impl(
     # the same events as events.jsonl. This catches orphan events from
     # failed lifecycle writes and SQLite/JSONL divergence.
     from acp.evidence.manifest import read_evidence_config
+
     ev_cfg = read_evidence_config(run_dir)
     durable_store_path = ev_cfg.get("durable_store")
     durable_mode = ev_cfg.get("durable_mode")
@@ -504,6 +526,7 @@ def _verify_impl(
     if should_check_durable and durable_store_path is not None and events:
         try:
             from acp.evidence.durable_store import DurableEventStore
+
             with DurableEventStore(durable_store_path) as db:
                 db_events = db.query(task_id=task_id, limit=10000)
                 if len(db_events) == len(events):
@@ -605,7 +628,9 @@ def events(
         return
 
     console.print(f"[bold]Events for task {task_id}[/] ({len(all_events)} total):\n")
-    console.print(f"  {'#':>3}  {'event_id':<14}  {'type':<24}  {'timestamp':<22}  {'hash (first 12)'}")
+    console.print(
+        f"  {'#':>3}  {'event_id':<14}  {'type':<24}  {'timestamp':<22}  {'hash (first 12)'}"
+    )
     console.print(f"  {'---':>3}  {'---':<14}  {'---':<24}  {'---':<22}  {'---'}")
     for i, evt in enumerate(all_events):
         short_hash = evt.hash[:12] if evt.hash else "—"
@@ -788,19 +813,13 @@ def reject(
 
     # Cannot reject an already-approved, already-rejected, or archived task.
     if task.status == TaskStatus.APPROVED:
-        console.print(
-            "[red]✗[/] task is already approved — cannot reject after approval."
-        )
+        console.print("[red]✗[/] task is already approved — cannot reject after approval.")
         raise typer.Exit(code=1)
     if task.status == TaskStatus.REJECTED:
-        console.print(
-            "[red]✗[/] task is already rejected — cannot reject again."
-        )
+        console.print("[red]✗[/] task is already rejected — cannot reject again.")
         raise typer.Exit(code=1)
     if task.status == TaskStatus.ARCHIVED:
-        console.print(
-            "[red]✗[/] task is already archived — cannot reject again."
-        )
+        console.print("[red]✗[/] task is already archived — cannot reject again.")
         raise typer.Exit(code=1)
 
     note_path = vault_root / "tasks" / f"{task_id}.md"
@@ -965,6 +984,7 @@ def cleanup(
     if worktree_path.exists():
         try:
             from acp.gitops.worktrees import remove_worktree
+
             remove_worktree(repo_path, worktree_path, force=force)
             cleaned.append(f"worktree: {worktree_path}")
         except Exception as exc:  # noqa: BLE001
@@ -975,6 +995,7 @@ def cleanup(
     # 2. Delete the branch.
     try:
         from acp.gitops.branches import delete_branch
+
         delete_branch(repo_path, task_branch, force=force)
         cleaned.append(f"branch: {task_branch}")
     except Exception as exc:  # noqa: BLE001
@@ -984,8 +1005,7 @@ def cleanup(
         console.print(f"[green]✓[/] removed {item}")
     if cleaned:
         console.print(
-            f"\n[dim]Task {task_id} cleaned up. "
-            f"Run data preserved at {store.run_dir(task_id)}.[/]"
+            f"\n[dim]Task {task_id} cleaned up. Run data preserved at {store.run_dir(task_id)}.[/]"
         )
     else:
         console.print(f"\n[dim]Nothing to clean for task {task_id}.[/]")
@@ -1117,10 +1137,7 @@ def memory_promote(
         if meta["needs_secondary_review"]:
             flags.append("[red]high-risk[/]")
         flag_str = f" {' '.join(flags)}" if flags else ""
-        console.print(
-            f"  {task.task_id} — {task.user_request[:60]}"
-            f"{flag_str}"
-        )
+        console.print(f"  {task.task_id} — {task.user_request[:60]}{flag_str}")
 
     if dry_run:
         console.print("\n[dim]--dry-run: no ingestion performed.[/]")
@@ -1131,8 +1148,7 @@ def memory_promote(
         from acp.memory.graphiti_client import ingest_task_to_graphiti
     except ImportError as exc:
         console.print(
-            f"[red]✗[/] graphiti-core not installed: {exc}\n"
-            f"  Install with: uv sync --extra memory"
+            f"[red]✗[/] graphiti-core not installed: {exc}\n  Install with: uv sync --extra memory"
         )
         raise typer.Exit(code=1) from exc
 
@@ -1178,9 +1194,7 @@ def memory_promote(
             failed += 1
 
     console.print(
-        f"\n[bold]Promoted {promoted} note(s)"
-        + (f", {failed} failed" if failed else "")
-        + ".[/]"
+        f"\n[bold]Promoted {promoted} note(s)" + (f", {failed} failed" if failed else "") + ".[/]"
     )
 
 
@@ -1224,14 +1238,15 @@ def memory_search(
         from acp.memory.graphiti_client import search_graphiti_facts
     except ImportError as exc:
         console.print(
-            f"[red]✗[/] graphiti-core not installed: {exc}\n"
-            f"  Install with: uv sync --extra memory"
+            f"[red]✗[/] graphiti-core not installed: {exc}\n  Install with: uv sync --extra memory"
         )
         raise typer.Exit(code=1) from exc
 
     try:
         results = search_graphiti_facts(
-            query, group_id=group_id, num_results=num_results,
+            query,
+            group_id=group_id,
+            num_results=num_results,
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/] search failed: {exc}")
@@ -1268,7 +1283,7 @@ def memory_prune(
         True,
         "--dry-run/--no-dry-run",
         help="When True (default), only report what would be pruned. "
-             "Use --no-dry-run to actually delete nodes.",
+        "Use --no-dry-run to actually delete nodes.",
     ),
 ) -> None:
     """Prune superseded nodes from the Graphiti/FalkorDB knowledge graph.
@@ -1297,15 +1312,13 @@ def memory_prune(
         from acp.memory.graphiti_client import prune_superseded_nodes
     except ImportError as exc:
         console.print(
-            f"[red]✗[/] graphiti-core not installed: {exc}\n"
-            f"  Install with: uv sync --extra memory"
+            f"[red]✗[/] graphiti-core not installed: {exc}\n  Install with: uv sync --extra memory"
         )
         raise typer.Exit(code=1) from exc
 
     mode_label = "dry-run" if dry_run else "DELETE"
     console.print(
-        f"[bold]ACP memory prune[/] · mode={mode_label} · "
-        f"older_than_days={older_than_days}"
+        f"[bold]ACP memory prune[/] · mode={mode_label} · older_than_days={older_than_days}"
     )
 
     try:
@@ -1327,22 +1340,15 @@ def memory_prune(
         return
 
     console.print(
-        f"[yellow]![/] found {found} superseded node(s) "
-        f"older than {older_than_days} days"
+        f"[yellow]![/] found {found} superseded node(s) older than {older_than_days} days"
     )
     for node in nodes[:20]:  # show first 20
-        console.print(
-            f"  node: {node['node_id']} · "
-            f"superseded {node['days_superseded']} days ago"
-        )
+        console.print(f"  node: {node['node_id']} · superseded {node['days_superseded']} days ago")
     if len(nodes) > 20:
         console.print(f"  ... and {len(nodes) - 20} more")
 
     if dry_run:
-        console.print(
-            "\n[dim]Dry run — no nodes deleted. "
-            "Use --no-dry-run to actually prune.[/]"
-        )
+        console.print("\n[dim]Dry run — no nodes deleted. Use --no-dry-run to actually prune.[/]")
     else:
         console.print(f"\n[green]✓[/] pruned {pruned} node(s) from FalkorDB")
 
@@ -1397,9 +1403,9 @@ def migrate_to_sqlite(
         )
         raise typer.Exit(code=1)
 
+    from acp.events import EventWriter
     from acp.evidence.durable_task_store import DurableTaskStore
     from acp.models import EventType
-    from acp.events import EventWriter
 
     store = DurableTaskStore(cfg.evidence.durable_store)
     store.init()
@@ -1407,22 +1413,13 @@ def migrate_to_sqlite(
     if dry_run:
         # Count task.json files without importing.
         count = sum(1 for _ in Path(runs_root).rglob("task.json"))
-        console.print(
-            f"[bold]ACP migrate[/] · dry-run · "
-            f"found {count} task.json file(s)"
-        )
-        console.print(
-            f"[dim]Use without --dry-run to import into "
-            f"{cfg.evidence.durable_store}[/]"
-        )
+        console.print(f"[bold]ACP migrate[/] · dry-run · found {count} task.json file(s)")
+        console.print(f"[dim]Use without --dry-run to import into {cfg.evidence.durable_store}[/]")
         store.close()
         return
 
     imported = store.rebuild_from_jsonl(runs_root)
-    console.print(
-        f"[green]✓[/] migrated {imported} task(s) into "
-        f"{cfg.evidence.durable_store}"
-    )
+    console.print(f"[green]✓[/] migrated {imported} task(s) into {cfg.evidence.durable_store}")
 
     # Emit task.store_migrated event. EventWriter writes to
     # run_dir / "events.jsonl", so we use a dedicated migration directory.
@@ -1440,11 +1437,10 @@ def migrate_to_sqlite(
     )
 
     console.print(
-        f"[green]✓[/] task.store_migrated event written to "
-        f"{migration_dir / 'events.jsonl'}"
+        f"[green]✓[/] task.store_migrated event written to {migration_dir / 'events.jsonl'}"
     )
     console.print(
-        "\n[dim]Set evidence.task_store_primary: \"sqlite\" in the "
+        '\n[dim]Set evidence.task_store_primary: "sqlite" in the '
         "repo config to make SQLite the primary source of truth.[/]"
     )
     store.close()
@@ -1466,6 +1462,7 @@ app.add_typer(mission_app, name="mission")
 def _require_valid_mission_id(mission_id: str) -> None:
     """Exit nonzero if ``mission_id`` is not a canonical mission id."""
     from acp.missions.store import is_valid_mission_id
+
     if not is_valid_mission_id(mission_id):
         console.print(
             f"[red]✗[/] invalid mission id: {mission_id!r} "
@@ -1536,8 +1533,7 @@ def mission_create(
     console.print(f"  dir:  {store.mission_dir(mission_id)}")
     console.print(f"  event: mission.created written to {store.events_path(mission_id)}")
     console.print(
-        f"\n[dim]Next: add steps with `acp mission split --mission {mission_id} "
-        f"--step \"...\"`[/]"
+        f'\n[dim]Next: add steps with `acp mission split --mission {mission_id} --step "..."`[/]'
     )
 
 
@@ -1568,8 +1564,10 @@ def mission_list(
     for m in missions:
         completed = sum(1 for s in m.steps if s.status == "completed")
         step_str = f"{completed}/{len(m.steps)}"
-        color = "green" if m.status.value == "completed" else (
-            "cyan" if m.status.value == "in_progress" else "white"
+        color = (
+            "green"
+            if m.status.value == "completed"
+            else ("cyan" if m.status.value == "in_progress" else "white")
         )
         console.print(
             f"  {m.mission_id:<28}  [{color}]{m.status.value:<14}[/{color}]  "
@@ -1680,8 +1678,7 @@ def mission_split(
     console.print(f"  description: {step}")
     console.print("  status: pending")
     console.print(
-        f"\n[dim]{step_num} step(s) total. "
-        f"View with `acp mission show --mission {mission_id}`[/]"
+        f"\n[dim]{step_num} step(s) total. View with `acp mission show --mission {mission_id}`[/]"
     )
 
 
@@ -1785,8 +1782,7 @@ def serve(
         from acp.api.server import state as server_state
     except ImportError as exc:
         console.print(
-            f"[red]✗[/] FastAPI not installed: {exc}\n"
-            f"  Install with: uv sync --extra api"
+            f"[red]✗[/] FastAPI not installed: {exc}\n  Install with: uv sync --extra api"
         )
         raise typer.Exit(code=1) from exc
 
@@ -1805,6 +1801,7 @@ def serve(
     console.print("  [dim]Ctrl+C to stop[/]")
 
     import uvicorn
+
     uvicorn.run(
         "acp.api.server:app",
         host=host,

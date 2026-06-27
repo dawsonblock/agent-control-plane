@@ -8,10 +8,9 @@ ingestion) keys off.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yaml
-
 from pydantic import BaseModel, Field
 
 from acp.gitops.diff import DiffCapture
@@ -26,7 +25,7 @@ def build_frontmatter(
     today: datetime | None = None,
 ) -> str:
     """Return a YAML frontmatter block (with leading and trailing ``---``)."""
-    created = (today or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    created = (today or datetime.now(UTC)).strftime("%Y-%m-%d")
     sources = [
         "diff.patch",
         "diff_stat.txt",
@@ -41,7 +40,7 @@ def build_frontmatter(
         "status": task.status.value,
         "risk": review.risk.value,
         "recommendation": review.recommendation.value,
-        "approved": False,                  # human must flip this
+        "approved": False,  # human must flip this
         "memory_status": MemoryStatus.DRAFT.value,
         "graphiti_ingested": False,
         "created": created,

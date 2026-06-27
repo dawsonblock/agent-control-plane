@@ -18,7 +18,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-
 from acp.config import ReviewSection
 from acp.review.secret_scanner import (
     SecretFinding,
@@ -26,7 +25,6 @@ from acp.review.secret_scanner import (
     scan_with_trufflehog,
     trufflehog_installed,
 )
-
 
 # --------------------------------------------------------------------------- #
 # 1. trufflehog_installed()
@@ -39,7 +37,9 @@ class TestTruffleHogInstalled:
             assert trufflehog_installed() is False
 
     def test_returns_true_when_installed(self):
-        with patch("acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"):
+        with patch(
+            "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
+        ):
             assert trufflehog_installed() is True
 
 
@@ -77,7 +77,9 @@ class TestScanDiffFallback:
         patch_text = '+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"'
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=True):
             with patch("acp.review.secret_scanner.scan_with_trufflehog") as mock_th:
-                findings = scan_diff(patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=False)
+                findings = scan_diff(
+                    patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=False
+                )
                 mock_th.assert_not_called()
                 # Regex scanner still runs.
                 assert len(findings) > 0
@@ -95,8 +97,12 @@ class TestScanDiffWithTruffleHog:
         mock_findings = [SecretFinding(kind="trufflehog:aws", snippet="AKIA…LE", line_no=1)]
 
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=True):
-            with patch("acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_findings):
-                findings = scan_diff(patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True)
+            with patch(
+                "acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_findings
+            ):
+                findings = scan_diff(
+                    patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
+                )
                 # Should include the TruffleHog finding.
                 assert any(f.kind == "trufflehog:aws" for f in findings)
 
@@ -113,8 +119,12 @@ class TestScanDiffMerges:
         mock_th_findings = [SecretFinding(kind="trufflehog:openai", snippet="sk-…", line_no=5)]
 
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=True):
-            with patch("acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_th_findings):
-                findings = scan_diff(patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True)
+            with patch(
+                "acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_th_findings
+            ):
+                findings = scan_diff(
+                    patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
+                )
                 kinds = {f.kind for f in findings}
                 # Regex scanner found the AWS key.
                 assert "aws_access_key" in kinds
@@ -128,11 +138,18 @@ class TestScanDiffMerges:
         mock_th_findings = [SecretFinding(kind="aws_access_key", snippet="AKIA…LE", line_no=1)]
 
         with patch("acp.review.secret_scanner.trufflehog_installed", return_value=True):
-            with patch("acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_th_findings):
-                with patch("acp.review.secret_scanner.scan_patch", return_value=[
-                    SecretFinding(kind="aws_access_key", snippet="AKIA…LE", line_no=1),
-                ]):
-                    findings = scan_diff(patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True)
+            with patch(
+                "acp.review.secret_scanner.scan_with_trufflehog", return_value=mock_th_findings
+            ):
+                with patch(
+                    "acp.review.secret_scanner.scan_patch",
+                    return_value=[
+                        SecretFinding(kind="aws_access_key", snippet="AKIA…LE", line_no=1),
+                    ],
+                ):
+                    findings = scan_diff(
+                        patch_text, worktree_path=Path("/tmp/fake"), use_trufflehog=True
+                    )
                     # Should not duplicate.
                     aws_findings = [f for f in findings if f.kind == "aws_access_key"]
                     assert len(aws_findings) == 1
@@ -147,21 +164,31 @@ class TestTruffleHogVerifiedFiltering:
     def test_only_verified_findings_included(self, tmp_path):
         """scan_with_trufflehog only includes verified findings."""
         # Mock TruffleHog JSON output with one verified and one unverified.
-        th_output = json.dumps({
-            "DetectorName": "AWS",
-            "Verified": True,
-            "Raw": "AKIAIOSFODNN7EXAMPLE",
-            "SourceMetadata": {"Metadata": {"line": 10}},
-        }) + "\n" + json.dumps({
-            "DetectorName": "GitHub",
-            "Verified": False,
-            "Raw": "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
-            "SourceMetadata": {"Metadata": {"line": 20}},
-        })
+        th_output = (
+            json.dumps(
+                {
+                    "DetectorName": "AWS",
+                    "Verified": True,
+                    "Raw": "AKIAIOSFODNN7EXAMPLE",
+                    "SourceMetadata": {"Metadata": {"line": 10}},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "DetectorName": "GitHub",
+                    "Verified": False,
+                    "Raw": "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+                    "SourceMetadata": {"Metadata": {"line": 20}},
+                }
+            )
+        )
 
         mock_proc = MagicMock(stdout=th_output, stderr="", returncode=0)
 
-        with patch("acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"):
+        with patch(
+            "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
+        ):
             with patch("acp.review.secret_scanner.subprocess.run", return_value=mock_proc):
                 findings = scan_with_trufflehog(tmp_path)
                 # Only the verified AWS finding should be included.
@@ -171,15 +198,19 @@ class TestTruffleHogVerifiedFiltering:
 
     def test_handles_malformed_json_gracefully(self, tmp_path):
         """scan_with_trufflehog skips malformed JSON lines."""
-        th_output = "not json\n" + json.dumps({
-            "DetectorName": "AWS",
-            "Verified": True,
-            "Raw": "AKIAIOSFODNN7EXAMPLE",
-        })
+        th_output = "not json\n" + json.dumps(
+            {
+                "DetectorName": "AWS",
+                "Verified": True,
+                "Raw": "AKIAIOSFODNN7EXAMPLE",
+            }
+        )
 
         mock_proc = MagicMock(stdout=th_output, stderr="", returncode=0)
 
-        with patch("acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"):
+        with patch(
+            "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
+        ):
             with patch("acp.review.secret_scanner.subprocess.run", return_value=mock_proc):
                 findings = scan_with_trufflehog(tmp_path)
                 # Should skip the malformed line and include the valid one.
@@ -190,8 +221,13 @@ class TestTruffleHogVerifiedFiltering:
         """scan_with_trufflehog returns empty list on timeout."""
         import subprocess
 
-        with patch("acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"):
-            with patch("acp.review.secret_scanner.subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 10)):
+        with patch(
+            "acp.review.secret_scanner.shutil.which", return_value="/usr/local/bin/trufflehog"
+        ):
+            with patch(
+                "acp.review.secret_scanner.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("cmd", 10),
+            ):
                 findings = scan_with_trufflehog(tmp_path)
                 assert findings == []
 

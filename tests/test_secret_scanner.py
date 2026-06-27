@@ -95,10 +95,14 @@ def test_deleted_lines_not_scanned() -> None:
     """Only added lines (starting with +) are scanned, not context or deletions."""
     # Construct at runtime to avoid GitHub secret scanning false positive.
     aws_parts = ["AKIA", "IOSFODNN7EXAMPLE"]
-    patch = "-" + "".join(aws_parts) + """
+    patch = (
+        "-"
+        + "".join(aws_parts)
+        + """
  context line
 +some normal code
 """
+    )
     findings = scan_patch(patch)
     assert len(findings) == 0
 
@@ -186,10 +190,7 @@ def test_hard_block_empty_patch() -> None:
 def test_hard_block_multiple_findings() -> None:
     """Multiple secrets in one patch are all returned."""
     parts = ["AKIA", "IOSFODNN7EXAMPLE"]
-    patch = (
-        "+export AWS_KEY=" + "".join(parts) + "\n"
-        "+-----BEGIN RSA PRIVATE KEY-----\n"
-    )
+    patch = "+export AWS_KEY=" + "".join(parts) + "\n+-----BEGIN RSA PRIVATE KEY-----\n"
     hard_blocks = detect_hard_block_secrets(patch)
     kinds = {f.kind for f in hard_blocks}
     assert "aws_access_key" in kinds

@@ -27,7 +27,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # The structured line format the agent emits to request a sub-task.
 # Example: "ACP_SPAWN_SUBTASK: Refactor the auth module to use OAuth2"
 _SPAWN_RE = re.compile(

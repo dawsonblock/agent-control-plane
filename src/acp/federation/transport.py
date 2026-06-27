@@ -160,32 +160,28 @@ class StdioTransport:
             ) from exc
 
         import select
+
         assert self._proc.stdout is not None
         ready, _, _ = select.select(
-            [self._proc.stdout], [], [], self.timeout_seconds,
+            [self._proc.stdout],
+            [],
+            [],
+            self.timeout_seconds,
         )
         if not ready:
             raise MCPError(
-                f"MCP server '{self.server_name}' timed out after "
-                f"{self.timeout_seconds}s"
+                f"MCP server '{self.server_name}' timed out after {self.timeout_seconds}s"
             )
         response_line = self._proc.stdout.readline()
         if not response_line:
-            raise MCPError(
-                f"MCP server '{self.server_name}' closed connection"
-            )
+            raise MCPError(f"MCP server '{self.server_name}' closed connection")
         try:
             response = json.loads(response_line)
         except json.JSONDecodeError as exc:
-            raise MCPError(
-                f"MCP server '{self.server_name}' returned invalid JSON: {exc}"
-            ) from exc
+            raise MCPError(f"MCP server '{self.server_name}' returned invalid JSON: {exc}") from exc
         if "error" in response:
             error = response["error"]
-            raise MCPError(
-                f"MCP server '{self.server_name}' error: "
-                f"{error.get('message', error)}"
-            )
+            raise MCPError(f"MCP server '{self.server_name}' error: {error.get('message', error)}")
         return response.get("result", {})
 
 
@@ -227,11 +223,13 @@ class HTTPTransport:
         # a GET request. If both fail, the server is unreachable.
         if self._connected:
             return
-        import urllib.request
         import urllib.error
+        import urllib.request
+
         try:
             req = urllib.request.Request(
-                self.url, method="HEAD",
+                self.url,
+                method="HEAD",
                 headers=self.headers,
             )
             urllib.request.urlopen(req, timeout=self.timeout_seconds)
@@ -242,7 +240,8 @@ class HTTPTransport:
             if exc.code == 405:
                 try:
                     req = urllib.request.Request(
-                        self.url, method="GET",
+                        self.url,
+                        method="GET",
                         headers=self.headers,
                     )
                     urllib.request.urlopen(req, timeout=self.timeout_seconds)
@@ -250,18 +249,15 @@ class HTTPTransport:
                     return
                 except Exception as exc2:  # noqa: BLE001
                     raise MCPError(
-                        f"MCP HTTP server '{self.server_name}' unreachable at "
-                        f"{self.url}: {exc2}"
+                        f"MCP HTTP server '{self.server_name}' unreachable at {self.url}: {exc2}"
                     ) from exc2
             # Other HTTP errors (4xx, 5xx) — server is reachable but unhealthy.
             raise MCPError(
-                f"MCP HTTP server '{self.server_name}' unreachable at "
-                f"{self.url}: HTTP {exc.code}"
+                f"MCP HTTP server '{self.server_name}' unreachable at {self.url}: HTTP {exc.code}"
             ) from exc
         except Exception as exc:  # noqa: BLE001
             raise MCPError(
-                f"MCP HTTP server '{self.server_name}' unreachable at "
-                f"{self.url}: {exc}"
+                f"MCP HTTP server '{self.server_name}' unreachable at {self.url}: {exc}"
             ) from exc
 
     def stop(self) -> None:
@@ -275,23 +271,24 @@ class HTTPTransport:
         if not self._connected:
             self.start()
         import urllib.request
+
         body = json.dumps(request).encode("utf-8")
         headers = {"Content-Type": "application/json", **self.headers}
         try:
             req = urllib.request.Request(
-                self.url, data=body, headers=headers, method="POST",
+                self.url,
+                data=body,
+                headers=headers,
+                method="POST",
             )
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
                 response = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
-            raise MCPError(
-                f"MCP HTTP server '{self.server_name}' request failed: {exc}"
-            ) from exc
+            raise MCPError(f"MCP HTTP server '{self.server_name}' request failed: {exc}") from exc
         if "error" in response:
             error = response["error"]
             raise MCPError(
-                f"MCP HTTP server '{self.server_name}' error: "
-                f"{error.get('message', error)}"
+                f"MCP HTTP server '{self.server_name}' error: {error.get('message', error)}"
             )
         return response.get("result", {})
 
@@ -340,17 +337,18 @@ class SSETransport:
         # We don't open the SSE stream yet — that happens per-request
         # to avoid holding a connection open indefinitely.
         import urllib.request
+
         try:
             req = urllib.request.Request(
-                self.events_url, method="HEAD",
+                self.events_url,
+                method="HEAD",
                 headers={"Accept": "text/event-stream", **self.headers},
             )
             urllib.request.urlopen(req, timeout=self.timeout_seconds)
             self._connected = True
         except Exception as exc:  # noqa: BLE001
             raise MCPError(
-                f"MCP SSE server '{self.server_name}' unreachable at "
-                f"{self.events_url}: {exc}"
+                f"MCP SSE server '{self.server_name}' unreachable at {self.events_url}: {exc}"
             ) from exc
 
     def stop(self) -> None:
@@ -368,6 +366,7 @@ class SSETransport:
         # the response directly in the POST response body (simpler than
         # full SSE streaming for request-response patterns).
         import urllib.request
+
         body = json.dumps(request).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -376,7 +375,10 @@ class SSETransport:
         }
         try:
             req = urllib.request.Request(
-                self.request_url, data=body, headers=headers, method="POST",
+                self.request_url,
+                data=body,
+                headers=headers,
+                method="POST",
             )
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
                 content_type = resp.headers.get("Content-Type", "")
@@ -386,14 +388,11 @@ class SSETransport:
                 else:
                     response = json.loads(raw)
         except Exception as exc:  # noqa: BLE001
-            raise MCPError(
-                f"MCP SSE server '{self.server_name}' request failed: {exc}"
-            ) from exc
+            raise MCPError(f"MCP SSE server '{self.server_name}' request failed: {exc}") from exc
         if "error" in response:
             error = response["error"]
             raise MCPError(
-                f"MCP SSE server '{self.server_name}' error: "
-                f"{error.get('message', error)}"
+                f"MCP SSE server '{self.server_name}' error: {error.get('message', error)}"
             )
         return response.get("result", {})
 
@@ -408,6 +407,7 @@ class SSETransport:
         first event with a JSON payload and return it.
         """
         import re
+
         # Split on blank lines — handle \n\n, \r\n\r\n, and \r\r per SSE spec.
         for block in re.split(r"\r\n\r\n|\r\r|\n\n", raw):
             data_lines = []

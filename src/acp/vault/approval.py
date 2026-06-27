@@ -18,7 +18,7 @@ The caller (CLI) is responsible for writing the ``human.approved`` or
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -95,29 +95,27 @@ def _update_note(
 
     # Safety checks — fail closed.
     if action == "approved" and frontmatter.approved:
-        raise PermissionError(
-            f"note is already approved — cannot approve again: {note_path}"
-        )
+        raise PermissionError(f"note is already approved — cannot approve again: {note_path}")
     if action == "rejected" and frontmatter.approved:
         raise PermissionError(
             f"note is already approved — cannot reject after approval: {note_path}"
         )
     if action == "rejected" and frontmatter.memory_status == MemoryStatus.ARCHIVED.value:
-        raise PermissionError(
-            f"note is already archived — cannot reject again: {note_path}"
-        )
+        raise PermissionError(f"note is already archived — cannot reject again: {note_path}")
 
     # Update the frontmatter fields.
-    timestamp = (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+    timestamp = (now or datetime.now(UTC)).isoformat().replace("+00:00", "Z")
     frontmatter.approved = approved
     frontmatter.memory_status = memory_status
 
     # Append to the audit trail (preserves existing entries from the model).
-    frontmatter.audit_trail.append({
-        "action": action,
-        "actor": actor or "unknown",
-        "timestamp": timestamp,
-    })
+    frontmatter.audit_trail.append(
+        {
+            "action": action,
+            "actor": actor or "unknown",
+            "timestamp": timestamp,
+        }
+    )
 
     # Re-serialize frontmatter to YAML.
     data = frontmatter.model_dump()

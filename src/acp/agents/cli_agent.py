@@ -120,7 +120,7 @@ class CLIAgent:
         except subprocess.TimeoutExpired as exc:
             exit_code = 124  # standard timeout exit code
             out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = (exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             err = f"acp: agent timed out after {timeout_seconds}s\n{err}"
         except Exception as exc:  # noqa: BLE001
             exit_code = 127
@@ -135,10 +135,7 @@ class CLIAgent:
             exit_code=exit_code,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            summary=(
-                f"CLI agent ran: {command} "
-                f"(exit {exit_code}, {duration:.2f}s)"
-            ),
+            summary=(f"CLI agent ran: {command} (exit {exit_code}, {duration:.2f}s)"),
         )
 
     def _render(

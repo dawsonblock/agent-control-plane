@@ -44,3 +44,9 @@ vault/tasks/*
 *.swp
 ui/node_modules/
 ui/dist/
+
+# Linter / type-checker caches
+.ruff_cache/
+.mypy_cache/
+.bandit/
+

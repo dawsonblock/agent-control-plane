@@ -102,9 +102,7 @@ class ShellAgent:
         )
         test_dir = worktree_path / "tests"
         test_dir.mkdir(parents=True, exist_ok=True)
-        (test_dir / "test_agent_edit.py").write_text(
-            "def test_agent_edit():\n    assert True\n"
-        )
+        (test_dir / "test_agent_edit.py").write_text("def test_agent_edit():\n    assert True\n")
         stdout_path.write_text(
             "ACP_TEST mode: ShellAgent created AGENT_NOTES.md + tests/test_agent_edit.py.\n"
         )

@@ -19,14 +19,13 @@ from acp.federation.client import (
     MCPClient,
 )
 from acp.federation.transport import (
+    HTTPTransport,
     MCPError,
+    SSETransport,
     StdioTransport,
     Transport,
-    HTTPTransport,
-    SSETransport,
     create_transport,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Mock MCP server — a Python script that speaks JSON-RPC over stdio
@@ -205,7 +204,8 @@ class TestFederationManager:
             assert "Unknown MCP server" in result.error
 
     def test_graceful_degradation_on_bad_server(
-        self, mock_server_path: Path,
+        self,
+        mock_server_path: Path,
     ):
         """FederationManager skips servers that fail to start."""
         servers = [
@@ -252,12 +252,14 @@ class TestFederationConfig:
         assert cfg.servers == []
 
     def test_federation_with_servers(self):
-        cfg = FederationSection(servers=[
-            FederationServerConfig(
-                name="my-server",
-                command=["python", "-m", "my_mcp_server"],
-            ),
-        ])
+        cfg = FederationSection(
+            servers=[
+                FederationServerConfig(
+                    name="my-server",
+                    command=["python", "-m", "my_mcp_server"],
+                ),
+            ]
+        )
         assert len(cfg.servers) == 1
         assert cfg.servers[0].name == "my-server"
         assert cfg.servers[0].command == ["python", "-m", "my_mcp_server"]
@@ -265,14 +267,16 @@ class TestFederationConfig:
     def test_federation_in_repo_config(self):
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=Path("/tmp/test")),
-            federation=FederationSection(servers=[
-                FederationServerConfig(
-                    name="search-agent",
-                    command=["python", "-m", "search_mcp"],
-                    env={"API_KEY": "secret"},
-                    timeout_seconds=60,
-                ),
-            ]),
+            federation=FederationSection(
+                servers=[
+                    FederationServerConfig(
+                        name="search-agent",
+                        command=["python", "-m", "search_mcp"],
+                        env={"API_KEY": "secret"},
+                        timeout_seconds=60,
+                    ),
+                ]
+            ),
         )
         assert len(cfg.federation.servers) == 1
         assert cfg.federation.servers[0].name == "search-agent"
@@ -282,11 +286,17 @@ class TestFederationConfig:
     def test_federation_section_optional_in_yaml(self, tmp_path: Path):
         """A repo config without a federation section loads fine."""
         import yaml
+
         config_file = tmp_path / "test.repo.yaml"
-        config_file.write_text(yaml.dump({
-            "repo": {"name": "test", "path": str(tmp_path)},
-        }))
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "repo": {"name": "test", "path": str(tmp_path)},
+                }
+            )
+        )
         from acp.config import load_repo_config
+
         cfg = load_repo_config(config_file)
         assert cfg.federation.servers == []
 
@@ -316,37 +326,45 @@ class TestTransportProtocol:
 
     def test_create_transport_stdio(self):
         """create_transport creates a StdioTransport for stdio config."""
-        t = create_transport({
-            "name": "test",
-            "transport": "stdio",
-            "command": ["python", "-m", "server"],
-        })
+        t = create_transport(
+            {
+                "name": "test",
+                "transport": "stdio",
+                "command": ["python", "-m", "server"],
+            }
+        )
         assert isinstance(t, StdioTransport)
 
     def test_create_transport_http(self):
         """create_transport creates an HTTPTransport for http config."""
-        t = create_transport({
-            "name": "test",
-            "transport": "http",
-            "url": "http://localhost:8080/mcp",
-        })
+        t = create_transport(
+            {
+                "name": "test",
+                "transport": "http",
+                "url": "http://localhost:8080/mcp",
+            }
+        )
         assert isinstance(t, HTTPTransport)
 
     def test_create_transport_sse(self):
         """create_transport creates an SSETransport for sse config."""
-        t = create_transport({
-            "name": "test",
-            "transport": "sse",
-            "url": "http://localhost:8080",
-        })
+        t = create_transport(
+            {
+                "name": "test",
+                "transport": "sse",
+                "url": "http://localhost:8080",
+            }
+        )
         assert isinstance(t, SSETransport)
 
     def test_create_transport_defaults_to_stdio(self):
         """create_transport defaults to stdio when transport is not specified."""
-        t = create_transport({
-            "name": "test",
-            "command": ["python", "-m", "server"],
-        })
+        t = create_transport(
+            {
+                "name": "test",
+                "command": ["python", "-m", "server"],
+            }
+        )
         assert isinstance(t, StdioTransport)
 
     def test_create_transport_unknown_raises(self):
@@ -378,12 +396,14 @@ class TestStdioTransport:
         try:
             transport.start()
             assert transport.is_connected
-            result = transport.send_request({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/list",
-                "params": {},
-            })
+            result = transport.send_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list",
+                    "params": {},
+                }
+            )
             assert "tools" in result
             assert len(result["tools"]) == 2
         finally:
@@ -412,28 +432,19 @@ class TestSSEParsing:
 
     def test_parse_sse_single_event(self):
         """SSE parser extracts JSON from a single event."""
-        sse_data = (
-            'data: {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}\n\n'
-        )
+        sse_data = 'data: {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}\n\n'
         result = SSETransport._parse_sse_response(sse_data)
         assert result["result"] == {"tools": []}
 
     def test_parse_sse_multi_line_data(self):
         """SSE parser handles multi-line data fields."""
-        sse_data = (
-            'data: {"jsonrpc": "2.0",\n'
-            'data: "id": 1,\n'
-            'data: "result": {"tools": []}}\n\n'
-        )
+        sse_data = 'data: {"jsonrpc": "2.0",\ndata: "id": 1,\ndata: "result": {"tools": []}}\n\n'
         result = SSETransport._parse_sse_response(sse_data)
         assert result["result"] == {"tools": []}
 
     def test_parse_sse_skips_non_json_events(self):
         """SSE parser skips events without JSON data."""
-        sse_data = (
-            'event: ping\ndata: pong\n\n'
-            'data: {"jsonrpc": "2.0", "id": 1, "result": {}}\n\n'
-        )
+        sse_data = 'event: ping\ndata: pong\n\ndata: {"jsonrpc": "2.0", "id": 1, "result": {}}\n\n'
         result = SSETransport._parse_sse_response(sse_data)
         assert result["jsonrpc"] == "2.0"
 
@@ -551,22 +562,28 @@ class TestExtendedFederationConfig:
     def test_http_config_in_yaml(self, tmp_path: Path):
         """A repo config with an HTTP MCP server loads correctly."""
         import yaml
+
         config_file = tmp_path / "test.repo.yaml"
-        config_file.write_text(yaml.dump({
-            "repo": {"name": "test", "path": str(tmp_path)},
-            "federation": {
-                "servers": [
-                    {
-                        "name": "remote-mcp",
-                        "transport": "http",
-                        "url": "https://mcp.example.com/rpc",
-                        "headers": {"Authorization": "Bearer token"},
-                        "timeout_seconds": 60,
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "repo": {"name": "test", "path": str(tmp_path)},
+                    "federation": {
+                        "servers": [
+                            {
+                                "name": "remote-mcp",
+                                "transport": "http",
+                                "url": "https://mcp.example.com/rpc",
+                                "headers": {"Authorization": "Bearer token"},
+                                "timeout_seconds": 60,
+                            },
+                        ],
                     },
-                ],
-            },
-        }))
+                }
+            )
+        )
         from acp.config import load_repo_config
+
         cfg = load_repo_config(config_file)
         assert len(cfg.federation.servers) == 1
         server = cfg.federation.servers[0]

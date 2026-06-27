@@ -20,7 +20,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 from acp.agents.base import AgentResult
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter
@@ -29,10 +28,10 @@ from acp.graph.workflow import build_workflow
 from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 
-
 # --------------------------------------------------------------------------- #
 # A controllable agent that runs a script of actions, one per invocation.
 # --------------------------------------------------------------------------- #
+
 
 class ScriptedAgent:
     """Agent whose behavior is a list of callables, consumed one per ``run``.
@@ -73,6 +72,7 @@ def _factory_for(agent: ScriptedAgent):
 # Helpers
 # --------------------------------------------------------------------------- #
 
+
 def _run(repo_path, runs_root, vault_root, *, agent, test_cmd, max_repair_attempts):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
@@ -101,13 +101,16 @@ def _event_types(store, task_id):
 def _main_head(repo_path):
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
 # --------------------------------------------------------------------------- #
 # Test 1: repair succeeds — failing test is fixed on the repair attempt.
 # --------------------------------------------------------------------------- #
+
 
 def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
     """A failing test triggers one repair attempt that fixes it → PASSED.
@@ -149,7 +152,8 @@ def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
     # One repair attempt → one repair.attempted event. No repair.exhausted
     # because the repair succeeded (tests pass, no further repair needed).
     repair_rounds = sum(
-        1 for e in events
+        1
+        for e in events
         if e in (EventType.REPAIR_ATTEMPTED.value, EventType.REPAIR_EXHAUSTED.value)
     )
     assert repair_rounds == 1, f"expected 1 repair event, got {repair_rounds}"
@@ -173,6 +177,7 @@ def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
 # --------------------------------------------------------------------------- #
 # Test 2: repair exhausted — keeps failing, hits the cap, no infinite loop.
 # --------------------------------------------------------------------------- #
+
 
 def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
     """Failing tests after max attempts fall through to FAILED + report.
@@ -214,9 +219,7 @@ def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
     assert len(repair_events) == 2, (
         f"expected exactly 2 repair.attempted events, got {len(repair_events)}"
     )
-    assert len(exhausted) == 1, (
-        f"expected exactly 1 repair.exhausted event, got {len(exhausted)}"
-    )
+    assert len(exhausted) == 1, f"expected exactly 1 repair.exhausted event, got {len(exhausted)}"
     # A terminal failure event was written and a report produced.
     assert EventType.TASK_FAILED.value in events
     assert EventType.REPORT_WRITTEN.value in events
@@ -232,6 +235,7 @@ def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
 # --------------------------------------------------------------------------- #
 # Test 3: max_repair_attempts=0 means no repair attempted at all.
 # --------------------------------------------------------------------------- #
+
 
 def test_repair_disabled_when_max_zero(disposable_repo, isolated_workspace):
     """max_repair_attempts=0 → failing test goes straight to FAILED, no repair."""

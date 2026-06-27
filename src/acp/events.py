@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -197,9 +198,7 @@ class EventWriter:
                 except Exception:  # noqa: BLE001
                     pass
 
-    def write(
-        self, type: EventType, payload: dict[str, Any] | None = None
-    ) -> Event:
+    def write(self, type: EventType, payload: dict[str, Any] | None = None) -> Event:
         """Append one event, fsync it to disk, and return the Event object.
 
         The write is crash-safe: the file is flushed and fsync'd before
@@ -307,7 +306,6 @@ class EventWriter:
 
 def _utcnow_iso() -> str:
     """ISO-8601 UTC timestamp with a trailing Z."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+    from datetime import datetime
+
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yaml
 
@@ -108,7 +108,7 @@ def test_frontmatter_has_sources_list() -> None:
 
 
 def test_frontmatter_accepts_explicit_date() -> None:
-    dt = datetime(2026, 6, 22, tzinfo=timezone.utc)
+    dt = datetime(2026, 6, 22, tzinfo=UTC)
     fm = build_frontmatter(task=_task(), review=_review(), diff=_diff(), today=dt)
     parsed = _parse_frontmatter(fm)
     assert parsed["created"] == "2026-06-22"

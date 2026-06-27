@@ -12,6 +12,7 @@ import pytest
 
 try:
     from fastapi.testclient import TestClient
+
     FASTAPI_INSTALLED = True
 except ImportError:
     FASTAPI_INSTALLED = False
@@ -44,6 +45,7 @@ def _make_repo_config(tmp_path: Path) -> Path:
 def _make_client(tmp_path: Path):
     """Create a TestClient with a configured repo."""
     from acp.api.server import app, state
+
     config_path = _make_repo_config(tmp_path)
     state.set_config(str(config_path))
     return TestClient(app)
@@ -67,6 +69,7 @@ class TestHealth:
 
     def test_set_config(self, tmp_path):
         from acp.api.server import app, state
+
         config_path = _make_repo_config(tmp_path)
         client = TestClient(app)
         state._config_cache = None  # reset
@@ -77,6 +80,7 @@ class TestHealth:
 
     def test_set_config_not_found(self, tmp_path):
         from acp.api.server import app, state
+
         client = TestClient(app)
         state._config_cache = None
 
@@ -103,8 +107,8 @@ class TestTaskListing:
         assert resp.json() == []
 
     def test_list_with_task(self, tmp_path):
-        from acp.store import TaskStore
         from acp.models import Task, TaskStatus
+        from acp.store import TaskStore
 
         runs_root = tmp_path / "runs"
         runs_root.mkdir()
@@ -155,8 +159,8 @@ class TestTaskDetail:
         assert resp.status_code == 400
 
     def test_get_task(self, tmp_path):
-        from acp.store import TaskStore
         from acp.models import Task, TaskStatus
+        from acp.store import TaskStore
 
         runs_root = tmp_path / "runs"
         runs_root.mkdir()
@@ -219,6 +223,7 @@ class TestEvents:
 
         events = EventWriter("task_20260626_0001", run_dir)
         from acp.models import EventType
+
         events.write(EventType.TASK_CREATED, {"test": True})
 
         client = _make_client(tmp_path)
@@ -294,8 +299,8 @@ class TestApproveReject:
     """POST /tasks/{task_id}/approve and /reject."""
 
     def _setup_task_and_note(self, tmp_path, status="passed"):
-        from acp.store import TaskStore
         from acp.models import Task, TaskStatus
+        from acp.store import TaskStore
 
         runs_root = tmp_path / "runs"
         vault_root = tmp_path / "vault"

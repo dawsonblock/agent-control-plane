@@ -23,9 +23,8 @@ from typer.testing import CliRunner
 from acp.cli import app
 from acp.config import MissionSection, RepoConfig, RepoSection
 from acp.events import EventWriter, verify_event_chain
-from acp.models import EventType, Mission, MissionStatus, MissionStep
 from acp.missions.store import MissionStore, is_valid_mission_id
-
+from acp.models import EventType, Mission, MissionStatus, MissionStep
 
 runner = CliRunner()
 
@@ -378,12 +377,7 @@ def _make_repo_config_file(tmp_path: Path) -> Path:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     config_path = tmp_path / "demo.repo.yaml"
-    config_path.write_text(
-        f"repo:\n"
-        f"  name: demo\n"
-        f"  path: {repo_path}\n"
-        f"  default_branch: main\n"
-    )
+    config_path.write_text(f"repo:\n  name: demo\n  path: {repo_path}\n  default_branch: main\n")
     return config_path
 
 
@@ -392,13 +386,21 @@ def test_cli_mission_create(tmp_path):
     config_path = _make_repo_config_file(tmp_path)
     missions_dir = tmp_path / "missions"
 
-    result = runner.invoke(app, [
-        "mission", "create",
-        "--config", str(config_path),
-        "--goal", "Migrate to React 19",
-        "--description", "Big migration",
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "create",
+            "--config",
+            str(config_path),
+            "--goal",
+            "Migrate to React 19",
+            "--description",
+            "Big migration",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "mission" in result.output
     assert "created" in result.output
@@ -418,18 +420,30 @@ def test_cli_mission_list(tmp_path):
 
     # Create two missions.
     for goal in ["Goal A", "Goal B"]:
-        r = runner.invoke(app, [
-            "mission", "create",
-            "--config", str(config_path),
-            "--goal", goal,
-            "--missions-dir", str(missions_dir),
-        ])
+        r = runner.invoke(
+            app,
+            [
+                "mission",
+                "create",
+                "--config",
+                str(config_path),
+                "--goal",
+                goal,
+                "--missions-dir",
+                str(missions_dir),
+            ],
+        )
         assert r.exit_code == 0, r.output
 
-    result = runner.invoke(app, [
-        "mission", "list",
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "list",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "Goal A" in result.output
     assert "Goal B" in result.output
@@ -442,12 +456,19 @@ def test_cli_mission_show(tmp_path):
     missions_dir = tmp_path / "missions"
 
     # Create a mission.
-    r = runner.invoke(app, [
-        "mission", "create",
-        "--config", str(config_path),
-        "--goal", "Migrate to React 19",
-        "--missions-dir", str(missions_dir),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "mission",
+            "create",
+            "--config",
+            str(config_path),
+            "--goal",
+            "Migrate to React 19",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert r.exit_code == 0, r.output
     # Extract the mission_id from the output.
     match = _MISSION_ID_RE.search(r.output)
@@ -455,20 +476,33 @@ def test_cli_mission_show(tmp_path):
     mid = match.group()  # "mission_20260626_0001"
 
     # Add a step.
-    r = runner.invoke(app, [
-        "mission", "split",
-        "--mission", mid,
-        "--step", "Update package.json",
-        "--missions-dir", str(missions_dir),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "mission",
+            "split",
+            "--mission",
+            mid,
+            "--step",
+            "Update package.json",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert r.exit_code == 0, r.output
 
     # Show the mission.
-    result = runner.invoke(app, [
-        "mission", "show",
-        "--mission", mid,
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "show",
+            "--mission",
+            mid,
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "Migrate to React 19" in result.output
     assert "Update package.json" in result.output
@@ -481,24 +515,38 @@ def test_cli_mission_split(tmp_path):
     missions_dir = tmp_path / "missions"
 
     # Create a mission.
-    r = runner.invoke(app, [
-        "mission", "create",
-        "--config", str(config_path),
-        "--goal", "Goal",
-        "--missions-dir", str(missions_dir),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "mission",
+            "create",
+            "--config",
+            str(config_path),
+            "--goal",
+            "Goal",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert r.exit_code == 0, r.output
     match = _MISSION_ID_RE.search(r.output)
     assert match, f"no mission_id in output: {r.output}"
     mid = match.group()
 
     # Add a step.
-    result = runner.invoke(app, [
-        "mission", "split",
-        "--mission", mid,
-        "--step", "Step A",
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "split",
+            "--mission",
+            mid,
+            "--step",
+            "Step A",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "step 1" in result.output
     assert "Step A" in result.output
@@ -516,23 +564,37 @@ def test_cli_mission_complete(tmp_path):
     missions_dir = tmp_path / "missions"
 
     # Create a mission with a step.
-    r = runner.invoke(app, [
-        "mission", "create",
-        "--config", str(config_path),
-        "--goal", "Goal",
-        "--missions-dir", str(missions_dir),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "mission",
+            "create",
+            "--config",
+            str(config_path),
+            "--goal",
+            "Goal",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert r.exit_code == 0, r.output
     match = _MISSION_ID_RE.search(r.output)
     assert match, f"no mission_id in output: {r.output}"
     mid = match.group()
 
-    runner.invoke(app, [
-        "mission", "split",
-        "--mission", mid,
-        "--step", "Step A",
-        "--missions-dir", str(missions_dir),
-    ])
+    runner.invoke(
+        app,
+        [
+            "mission",
+            "split",
+            "--mission",
+            mid,
+            "--step",
+            "Step A",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
 
     # Mark the step as completed via the store (CLI for step execution is
     # a future concern — the mission layer tracks step state, not task
@@ -542,11 +604,17 @@ def test_cli_mission_complete(tmp_path):
     store.mark_step_completed(mid, 0, success=True)
 
     # Complete the mission via CLI.
-    result = runner.invoke(app, [
-        "mission", "complete",
-        "--mission", mid,
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "complete",
+            "--mission",
+            mid,
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "completed" in result.output
 
@@ -560,30 +628,50 @@ def test_cli_mission_complete_rejects_non_terminal(tmp_path):
     config_path = _make_repo_config_file(tmp_path)
     missions_dir = tmp_path / "missions"
 
-    r = runner.invoke(app, [
-        "mission", "create",
-        "--config", str(config_path),
-        "--goal", "Goal",
-        "--missions-dir", str(missions_dir),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "mission",
+            "create",
+            "--config",
+            str(config_path),
+            "--goal",
+            "Goal",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert r.exit_code == 0, r.output
     match = _MISSION_ID_RE.search(r.output)
     assert match, f"no mission_id in output: {r.output}"
     mid = match.group()
 
-    runner.invoke(app, [
-        "mission", "split",
-        "--mission", mid,
-        "--step", "Step A",
-        "--missions-dir", str(missions_dir),
-    ])
+    runner.invoke(
+        app,
+        [
+            "mission",
+            "split",
+            "--mission",
+            mid,
+            "--step",
+            "Step A",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
 
     # Try to complete without marking the step terminal.
-    result = runner.invoke(app, [
-        "mission", "complete",
-        "--mission", mid,
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "complete",
+            "--mission",
+            mid,
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 1, result.output
     assert "cannot complete" in result.output
 
@@ -591,11 +679,17 @@ def test_cli_mission_complete_rejects_non_terminal(tmp_path):
 def test_cli_mission_show_invalid_id(tmp_path):
     """`acp mission show` rejects non-canonical mission ids."""
     missions_dir = tmp_path / "missions"
-    result = runner.invoke(app, [
-        "mission", "show",
-        "--mission", "../etc/passwd",
-        "--missions-dir", str(missions_dir),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "mission",
+            "show",
+            "--mission",
+            "../etc/passwd",
+            "--missions-dir",
+            str(missions_dir),
+        ],
+    )
     assert result.exit_code == 1, result.output
     assert "invalid mission id" in result.output
 
@@ -670,8 +764,9 @@ def test_get_parent_task_id_no_task_spawned(tmp_path):
 
 def test_compute_parent_artifact_hash_exists(tmp_path):
     """compute_parent_artifact_hash returns sha256 of the parent's diff.patch."""
-    from acp.missions.store import compute_parent_artifact_hash
     import hashlib
+
+    from acp.missions.store import compute_parent_artifact_hash
 
     runs_root = tmp_path / "runs"
     parent_dir = runs_root / "task_20260626_0001" / "artifacts"
@@ -702,8 +797,8 @@ def test_compute_parent_artifact_hash_empty_id(tmp_path):
 
 def test_finalize_evidence_includes_parent_hash(tmp_path):
     """evidence.finalized event includes parent_artifact_hash when mission context is set."""
-    from acp.missions.store import compute_parent_artifact_hash
     from acp.events import EventWriter
+    from acp.missions.store import compute_parent_artifact_hash
     from acp.models import EventType
 
     # Create a parent task with a diff.patch artifact.

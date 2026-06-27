@@ -20,7 +20,6 @@ from acp.config import (
 from acp.events import EventWriter, verify_event_chain
 from acp.models import EventType
 
-
 # --------------------------------------------------------------------------- #
 # Forward-declared EventType enums
 # --------------------------------------------------------------------------- #
@@ -214,6 +213,7 @@ def test_repo_config_loads_proxy_from_yaml(tmp_path):
         f"    - github.com\n"
     )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_path)
     assert cfg.proxy.enabled
     assert cfg.proxy.proxy_port == 9090
@@ -234,6 +234,7 @@ def test_repo_config_loads_reranking_from_yaml(tmp_path):
         f"  top_k_after_rerank: 8\n"
     )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_path)
     assert cfg.reranking.enabled
     assert cfg.reranking.top_k_after_rerank == 8
@@ -253,5 +254,6 @@ def test_repo_config_loads_gvisor_executor_from_yaml(tmp_path):
         f"  network_policy: locked_down\n"
     )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_path)
     assert cfg.executor.backend == "gvisor"

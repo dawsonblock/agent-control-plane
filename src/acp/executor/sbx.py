@@ -201,10 +201,13 @@ class SbxExecutor:
         # v0.5.15: Pass the network policy to sbx so it's actually enforced
         # at the runtime layer, not just recorded in evidence.
         cmd = [
-            "sbx", "run",
+            "sbx",
+            "run",
             "--clone",
-            "--name", self._sandbox_name,
-            "--network", self.config.network_policy,
+            "--name",
+            self._sandbox_name,
+            "--network",
+            self.config.network_policy,
             self.config.agent,
         ]
 
@@ -230,7 +233,7 @@ class SbxExecutor:
         except subprocess.TimeoutExpired as exc:
             exit_code = 124
             out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = (exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             err = f"acp: sandbox agent timed out after {timeout_seconds}s\n{err}"
             # Best-effort: stop the sandbox on timeout.
             self.stop()

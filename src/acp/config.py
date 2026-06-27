@@ -85,8 +85,7 @@ class AgentSection(BaseModel):
         kind = v.strip().lower()
         if kind not in known:
             raise ValueError(
-                f"agent.default='{v}' is not a known agent. "
-                f"Known: {', '.join(known)}."
+                f"agent.default='{v}' is not a known agent. Known: {', '.join(known)}."
             )
         return kind
 
@@ -195,6 +194,7 @@ class ReviewSection(BaseModel):
     @classmethod
     def _validate_custom_regexes(cls, v: list[dict[str, str]]) -> list[dict[str, str]]:
         import re
+
         for entry in v:
             if "name" not in entry or "pattern" not in entry:
                 raise ValueError(
@@ -294,8 +294,7 @@ class ExecutorSection(BaseModel):
         allowed = ("worktree", "docker_sbx", "gvisor", "openhands")
         if v not in allowed:
             raise ValueError(
-                f"executor.backend='{v}' is not valid. "
-                f"Must be one of: {', '.join(allowed)}."
+                f"executor.backend='{v}' is not valid. Must be one of: {', '.join(allowed)}."
             )
         return v
 
@@ -305,8 +304,7 @@ class ExecutorSection(BaseModel):
         allowed = ("locked_down", "balanced", "open")
         if v not in allowed:
             raise ValueError(
-                f"executor.network_policy='{v}' is not valid. "
-                f"Must be one of: {', '.join(allowed)}."
+                f"executor.network_policy='{v}' is not valid. Must be one of: {', '.join(allowed)}."
             )
         return v
 
@@ -338,8 +336,7 @@ class FederationServerConfig(BaseModel):
         allowed = ("stdio", "http", "sse")
         if v not in allowed:
             raise ValueError(
-                f"federation transport='{v}' is not valid. "
-                f"Must be one of: {', '.join(allowed)}."
+                f"federation transport='{v}' is not valid. Must be one of: {', '.join(allowed)}."
             )
         return v
 
@@ -347,18 +344,14 @@ class FederationServerConfig(BaseModel):
     @classmethod
     def _validate_timeout(cls, v: int) -> int:
         if v <= 0 or v > 86400:
-            raise ValueError(
-                "federation.timeout_seconds must be between 1 and 86400 (24h)"
-            )
+            raise ValueError("federation.timeout_seconds must be between 1 and 86400 (24h)")
         return v
 
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> FederationServerConfig:
         """Ensure the right fields are present for the chosen transport."""
         if self.transport == "stdio" and not self.command:
-            raise ValueError(
-                f"federation server '{self.name}': stdio transport requires 'command'"
-            )
+            raise ValueError(f"federation server '{self.name}': stdio transport requires 'command'")
         if self.transport in ("http", "sse") and not self.url:
             raise ValueError(
                 f"federation server '{self.name}': {self.transport} transport requires 'url'"
@@ -547,8 +540,7 @@ class EvidenceSection(BaseModel):
         """When task_store_primary is 'sqlite', durable_store must be set."""
         if self.task_store_primary == "sqlite" and self.durable_store is None:
             raise ValueError(
-                "evidence.task_store_primary='sqlite' requires "
-                "evidence.durable_store to be set."
+                "evidence.task_store_primary='sqlite' requires evidence.durable_store to be set."
             )
         return self
 

@@ -16,23 +16,22 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from acp.memory.promotion_rules import (
+    PRIORITY_HIGH,
+    PRIORITY_NORMAL,
+    PRIORITY_URGENT,
+    PROMOTION_BLOCKED,
+    get_promotion_exclusions,
+    get_promotion_metadata,
+    get_promotion_priority,
+    should_promote_to_graphiti,
+)
 from acp.models import (
     EventType,
     MemoryStatus,
     Task,
     TaskStatus,
 )
-from acp.memory.promotion_rules import (
-    PROMOTION_BLOCKED,
-    PRIORITY_HIGH,
-    PRIORITY_NORMAL,
-    PRIORITY_URGENT,
-    get_promotion_exclusions,
-    get_promotion_metadata,
-    get_promotion_priority,
-    should_promote_to_graphiti,
-)
-
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -40,6 +39,7 @@ from acp.memory.promotion_rules import (
 
 try:
     import graphiti_core  # noqa: F401
+
     GRAPHITI_INSTALLED = True
 except ImportError:
     GRAPHITI_INSTALLED = False
@@ -124,8 +124,7 @@ class TestShouldPromoteToGraphiti:
     def test_approved_active_not_ingested(self, tmp_path):
         """Eligible: approved + active + not ingested + file exists."""
         task = _make_task()
-        fm = _make_frontmatter(approved=True, memory_status="active",
-                               graphiti_ingested=False)
+        fm = _make_frontmatter(approved=True, memory_status="active", graphiti_ingested=False)
         note_path = tmp_path / "note.md"
         note_path.write_text("---\napproved: true\n---\nbody")
 
@@ -436,8 +435,8 @@ class TestCLIMemoryPromote:
     """acp memory promote --dry-run shows eligible notes."""
 
     def test_dry_run_shows_eligible(self, tmp_path):
-        from acp.store import TaskStore
         from acp.models import Task, TaskStatus
+        from acp.store import TaskStore
 
         # Set up vault with an approved note.
         vault_root = tmp_path / "vault"
@@ -445,8 +444,9 @@ class TestCLIMemoryPromote:
         runs_root.mkdir()
 
         task_id = "task_20260626_0001"
-        _write_vault_note(vault_root, task_id, approved=True,
-                          memory_status="active", graphiti_ingested=False)
+        _write_vault_note(
+            vault_root, task_id, approved=True, memory_status="active", graphiti_ingested=False
+        )
 
         # Create task.json so the CLI can load it.
         store = TaskStore(runs_root=runs_root)
@@ -466,24 +466,28 @@ class TestCLIMemoryPromote:
 
         # Create repo config.
         config_path = tmp_path / "test.repo.yaml"
-        config_path.write_text(
-            f"repo:\n"
-            f"  name: test-repo\n"
-            f"  path: {tmp_path / 'repo'}\n"
-        )
+        config_path.write_text(f"repo:\n  name: test-repo\n  path: {tmp_path / 'repo'}\n")
 
         # Run the CLI command in dry-run mode.
         from typer.testing import CliRunner
+
         from acp.cli import app
 
         runner = CliRunner()
-        result = runner.invoke(app, [
-            "memory", "promote",
-            "--config", str(config_path),
-            "--vault-root", str(vault_root),
-            "--runs-root", str(runs_root),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "promote",
+                "--config",
+                str(config_path),
+                "--vault-root",
+                str(vault_root),
+                "--runs-root",
+                str(runs_root),
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         assert "1 eligible note" in result.output or "1 eligible" in result.output
@@ -492,6 +496,7 @@ class TestCLIMemoryPromote:
 
     def test_dry_run_no_eligible_notes(self, tmp_path):
         from typer.testing import CliRunner
+
         from acp.cli import app
 
         vault_root = tmp_path / "vault"
@@ -499,19 +504,21 @@ class TestCLIMemoryPromote:
         (vault_root / "tasks").mkdir()
 
         config_path = tmp_path / "test.repo.yaml"
-        config_path.write_text(
-            f"repo:\n"
-            f"  name: test-repo\n"
-            f"  path: {tmp_path / 'repo'}\n"
-        )
+        config_path.write_text(f"repo:\n  name: test-repo\n  path: {tmp_path / 'repo'}\n")
 
         runner = CliRunner()
-        result = runner.invoke(app, [
-            "memory", "promote",
-            "--config", str(config_path),
-            "--vault-root", str(vault_root),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "promote",
+                "--config",
+                str(config_path),
+                "--vault-root",
+                str(vault_root),
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "No eligible notes" in result.output or "No vault notes" in result.output
@@ -527,8 +534,8 @@ class TestAutoPromotion:
 
     def test_auto_promote_when_configured(self, tmp_path):
         """When promote_reports_by_default=True, auto_approve promotes to Graphiti."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()
@@ -570,9 +577,7 @@ class TestAutoPromotion:
         }
 
         # Mock the Graphiti ingestion (memory extra may not be installed).
-        with patch(
-            "acp.memory.graphiti_client.ingest_task_to_graphiti"
-        ) as mock_ingest:
+        with patch("acp.memory.graphiti_client.ingest_task_to_graphiti") as mock_ingest:
             mock_ingest.return_value = {
                 "task_id": task.task_id,
                 "episode_id": "ep-123",
@@ -593,8 +598,8 @@ class TestAutoPromotion:
 
     def test_no_auto_promote_when_not_configured(self, tmp_path):
         """When promote_reports_by_default=False, no auto-promotion."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()
@@ -626,8 +631,8 @@ class TestAutoPromotion:
 
     def test_auto_promote_silent_on_import_error(self, tmp_path):
         """When memory extra not installed, auto-promote fails silently."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()

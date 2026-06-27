@@ -42,11 +42,23 @@ EVIDENCE_CONFIG_FILENAME = "evidence_config.json"
 # Default ignore rules — generated/heavy paths that should never be hashed
 # as evidence. These are not ACP-created artifacts; they're build/dependency
 # junk that would waste compute and inflate manifests.
-DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset({
-    "__pycache__", ".pytest_cache", ".venv", "node_modules",
-    ".git", "dist", "build", "coverage", ".mypy_cache", ".ruff_cache",
-    "*.pyc", "*.pyo", "*.egg-info",
-})
+DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
+    {
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "coverage",
+        ".mypy_cache",
+        ".ruff_cache",
+        "*.pyc",
+        "*.pyo",
+        "*.egg-info",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,7 @@ class DigestRecord:
     If a file's size and mtime_ns haven't changed, the cached sha256 is
     reused. This avoids re-hashing unchanged files on every verify.
     """
+
     path: str
     size: int
     mtime_ns: int
@@ -88,11 +101,18 @@ class DigestCache:
             # Can't stat — fall through to direct hash (will likely fail too).
             return _sha256_file(path)
         cached = self._records.get(key)
-        if cached is not None and cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+        if (
+            cached is not None
+            and cached.size == stat.st_size
+            and cached.mtime_ns == stat.st_mtime_ns
+        ):
             return cached.sha256
         result = _sha256_file(path)
         self._records[key] = DigestRecord(
-            path=key, size=stat.st_size, mtime_ns=stat.st_mtime_ns, sha256=result,
+            path=key,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            sha256=result,
         )
         return result
 
@@ -158,6 +178,7 @@ def _should_ignore_path(path: Path, relative_to: Path) -> bool:
     and glob patterns (e.g. ``*.pyc``).
     """
     import fnmatch
+
     parts = path.parts
     for pattern in DEFAULT_IGNORE_PATTERNS:
         # Check if any path component matches the pattern.
@@ -221,9 +242,15 @@ def compute_task_json_hash(run_dir: Path) -> str | None:
     # Keep only immutable identity fields — exclude status + updated_at
     # which are lifecycle-mutable.
     immutable_fields = (
-        "task_id", "repo_name", "repo_path", "base_branch",
-        "base_commit_sha", "task_branch", "worktree_path",
-        "user_request", "created_at",
+        "task_id",
+        "repo_name",
+        "repo_path",
+        "base_branch",
+        "base_commit_sha",
+        "task_branch",
+        "worktree_path",
+        "user_request",
+        "created_at",
     )
     immutable = {k: data[k] for k in immutable_fields if k in data}
     return hashlib.sha256(
@@ -340,13 +367,18 @@ def build_evidence_manifest(
     # This keeps the run manifest immutable while post-run events are
     # verified separately.
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
         # v0.6.0: Autonomous mode lifecycle events.
-        "auto.approved", "auto.merged",
+        "auto.approved",
+        "auto.merged",
     }
     sandbox_types = {
-        "sandbox.configured", "sandbox.started",
-        "sandbox.failed", "sandbox.stopped",
+        "sandbox.configured",
+        "sandbox.started",
+        "sandbox.failed",
+        "sandbox.stopped",
     }
     post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
     run_phase_events = [e for e in events if e.type.value not in post_run_types]
@@ -415,8 +447,11 @@ def build_lifecycle_manifest(
     run_dir = Path(run_dir)
     all_events = events_writer.read_all()
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     lifecycle_events = [e for e in all_events if e.type.value in lifecycle_types]
 
@@ -496,9 +531,13 @@ def verify_lifecycle_manifest(run_dir: Path) -> bool:
     if not events_path.is_file():
         return False
     from acp.models import Event
+
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     actual_lifecycle: list[Event] = []
     for line in events_path.read_text().splitlines():
@@ -601,6 +640,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # Peek at the event log to determine if evidence.finalized exists.
     # (We'll parse it fully below, but we need this flag now.)
     from acp.models import Event as _PeekEvent
+
     events_path_peek = run_dir / "events.jsonl"
     has_finalized_peek = False
     if events_path_peek.is_file():
@@ -660,6 +700,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     if not events_path.is_file():
         return False
     from acp.models import Event, EventType
+
     events: list[Event] = []
     for line in events_path.read_text().splitlines():
         if not line.strip():
@@ -675,8 +716,11 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
 
     # Detect lifecycle + post-run events.
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     # v0.5.15: Sandbox events are executor lifecycle events, not run-phase
     # events. They happen after evidence.finalized (cleanup) or before the
@@ -684,8 +728,10 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # only run-phase events up to evidence.finalized. Sandbox cleanup events
     # (sandbox.stopped, sandbox.failed) must not break the run manifest.
     sandbox_types = {
-        "sandbox.configured", "sandbox.started",
-        "sandbox.failed", "sandbox.stopped",
+        "sandbox.configured",
+        "sandbox.started",
+        "sandbox.failed",
+        "sandbox.stopped",
     }
     post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
 
@@ -745,9 +791,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # of the signed event log. We verify that the recorded network_policy
     # and clone_mode match what was declared — an attacker who downgrades
     # the network policy after the run breaks this signed binding.
-    sandbox_configured_events = [
-        e for e in events if e.type == EventType.SANDBOX_CONFIGURED
-    ]
+    sandbox_configured_events = [e for e in events if e.type == EventType.SANDBOX_CONFIGURED]
     if sandbox_configured_events:
         configured = sandbox_configured_events[-1]
         executor_meta = configured.payload.get("executor", {})
@@ -866,11 +910,11 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None | str]:
     try:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(
-            f"evidence_config.json is malformed: {path} ({exc})"
-        ) from exc
+        raise ValueError(f"evidence_config.json is malformed: {path} ({exc})") from exc
     return {
-        "signing_key_path": Path(data["signing_key_path"]) if data.get("signing_key_path") else None,
+        "signing_key_path": Path(data["signing_key_path"])
+        if data.get("signing_key_path")
+        else None,
         "durable_store": Path(data["durable_store"]) if data.get("durable_store") else None,
         "public_key_path": Path(data["public_key_path"]) if data.get("public_key_path") else None,
         "durable_mode": data.get("durable_mode"),

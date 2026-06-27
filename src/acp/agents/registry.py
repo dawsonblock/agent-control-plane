@@ -51,8 +51,7 @@ def build_agent(config: RepoConfig) -> AgentProtocol:
     factory = _AGENTS.get(kind)
     if factory is None:
         raise AgentConfigError(
-            f"agent.default='{kind}' is not a known agent. "
-            f"Known: {', '.join(sorted(_AGENTS))}."
+            f"agent.default='{kind}' is not a known agent. Known: {', '.join(sorted(_AGENTS))}."
         )
     return factory(config)
 

@@ -31,15 +31,14 @@ from typing import Any
 from acp.models import Task, TaskStatus
 from acp.vault.frontmatter import Frontmatter
 
-
 # --------------------------------------------------------------------------- #
 # Promotion priority levels
 # --------------------------------------------------------------------------- #
 
-PRIORITY_LOW = 0       # No urgency — promote when convenient
-PRIORITY_NORMAL = 1    # Standard approved task — promote on next cycle
-PRIORITY_HIGH = 2      # High-risk approved task — flag for secondary review
-PRIORITY_URGENT = 3    # Failed task with known failure — promote as cautionary
+PRIORITY_LOW = 0  # No urgency — promote when convenient
+PRIORITY_NORMAL = 1  # Standard approved task — promote on next cycle
+PRIORITY_HIGH = 2  # High-risk approved task — flag for secondary review
+PRIORITY_URGENT = 3  # Failed task with known failure — promote as cautionary
 
 # Tasks that should NEVER be promoted.
 PROMOTION_BLOCKED = -1

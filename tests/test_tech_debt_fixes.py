@@ -13,7 +13,7 @@ Tests the 6 immediate action items from the comprehensive codebase review:
 from __future__ import annotations
 
 import warnings
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,7 +25,6 @@ from acp.testing.runner import (
     validation_status,
 )
 
-
 # --------------------------------------------------------------------------- #
 # 1. Context docstring (structural test — verifies the docstring is updated)
 # --------------------------------------------------------------------------- #
@@ -34,6 +33,7 @@ from acp.testing.runner import (
 def test_context_docstring_does_not_say_stub():
     """The context __init__.py docstring should not say 'stub'."""
     from acp.context import __doc__ as context_doc
+
     assert context_doc is not None
     # The outdated docstring said "prompt-only stub"
     assert "prompt-only stub" not in context_doc, (
@@ -45,6 +45,7 @@ def test_context_docstring_does_not_say_stub():
 def test_context_docstring_mentions_haystack():
     """The context __init__.py docstring should mention Haystack retrieval."""
     from acp.context import __doc__ as context_doc
+
     assert context_doc is not None
     assert "Haystack" in context_doc or "haystack" in context_doc
 
@@ -56,6 +57,7 @@ def test_context_docstring_mentions_haystack():
 
 def _cmd(exit_code: int, *, skipped: bool = False) -> CommandResult:
     from pathlib import Path
+
     return CommandResult(
         command="echo test",
         cwd=Path("/tmp"),
@@ -185,20 +187,23 @@ def test_risk_engine_reject_on_failing_tests_regardless_of_approval():
 
 def test_remove_worktree_logs_error(tmp_path):
     """remove_worktree logs a warning when git worktree remove fails."""
-    from acp.gitops.worktrees import remove_worktree
-
     # Create a fake repo so Repo() doesn't fail.
     import subprocess
+
+    from acp.gitops.worktrees import remove_worktree
+
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo_path), capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=str(repo_path), capture_output=True,
+        cwd=str(repo_path),
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "test"],
-        cwd=str(repo_path), capture_output=True,
+        cwd=str(repo_path),
+        capture_output=True,
     )
 
     # Try to remove a non-existent worktree — should log, not crash.
@@ -219,9 +224,10 @@ def test_remove_worktree_logs_error(tmp_path):
 def test_cleanup_sandbox_logs_error(caplog):
     """_cleanup_sandbox logs a warning when sandbox cleanup fails."""
     import logging
+
     from acp.config import ExecutorSection
-    from acp.graph.nodes import _cleanup_sandbox, NodeContext
     from acp.events import EventWriter
+    from acp.graph.nodes import NodeContext, _cleanup_sandbox
     from acp.store import TaskStore
 
     # This is hard to test in isolation because _cleanup_sandbox needs
@@ -248,10 +254,9 @@ def test_cleanup_sandbox_logs_error(caplog):
             _cleanup_sandbox(state, ctx)
 
     # Verify the warning was logged.
-    assert any(
-        "sandbox cleanup failed" in record.message
-        for record in caplog.records
-    ), "_cleanup_sandbox should log a warning when cleanup fails"
+    assert any("sandbox cleanup failed" in record.message for record in caplog.records), (
+        "_cleanup_sandbox should log a warning when cleanup fails"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +267,7 @@ def test_cleanup_sandbox_logs_error(caplog):
 def test_lifecycle_module_has_logger():
     """lifecycle.py should have a module-level logger."""
     import acp.evidence.lifecycle as lifecycle_mod
+
     assert hasattr(lifecycle_mod, "logger"), (
         "lifecycle.py should have a module-level logger for error reporting"
     )
@@ -270,6 +276,7 @@ def test_lifecycle_module_has_logger():
 def test_worktrees_module_has_logger():
     """worktrees.py should have a module-level logger."""
     import acp.gitops.worktrees as worktrees_mod
+
     assert hasattr(worktrees_mod, "logger"), (
         "worktrees.py should have a module-level logger for error reporting"
     )
@@ -278,6 +285,7 @@ def test_worktrees_module_has_logger():
 def test_nodes_module_has_logger():
     """nodes.py should have a module-level logger."""
     import acp.graph.nodes as nodes_mod
+
     assert hasattr(nodes_mod, "logger"), (
         "nodes.py should have a module-level logger for error reporting"
     )

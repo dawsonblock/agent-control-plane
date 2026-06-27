@@ -7,8 +7,8 @@ and directories based on the repository configuration.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 from acp.config import ContextSection
 

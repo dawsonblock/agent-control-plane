@@ -7,7 +7,7 @@ Events and reports are truth; these models enforce that truth is well-formed.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -17,9 +17,7 @@ from pydantic import BaseModel, Field
 
 def _utcnow_iso() -> str:
     """ISO-8601 UTC timestamp with a trailing Z, e.g. 2026-06-21T12:00:00Z."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # --------------------------------------------------------------------------- #
@@ -196,9 +194,9 @@ class Event(BaseModel):
     type: EventType
     timestamp: str = Field(default_factory=_utcnow_iso)
     payload: dict[str, Any] = Field(default_factory=dict)
-    prev_hash: str = ""   # hash of the preceding event; "GENESIS" for the first
-    hash: str = ""        # sha256 of (prev_hash + event_id + task_id + type + timestamp + payload)
-    signature: str = ""   # Ed25519 signature over `hash` (hex); empty if unsigned
+    prev_hash: str = ""  # hash of the preceding event; "GENESIS" for the first
+    hash: str = ""  # sha256 of (prev_hash + event_id + task_id + type + timestamp + payload)
+    signature: str = ""  # Ed25519 signature over `hash` (hex); empty if unsigned
 
 
 class CommandResult(BaseModel):
@@ -327,7 +325,7 @@ def compute_final_status(
     backward compatibility; new code should call ``evaluate_final_gates``
     directly for richer results.
     """
-    from acp.review.gates import evaluate_final_gates, GateOutcome
+    from acp.review.gates import GateOutcome, evaluate_final_gates
 
     agent_exit_code = 0 if agent_passed else 1
 

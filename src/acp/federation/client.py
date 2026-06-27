@@ -122,17 +122,18 @@ class MCPClient:
             return
         self._transport.start()
         try:
-            self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "acp", "version": "0.7.0"},
-            })
+            self._send_request(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "acp", "version": "0.7.0"},
+                },
+            )
             self._initialized = True
         except MCPError as exc:
             self.stop()
-            raise MCPError(
-                f"MCP server '{self.name}' initialization failed: {exc}"
-            ) from exc
+            raise MCPError(f"MCP server '{self.name}' initialization failed: {exc}") from exc
 
     def stop(self) -> None:
         """Stop the transport."""
@@ -186,10 +187,13 @@ class MCPClient:
             self.start()
         start = time.monotonic()
         try:
-            response = self._send_request("tools/call", {
-                "name": tool_name,
-                "arguments": arguments or {},
-            })
+            response = self._send_request(
+                "tools/call",
+                {
+                    "name": tool_name,
+                    "arguments": arguments or {},
+                },
+            )
             duration_ms = int((time.monotonic() - start) * 1000)
             # MCP tool results have a "content" array of content blocks.
             content = response.get("content", [])
@@ -352,9 +356,7 @@ class FederationManager:
             return ""
 
         lines = ["\n\nFederated capabilities (via MCP):"]
-        lines.append(
-            "  You can request these tools by printing a line in the format:"
-        )
+        lines.append("  You can request these tools by printing a line in the format:")
         lines.append("  ACP_FEDERATION_CALL: <server> <tool> {<json_arguments>}")
         lines.append("  The control plane will proxy the call — you do NOT have network access.")
         lines.append("")

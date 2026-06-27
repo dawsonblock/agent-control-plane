@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from acp.evidence.durable_task_store import DurableTaskStore
 from acp.models import Task, TaskStatus
 
@@ -207,6 +206,7 @@ def test_recover_orphaned_tasks(tmp_path: Path):
 
     # task.json should also show FAILED.
     from acp.store import TaskStore
+
     store = TaskStore(runs_root=runs)
     json_task = store.load("task_20260624_0001")
     assert json_task.status == TaskStatus.FAILED

@@ -48,6 +48,7 @@ class TestRealSbxE2E:
     ):
         """sbx --version returns a version string."""
         from acp.executor.sbx import SbxExecutor
+
         version = SbxExecutor.get_version()
         assert version, "sbx --version returned empty string"
         assert len(version) > 0
@@ -58,6 +59,7 @@ class TestRealSbxE2E:
     ):
         """SbxExecutor.check_installed() returns True when sbx is on PATH."""
         from acp.executor.sbx import SbxExecutor
+
         assert SbxExecutor.check_installed() is True
 
     def test_sbx_run_and_cleanup(
@@ -82,10 +84,7 @@ class TestRealSbxE2E:
 
         # Create a minimal prompt.
         prompt_path = tmp_path / "prompt.md"
-        prompt_path.write_text(
-            "Create a file called hello.txt "
-            "with 'hello world' in it."
-        )
+        prompt_path.write_text("Create a file called hello.txt with 'hello world' in it.")
 
         artifact_dir = tmp_path / "artifacts"
         artifact_dir.mkdir()

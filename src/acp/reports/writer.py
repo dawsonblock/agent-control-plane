@@ -75,9 +75,7 @@ def write_failure_report(
     binding is verifiable.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    body = render_failure_report(
-        task=task, error=error, events=events, manifest_hash=manifest_hash
-    )
+    body = render_failure_report(task=task, error=error, events=events, manifest_hash=manifest_hash)
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)
     return report_path

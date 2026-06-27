@@ -57,7 +57,9 @@ class ContextBuilder:
         reranking_config: RerankingSection | None = None,
     ) -> None:
         self.indexer = HaystackIndexer(
-            repo_path, vault_root, context_config,
+            repo_path,
+            vault_root,
+            context_config,
         )
         self.reranking_config = reranking_config
 
@@ -86,10 +88,7 @@ class ContextBuilder:
         # The top_k parameter is used as a fallback when re-ranking is disabled
         # or when top_k_before_rerank is not set.
         retrieval_k = top_k
-        if (
-            self.reranking_config
-            and self.reranking_config.enabled
-        ):
+        if self.reranking_config and self.reranking_config.enabled:
             retrieval_k = self.reranking_config.top_k_before_rerank
 
         # 2. Build the query pipeline
@@ -103,12 +102,14 @@ class ContextBuilder:
         query_pipeline.add_component(
             "retriever",
             InMemoryEmbeddingRetriever(
-                document_store=self.indexer.document_store, top_k=retrieval_k,
+                document_store=self.indexer.document_store,
+                top_k=retrieval_k,
             ),
         )
 
         query_pipeline.connect(
-            "text_embedder.embedding", "retriever.query_embedding",
+            "text_embedder.embedding",
+            "retriever.query_embedding",
         )
 
         # 3. Execute the search
@@ -120,20 +121,19 @@ class ContextBuilder:
         # Convert to dicts with retrieval scores.
         doc_dicts = []
         for d in docs:
-            doc_dicts.append({
-                "content": d.content,
-                "meta": d.meta,
-                "retrieval_score": float(getattr(d, "score", 0.0)),
-            })
+            doc_dicts.append(
+                {
+                    "content": d.content,
+                    "meta": d.meta,
+                    "retrieval_score": float(getattr(d, "score", 0.0)),
+                }
+            )
 
         # 4. v0.7.0: Optional cross-encoder re-ranking.
-        if (
-            self.reranking_config
-            and self.reranking_config.enabled
-            and len(doc_dicts) > 0
-        ):
+        if self.reranking_config and self.reranking_config.enabled and len(doc_dicts) > 0:
             doc_dicts = self._rerank(
-                doc_dicts, task_description,
+                doc_dicts,
+                task_description,
                 self.reranking_config.top_k_after_rerank,
                 self.reranking_config.model,
             )
@@ -177,7 +177,8 @@ class ContextBuilder:
             # Model loading or prediction failed — degrade gracefully.
             logger.warning(
                 "Re-ranking failed (model=%s): %s. Using original retrieval order.",
-                model_name, exc,
+                model_name,
+                exc,
             )
             return docs[:top_k]
 
@@ -202,18 +203,14 @@ class ContextBuilder:
         """
         docs = self.get_relevant_docs(task_description, top_k)
         if not docs:
-            return (
-                "No relevant context found in repository or "
-                "approved vault notes."
-            )
+            return "No relevant context found in repository or approved vault notes."
 
         has_rerank = any("rerank_score" in d for d in docs)
 
         lines = ["# Relevant Context", ""]
         if has_rerank:
             lines.append(
-                "Chunks re-ranked with cross-encoder. "
-                "Both retrieval and re-rank scores shown."
+                "Chunks re-ranked with cross-encoder. Both retrieval and re-rank scores shown."
             )
             lines.append("")
 
@@ -229,10 +226,7 @@ class ContextBuilder:
                     f"rerank: {rerank_score:.4f})"
                 )
             else:
-                lines.append(
-                    f"## [{source}] {path} "
-                    f"(score: {retrieval_score:.4f})"
-                )
+                lines.append(f"## [{source}] {path} (score: {retrieval_score:.4f})")
             lines.append("```")
             lines.append(doc["content"])
             lines.append("```")

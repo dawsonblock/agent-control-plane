@@ -182,9 +182,7 @@ class EgressLogger:
         }
 
         artifact_path = artifacts_dir / log_filename
-        artifact_path.write_text(
-            json.dumps(artifact, indent=2, sort_keys=True)
-        )
+        artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True))
         return artifact_path
 
 

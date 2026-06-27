@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ def _run_async(coro: Any) -> Any:
         loop = None
     if loop is not None:
         import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
@@ -83,8 +85,7 @@ def _check_human_firewall(frontmatter: Frontmatter) -> None:
         )
     if frontmatter.graphiti_ingested:
         raise HumanFirewallError(
-            "Note has already been ingested into Graphiti "
-            "(graphiti_ingested=true)."
+            "Note has already been ingested into Graphiti (graphiti_ingested=true)."
         )
 
 
@@ -273,7 +274,8 @@ def ingest_task_to_graphiti(
             "Graphiti ingestion succeeded for task %s but marking the vault "
             "note as ingested failed: %s. Manual marking required to avoid "
             "duplicate ingestion.",
-            task.task_id, exc,
+            task.task_id,
+            exc,
         )
 
     return {
@@ -313,6 +315,7 @@ def search_graphiti_facts(
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
         Exception: If FalkorDB is not running.
     """
+
     async def _search() -> list[dict[str, Any]]:
         from graphiti_core.search.search_config import SearchConfig
 
@@ -363,6 +366,7 @@ def get_temporal_relationships(
     Raises:
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
     """
+
     async def _get_relationships() -> list[dict[str, Any]]:
         client = _get_graphiti_client(group_id=group_id)
         try:
@@ -414,9 +418,9 @@ def find_superseded_nodes(
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
         Exception: If FalkorDB is not running.
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
 
     async def _find() -> list[dict[str, Any]]:
         client = _get_graphiti_client(group_id=group_id)
@@ -454,13 +458,17 @@ def find_superseded_nodes(
                 # since semantic text search for "SUPERSEDES" would return
                 # results by similarity, not by edge type.
                 all_edges = await client.search(
-                    "", group_id=gid, num_results=1000,
+                    "",
+                    group_id=gid,
+                    num_results=1000,
                 )
                 results = []
                 for edge in all_edges:
                     # Check if this edge is a SUPERSEDES edge.
                     edge_type = getattr(
-                        edge, "edge_type", None,
+                        edge,
+                        "edge_type",
+                        None,
                     ) or getattr(edge, "type", "")
                     if edge_type != "SUPERSEDES":
                         continue
@@ -472,10 +480,12 @@ def find_superseded_nodes(
                         valid_at = getattr(edge, "expired_at", None)
                     if valid_at is None:
                         continue
-                    results.append({
-                        "node_id": getattr(edge, "source_node_id", ""),
-                        "superseded_at": str(valid_at),
-                    })
+                    results.append(
+                        {
+                            "node_id": getattr(edge, "source_node_id", ""),
+                            "superseded_at": str(valid_at),
+                        }
+                    )
 
             superseded: list[dict[str, Any]] = []
             for row in results:
@@ -490,23 +500,25 @@ def find_superseded_nodes(
                 # Parse the timestamp and check if it's old enough.
                 try:
                     if isinstance(superseded_at_str, str):
-                        sup_time = datetime.fromisoformat(
-                            superseded_at_str.replace("Z", "+00:00")
-                        )
+                        sup_time = datetime.fromisoformat(superseded_at_str.replace("Z", "+00:00"))
                     else:
                         sup_time = superseded_at_str
                     if sup_time.tzinfo is None:
-                        sup_time = sup_time.replace(tzinfo=timezone.utc)
+                        sup_time = sup_time.replace(tzinfo=UTC)
                 except (ValueError, TypeError):
                     continue  # can't parse timestamp — skip
 
                 if sup_time < cutoff:
-                    days = (datetime.now(timezone.utc) - sup_time).days
-                    superseded.append({
-                        "node_id": str(node_id),
-                        "superseded_at": superseded_at_str if isinstance(superseded_at_str, str) else str(superseded_at_str),
-                        "days_superseded": days,
-                    })
+                    days = (datetime.now(UTC) - sup_time).days
+                    superseded.append(
+                        {
+                            "node_id": str(node_id),
+                            "superseded_at": superseded_at_str
+                            if isinstance(superseded_at_str, str)
+                            else str(superseded_at_str),
+                            "days_superseded": days,
+                        }
+                    )
             return superseded
         finally:
             await client.close()
@@ -547,12 +559,11 @@ def prune_superseded_nodes(
         ImportError: If ``graphiti-core[falkordb]`` is not installed.
         Exception: If FalkorDB is not running.
     """
-    nodes = find_superseded_nodes(
-        group_id=group_id, older_than_days=older_than_days
-    )
+    nodes = find_superseded_nodes(group_id=group_id, older_than_days=older_than_days)
 
     pruned = 0
     if not dry_run and nodes:
+
         async def _prune() -> int:
             client = _get_graphiti_client(group_id=group_id)
             try:
@@ -572,7 +583,8 @@ def prune_superseded_nodes(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "Failed to prune superseded node %s: %s",
-                            node.get("node_id", "?"), exc,
+                            node.get("node_id", "?"),
+                            exc,
                         )
                         # Continue pruning other nodes — best-effort.
                 return count

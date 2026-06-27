@@ -18,12 +18,14 @@ from pathlib import Path
 
 import pytest
 
+from acp.events import GENESIS_HASH, EventWriter
 from acp.evidence.durable_store import DurableEventStore
-from acp.events import EventWriter, GENESIS_HASH
 from acp.models import Event, EventType
 
 
-def _make_event(event_id: str, task_id: str, etype: EventType, payload: dict | None = None) -> Event:
+def _make_event(
+    event_id: str, task_id: str, etype: EventType, payload: dict | None = None
+) -> Event:
     return Event(
         event_id=event_id,
         task_id=task_id,
@@ -85,14 +87,26 @@ def test_durable_store_query_by_type(tmp_path: Path):
 def test_durable_store_query_by_time_range(tmp_path: Path):
     db = DurableEventStore(tmp_path / "events.db")
     db.init()
-    db.append(Event(
-        event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED,
-        timestamp="2026-06-24T10:00:00Z", prev_hash=GENESIS_HASH, hash="h1",
-    ))
-    db.append(Event(
-        event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED,
-        timestamp="2026-06-24T12:00:00Z", prev_hash=GENESIS_HASH, hash="h2",
-    ))
+    db.append(
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            timestamp="2026-06-24T10:00:00Z",
+            prev_hash=GENESIS_HASH,
+            hash="h1",
+        )
+    )
+    db.append(
+        Event(
+            event_id="evt_000002",
+            task_id="t1",
+            type=EventType.TASK_COMPLETED,
+            timestamp="2026-06-24T12:00:00Z",
+            prev_hash=GENESIS_HASH,
+            hash="h2",
+        )
+    )
     since_results = db.query(since="2026-06-24T11:00:00Z")
     assert len(since_results) == 1
     assert since_results[0].event_id == "evt_000002"

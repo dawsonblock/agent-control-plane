@@ -11,7 +11,7 @@ instance.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -22,6 +22,7 @@ runner = CliRunner()
 
 try:
     import graphiti_core  # noqa: F401
+
     GRAPHITI_INSTALLED = True
 except ImportError:
     GRAPHITI_INSTALLED = False
@@ -42,11 +43,7 @@ def _make_repo_config(tmp_path: Path) -> Path:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     config_path = tmp_path / "demo.repo.yaml"
-    config_path.write_text(
-        f"repo:\n"
-        f"  name: demo\n"
-        f"  path: {repo_path}\n"
-    )
+    config_path.write_text(f"repo:\n  name: demo\n  path: {repo_path}\n")
     return config_path
 
 
@@ -63,11 +60,16 @@ def test_memory_prune_dry_run_no_nodes(tmp_path):
             "older_than_days": 90,
         },
     ):
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--dry-run",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "no superseded nodes found" in result.output
 
@@ -89,11 +91,16 @@ def test_memory_prune_dry_run_with_nodes(tmp_path):
             "older_than_days": 90,
         },
     ):
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--dry-run",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "found 2 superseded node(s)" in result.output
     assert "node-abc" in result.output
@@ -117,11 +124,16 @@ def test_memory_prune_no_dry_run(tmp_path):
             "older_than_days": 90,
         },
     ):
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--no-dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--no-dry-run",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "pruned 1 node(s)" in result.output
     assert "Dry run" not in result.output
@@ -140,12 +152,18 @@ def test_memory_prune_custom_older_than_days(tmp_path):
             "older_than_days": 30,
         },
     ) as mock_prune:
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--older-than-days", "30",
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--older-than-days",
+                "30",
+                "--dry-run",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "older_than_days=30" in result.output
     # Verify the threshold was passed to the function.
@@ -159,7 +177,11 @@ def test_memory_prune_truncates_long_list(tmp_path):
     """When there are >20 nodes, only the first 20 are shown."""
     config = _make_repo_config(tmp_path)
     mock_nodes = [
-        {"node_id": f"node-{i}", "superseded_at": "2025-01-01T00:00:00Z", "days_superseded": 100 + i}
+        {
+            "node_id": f"node-{i}",
+            "superseded_at": "2025-01-01T00:00:00Z",
+            "days_superseded": 100 + i,
+        }
         for i in range(25)
     ]
     with patch(
@@ -172,11 +194,16 @@ def test_memory_prune_truncates_long_list(tmp_path):
             "older_than_days": 90,
         },
     ):
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--dry-run",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "found 25 superseded node(s)" in result.output
     assert "and 5 more" in result.output
@@ -184,11 +211,16 @@ def test_memory_prune_truncates_long_list(tmp_path):
 
 def test_memory_prune_config_not_found(tmp_path):
     """`acp memory prune` exits with error when config file is missing."""
-    result = runner.invoke(app, [
-        "memory", "prune",
-        "--config", str(tmp_path / "nonexistent.yaml"),
-        "--dry-run",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "prune",
+            "--config",
+            str(tmp_path / "nonexistent.yaml"),
+            "--dry-run",
+        ],
+    )
     assert result.exit_code == 1, result.output
     assert "config file not found" in result.output
 
@@ -200,11 +232,16 @@ def test_memory_prune_import_error(tmp_path):
         "acp.memory.graphiti_client.prune_superseded_nodes",
         side_effect=ImportError("graphiti-core not installed"),
     ):
-        result = runner.invoke(app, [
-            "memory", "prune",
-            "--config", str(config),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "prune",
+                "--config",
+                str(config),
+                "--dry-run",
+            ],
+        )
     assert result.exit_code == 1, result.output
     assert "graphiti-core not installed" in result.output
 
@@ -245,12 +282,15 @@ def test_prune_no_dry_run_deletes_nodes():
     mock_client = MagicMock()
     mock_client.driver = None  # no driver → returns 0 pruned
     mock_client.close = AsyncMock()
-    with patch(
-        "acp.memory.graphiti_client.find_superseded_nodes",
-        return_value=mock_nodes,
-    ), patch(
-        "acp.memory.graphiti_client._get_graphiti_client",
-        return_value=mock_client,
+    with (
+        patch(
+            "acp.memory.graphiti_client.find_superseded_nodes",
+            return_value=mock_nodes,
+        ),
+        patch(
+            "acp.memory.graphiti_client._get_graphiti_client",
+            return_value=mock_client,
+        ),
     ):
         result = prune_superseded_nodes(dry_run=False, older_than_days=90)
 

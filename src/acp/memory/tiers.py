@@ -140,8 +140,7 @@ class EpisodicMemoryStore:
 
         # Scan run directories (sorted newest-first by name).
         run_dirs = sorted(
-            (d for d in self.runs_root.iterdir()
-             if d.is_dir() and (d / "events.jsonl").is_file()),
+            (d for d in self.runs_root.iterdir() if d.is_dir() and (d / "events.jsonl").is_file()),
             reverse=True,
         )
 
@@ -155,6 +154,7 @@ class EpisodicMemoryStore:
                     if not line.strip():
                         continue
                     import json
+
                     evt = json.loads(line)
                     # Search in event type + payload fields.
                     searchable = json.dumps(evt).lower()
@@ -163,12 +163,14 @@ class EpisodicMemoryStore:
                         evt_type = evt.get("type", "unknown")
                         payload = evt.get("payload", {})
                         summary = self._summarize_event(evt_type, payload, task_id)
-                        episodes.append(MemoryItem(
-                            tier="episodic",
-                            source="events.jsonl",
-                            content=summary,
-                            metadata={"task_id": task_id, "event_type": evt_type},
-                        ))
+                        episodes.append(
+                            MemoryItem(
+                                tier="episodic",
+                                source="events.jsonl",
+                                content=summary,
+                                metadata={"task_id": task_id, "event_type": evt_type},
+                            )
+                        )
                         break  # one episode per run
             except Exception:  # noqa: BLE001
                 continue  # malformed log — skip

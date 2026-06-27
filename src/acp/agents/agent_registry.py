@@ -62,9 +62,7 @@ class AgentRegistry:
                 # can decide whether to refuse execution.
                 self.agents[agent.name] = agent
             except Exception as exc:  # noqa: BLE001
-                self._load_errors.append(
-                    f"Failed to load {path.name}: {exc}"
-                )
+                self._load_errors.append(f"Failed to load {path.name}: {exc}")
 
     @property
     def load_errors(self) -> list[str]:
@@ -129,9 +127,7 @@ class AgentRegistry:
                 registered.
         """
         if agent.name in self.agents:
-            raise AgentConfigError(
-                f"Agent '{agent.name}' is already registered"
-            )
+            raise AgentConfigError(f"Agent '{agent.name}' is already registered")
         self.agents[agent.name] = agent
 
     def __len__(self) -> int:

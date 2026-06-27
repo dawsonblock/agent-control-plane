@@ -13,9 +13,9 @@ enough, delete this module and the tests that depend on it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from rich.console import Console
 
@@ -29,9 +29,9 @@ from acp.gitops.worktrees import create_worktree, is_clean, remove_worktree
 from acp.models import EventType, TaskStatus
 from acp.reports.writer import write_report
 from acp.review.diff_reviewer import review_diff
-from acp.review.gates import evaluate_final_gates, GateOutcome
+from acp.review.gates import GateOutcome, evaluate_final_gates
 from acp.store import TaskStore
-from acp.testing.runner import validation_passed, run_commands, validation_status
+from acp.testing.runner import run_commands, validation_passed, validation_status
 from acp.vault.obsidian_writer import write_vault_note
 
 console = Console()
@@ -41,6 +41,7 @@ console = Console()
 # Agent factory — delegates to the registry (the single dispatch point).
 # --------------------------------------------------------------------------- #
 
+
 def _build_agent(config: RepoConfig) -> AgentProtocol:
     """Build the agent the repo config selected, via the registry."""
     return build_agent(config)
@@ -49,6 +50,7 @@ def _build_agent(config: RepoConfig) -> AgentProtocol:
 # --------------------------------------------------------------------------- #
 # The evidence loop
 # --------------------------------------------------------------------------- #
+
 
 @dataclass
 class LoopResult:
@@ -148,7 +150,11 @@ class EvidenceLoop:
         self.store.save(task)
         events.write(
             EventType.WORKTREE_CREATED,
-            {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
+            {
+                "branch": task.task_branch,
+                "worktree_path": str(worktree_path),
+                "base_commit_sha": task.base_commit_sha,
+            },
         )
         console.print(f"[green]✓[/] worktree: {worktree_path}")
 
@@ -207,9 +213,7 @@ class EvidenceLoop:
                 "summary": agent_result.summary,
             },
         )
-        console.print(
-            f"[green]✓[/] agent finished (exit {agent_result.exit_code})"
-        )
+        console.print(f"[green]✓[/] agent finished (exit {agent_result.exit_code})")
 
         # 6. Run configured commands --------------------------------------- #
         task.status = TaskStatus.TESTING
@@ -262,8 +266,7 @@ class EvidenceLoop:
             },
         )
         console.print(
-            f"[yellow]![/] review: risk={review.risk.value} "
-            f"rec={review.recommendation.value}"
+            f"[yellow]![/] review: risk={review.risk.value} rec={review.recommendation.value}"
         )
 
         # 9. Compute final status via GateResult (single source of truth). #
@@ -274,8 +277,10 @@ class EvidenceLoop:
             changed_files=diff.changed_files,
         )
         status = (
-            TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
-            else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
+            TaskStatus.PASSED
+            if gate_result.outcome == GateOutcome.PASSED
+            else TaskStatus.NEEDS_REVIEW
+            if gate_result.outcome == GateOutcome.NEEDS_REVIEW
             else TaskStatus.FAILED
         )
         task.status = status
@@ -337,6 +342,7 @@ class EvidenceLoop:
         manifest_hash = None
         try:
             from acp.evidence.manifest import write_evidence_manifest
+
             _, manifest_hash = write_evidence_manifest(
                 run_dir=self.store.run_dir(task.task_id),
                 events_writer=events,

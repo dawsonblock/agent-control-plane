@@ -36,7 +36,12 @@ _PROVIDER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     # AWS secret: a 40-char base64-ish value on a line whose key mentions
     # secret/priv (catches AWS_SECRET_ACCESS_KEY, aws_secret, privateKey...).
-    ("aws_secret", re.compile(r"(?i)^(?=[^\n]*(?:secret|priv)).{0,40}[=:]\s*['\"]?[A-Za-z0-9/+=]{40}(?:['\"]|\s|$)")),
+    (
+        "aws_secret",
+        re.compile(
+            r"(?i)^(?=[^\n]*(?:secret|priv)).{0,40}[=:]\s*['\"]?[A-Za-z0-9/+=]{40}(?:['\"]|\s|$)"
+        ),
+    ),
     ("github_pat", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     ("github_legacy_token", re.compile(r"\b[a-f0-9]{40}\b")),  # 40-hex legacy; gated below
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
@@ -45,7 +50,10 @@ _PROVIDER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("stripe_key", re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[0-9A-Za-z]{24,}\b")),
-    ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
+    (
+        "private_key_block",
+        re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"),
+    ),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
 ]
 
@@ -63,8 +71,8 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 # Thresholds for entropy-based detection on assignment values.
-_MIN_ENTROPY = 3.5      # bits/char; real secrets cluster 3.5–6
-_MIN_VALUE_LEN = 20     # ignore short assignment values
+_MIN_ENTROPY = 3.5  # bits/char; real secrets cluster 3.5–6
+_MIN_VALUE_LEN = 20  # ignore short assignment values
 _MIN_VOWEL_FRACTION = 0.0  # informational; kept for tuning
 
 
@@ -72,9 +80,9 @@ _MIN_VOWEL_FRACTION = 0.0  # informational; kept for tuning
 class SecretFinding:
     """One detected secret. The reviewer turns this into a hard-block signal."""
 
-    kind: str          # provider label or "high_entropy_assignment"
-    snippet: str       # redacted excerpt for the report (never the full secret)
-    line_no: int       # line in the patch where it appeared
+    kind: str  # provider label or "high_entropy_assignment"
+    snippet: str  # redacted excerpt for the report (never the full secret)
+    line_no: int  # line in the patch where it appeared
     entropy: float = 0.0  # bits/char for high_entropy_assignment; 0.0 otherwise
 
 
@@ -114,9 +122,7 @@ def scan_patch(
                 if kind == "github_legacy_token" and not _looks_assigned(added, m.group(0)):
                     continue
                 seen.add(key)
-                findings.append(
-                    SecretFinding(kind=kind, snippet=_redact(m.group(0)), line_no=idx)
-                )
+                findings.append(SecretFinding(kind=kind, snippet=_redact(m.group(0)), line_no=idx))
 
         # High-entropy assignment values that aren't placeholders.
         for m in _ASSIGNMENT_RE.finditer(added):
@@ -215,7 +221,9 @@ def scan_with_trufflehog(
     try:
         proc = subprocess.run(
             [
-                "trufflehog", "git", f"file://{worktree_path}",
+                "trufflehog",
+                "git",
+                f"file://{worktree_path}",
                 "--json",
                 "--no-update",
                 "--results=verified,unknown,unverified",
@@ -263,11 +271,13 @@ def scan_with_trufflehog(
         kind = f"trufflehog:{detector.lower()}"
         snippet = _redact(raw_secret) if raw_secret else "(verified secret detected)"
 
-        findings.append(SecretFinding(
-            kind=kind,
-            snippet=snippet,
-            line_no=line_no,
-        ))
+        findings.append(
+            SecretFinding(
+                kind=kind,
+                snippet=snippet,
+                line_no=line_no,
+            )
+        )
 
     return findings
 
@@ -323,17 +333,19 @@ def scan_diff(
 # These are the provider-specific patterns (AWS keys, GitHub PATs, etc.)
 # and private key blocks — they are always hard blocks regardless of
 # whether TruffleHog verifies them as live.
-_HARD_BLOCK_KINDS = frozenset({
-    "aws_access_key",
-    "github_pat",
-    "slack_token",
-    "openai_key",
-    "anthropic_key",
-    "google_api_key",
-    "stripe_key",
-    "private_key_block",
-    "jwt",
-})
+_HARD_BLOCK_KINDS = frozenset(
+    {
+        "aws_access_key",
+        "github_pat",
+        "slack_token",
+        "openai_key",
+        "anthropic_key",
+        "google_api_key",
+        "stripe_key",
+        "private_key_block",
+        "jwt",
+    }
+)
 
 
 def detect_hard_block_secrets(

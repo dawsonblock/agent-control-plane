@@ -22,7 +22,6 @@ from acp.egress import (
     has_egress_violations,
 )
 
-
 # --------------------------------------------------------------------------- #
 # 1. EgressLogger — collecting events
 # --------------------------------------------------------------------------- #
@@ -274,16 +273,22 @@ def test_proxy_section_rejects_invalid_port():
 def test_proxy_section_in_yaml(tmp_path):
     """Repo config loads proxy settings from YAML."""
     import yaml
+
     config_file = tmp_path / "test.repo.yaml"
-    config_file.write_text(yaml.dump({
-        "repo": {"name": "test", "path": str(tmp_path)},
-        "proxy": {
-            "enabled": True,
-            "proxy_port": 9090,
-            "allowed_domains": ["pypi.org", "github.com"],
-        },
-    }))
+    config_file.write_text(
+        yaml.dump(
+            {
+                "repo": {"name": "test", "path": str(tmp_path)},
+                "proxy": {
+                    "enabled": True,
+                    "proxy_port": 9090,
+                    "allowed_domains": ["pypi.org", "github.com"],
+                },
+            }
+        )
+    )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_file)
     assert cfg.proxy.enabled
     assert cfg.proxy.proxy_port == 9090

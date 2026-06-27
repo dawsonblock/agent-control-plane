@@ -26,7 +26,15 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from acp.cli import app
-from acp.config import AgentSection, CommandsSection, DurableMode, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    DurableMode,
+    EvidenceSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
 from acp.evidence.manifest import (
     read_evidence_config,
     verify_evidence_manifest,
@@ -34,7 +42,6 @@ from acp.evidence.manifest import (
 from acp.graph.workflow import run_workflow
 from acp.models import Event, EventType
 from acp.store import TaskStore
-
 
 runner = CliRunner()
 
@@ -81,16 +88,18 @@ def test_missing_manifest_fails_verify(disposable_repo, isolated_workspace):
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
     # Verify passes before deletion.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
 
     # Delete the manifest.
     (run_dir / "evidence_manifest.json").unlink()
 
     # Verify must fail — not just warn.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
     assert "evidence manifest not found" in r.output
     assert "required" in r.output
@@ -116,8 +125,9 @@ def test_missing_report_fails_verify(disposable_repo, isolated_workspace):
     assert verify_evidence_manifest(run_dir) is False
 
     # CLI verify must also fail.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
 
 
@@ -142,8 +152,9 @@ def test_edited_report_fails_verify(disposable_repo, isolated_workspace):
     assert verify_evidence_manifest(run_dir) is False
 
     # CLI verify must also fail.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
 
 
@@ -174,17 +185,26 @@ def test_task_json_status_change_allowed_with_lifecycle(disposable_repo, isolate
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
     # Approve the task (this changes status to approved).
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0, f"approve failed: {r.output}"
 
     # Verify must still pass — status change is a lifecycle transition.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0, f"verify after approve failed: {r.output}"
 
 
@@ -215,28 +235,38 @@ def test_lifecycle_events_require_lifecycle_manifest(disposable_repo, isolated_w
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
     # Approve.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0
 
     # Lifecycle manifest exists.
     assert (run_dir / "lifecycle_manifest.json").is_file()
 
     # Verify passes.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
 
     # Delete the lifecycle manifest.
     (run_dir / "lifecycle_manifest.json").unlink()
 
     # Verify must fail — lifecycle events exist but no lifecycle manifest.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
     assert "lifecycle manifest not found" in r.output
     assert "required" in r.output
@@ -256,8 +286,10 @@ def test_durable_mode_persisted_in_evidence_config(disposable_repo, isolated_wor
     """durable_mode must be persisted in evidence_config.json at finalize."""
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.REQUIRED,
     )
 
     ev_cfg = read_evidence_config(run_dir)
@@ -269,8 +301,10 @@ def test_durable_mode_best_effort_persisted(disposable_repo, isolated_workspace,
     """durable_mode=best_effort is persisted."""
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.BEST_EFFORT,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.BEST_EFFORT,
     )
 
     ev_cfg = read_evidence_config(run_dir)
@@ -305,8 +339,10 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
     """
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.REQUIRED,
     )
 
     # Count events before the failed approval.
@@ -322,12 +358,20 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
     db_path.write_text("not a sqlite database")
 
     # Approve must fail (not just warn).
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 1, f"approve should have failed closed: {r.output}"
     assert "all evidence restored" in r.output
 
@@ -343,17 +387,17 @@ def test_approve_fails_closed_durable_required(disposable_repo, isolated_workspa
 
     # The event chain must still be valid (rollback restored prev_hash).
     from acp.events import verify_event_chain
-    assert verify_event_chain(events_after) is True, (
-        "event chain broken after rollback"
-    )
+
+    assert verify_event_chain(events_after) is True, "event chain broken after rollback"
 
     # Restore the DB (the corruption was test setup, not a result of the
     # approval — we need a valid DB for verify to check durable consistency).
     db_path.write_bytes(db_backup)
 
     # Verify must still pass (the run is in its pre-approval state).
-    r2 = runner.invoke(app, ["verify", "--task", task_id,
-                             "--runs-root", str(isolated_workspace["runs_root"])])
+    r2 = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r2.exit_code == 0, f"verify should pass after rollback: {r2.output}"
 
 
@@ -378,8 +422,10 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
     """
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.REQUIRED,
     )
 
     # Count events and save report content before approval.
@@ -396,7 +442,8 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
     # succeeds but the second (evidence.report_bound) fails with a duplicate
     # key constraint.
     from acp.evidence.durable_store import DurableEventStore
-    from acp.models import Event, EventType as ET
+    from acp.models import Event
+    from acp.models import EventType as ET
 
     # Determine what event_ids the approval will use.
     # human.approved will be evt_{count+1:06d}, report_bound will be evt_{count+2:06d}
@@ -421,20 +468,27 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
     # Now run approve. The first durable write (human.approved) should succeed,
     # the report gets re-rendered, then the second durable write
     # (evidence.report_bound) fails due to the duplicate key.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 1, f"approve should have failed: {r.output}"
     assert "all evidence restored" in r.output
 
     # 1. events.jsonl: no human.approved, no extra evidence.report_bound.
     events_after = _events(store, task_id)
     assert len(events_after) == count_before, (
-        f"event log not rolled back: {count_before} before, "
-        f"{len(events_after)} after"
+        f"event log not rolled back: {count_before} before, {len(events_after)} after"
     )
     assert not any(e.type == EventType.HUMAN_APPROVED for e in events_after), (
         "human.approved survived rollback!"
@@ -459,9 +513,7 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
     # would add a second. After rollback, only the original should remain.
     with DurableEventStore(db_path) as db:
         db_approved = db.query(task_id=task_id, type=EventType.HUMAN_APPROVED.value)
-        assert len(db_approved) == 0, (
-            f"orphan human.approved in SQLite: {len(db_approved)} events"
-        )
+        assert len(db_approved) == 0, f"orphan human.approved in SQLite: {len(db_approved)} events"
         db_report_bound = db.query(task_id=task_id, type=EventType.EVIDENCE_REPORT_BOUND.value)
         # The original run has 1 report_bound. The pre-seeded dummy has a
         # different type (task.created). So after rollback, we should have
@@ -473,6 +525,7 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
 
     # 4. Event chain still valid.
     from acp.events import verify_event_chain
+
     assert verify_event_chain(events_after) is True, "event chain broken after rollback"
 
     # 5. Clean up the pre-seeded dummy event from SQLite (it was only needed
@@ -485,8 +538,9 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
         )
 
     # 6. acp verify passes (run is in pre-approval state, SQLite is clean).
-    r2 = runner.invoke(app, ["verify", "--task", task_id,
-                             "--runs-root", str(isolated_workspace["runs_root"])])
+    r2 = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r2.exit_code == 0, f"verify should pass after rollback: {r2.output}"
 
 
@@ -495,7 +549,9 @@ def test_second_durable_write_failure_full_rollback(disposable_repo, isolated_wo
 # --------------------------------------------------------------------------- #
 
 
-def test_malformed_events_suppresses_signature_success(disposable_repo, isolated_workspace, tmp_path):
+def test_malformed_events_suppresses_signature_success(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """When the event log is malformed, verify must NOT print 'signatures
     valid' — it should print 'signature verification skipped'."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -515,11 +571,18 @@ def test_malformed_events_suppresses_signature_success(disposable_repo, isolated
     with events_path.open("a") as f:
         f.write("{NOT VALID JSON}\n")
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--public-key", str(pub_path),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--public-key",
+            str(pub_path),
+        ],
+    )
     assert r.exit_code == 1
     # Must NOT print "signatures valid".
     assert "signatures valid" not in r.output
@@ -536,14 +599,14 @@ def test_malformed_events_suppresses_signature_success(disposable_repo, isolated
 def test_pyproject_version_matches_acp_version():
     """pyproject.toml version must match acp.__version__."""
     import tomllib
+
     from acp import __version__
 
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         data = tomllib.load(f)
     assert data["project"]["version"] == __version__, (
-        f"pyproject.toml version {data['project']['version']!r} != "
-        f"acp.__version__ {__version__!r}"
+        f"pyproject.toml version {data['project']['version']!r} != acp.__version__ {__version__!r}"
     )
 
 
@@ -605,7 +668,9 @@ def test_deep_mode_detects_tampered_artifact_hash(disposable_repo, isolated_work
 
     # Tamper with an artifact (but keep the same file — just change content).
     artifacts_dir = run_dir / "artifacts"
-    artifact_files = [p for p in artifacts_dir.rglob("*") if p.is_file() and p.name != "final_report.md"]
+    artifact_files = [
+        p for p in artifacts_dir.rglob("*") if p.is_file() and p.name != "final_report.md"
+    ]
     assert artifact_files
     target = artifact_files[0]
     original = target.read_bytes()
@@ -628,17 +693,26 @@ def test_report_tamper_after_approval_fails_verify(disposable_repo, isolated_wor
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
     # Approve.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0
 
     # Verify passes after approval.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
 
     # Tamper with the report.
@@ -647,8 +721,9 @@ def test_report_tamper_after_approval_fails_verify(disposable_repo, isolated_wor
     report_path.write_text(original + "\n# TAMPERED AFTER APPROVAL\n")
 
     # Verify must fail — lifecycle manifest's report_hash catches it.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
 
 
@@ -664,12 +739,20 @@ def test_lifecycle_manifest_report_hash_tamper_fails_verify(disposable_repo, iso
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
     # Approve.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0
 
     # Tamper with the report.
@@ -680,6 +763,7 @@ def test_lifecycle_manifest_report_hash_tamper_fails_verify(disposable_repo, iso
     # Try to cover tracks by editing the lifecycle manifest's report_hash
     # to match the tampered report (and recompute its manifest_hash).
     import hashlib
+
     lc_path = run_dir / "lifecycle_manifest.json"
     lc_manifest = json.loads(lc_path.read_text())
     h = hashlib.sha256()
@@ -720,6 +804,7 @@ def test_digest_cache_reuses_unchanged_file(tmp_path):
 
     # Verify it's the correct sha256.
     import hashlib
+
     expected = hashlib.sha256(b"hello world\n").hexdigest()
     assert h1 == expected
 
@@ -737,6 +822,7 @@ def test_digest_cache_recomputes_on_change(tmp_path):
     # Change the file (need to ensure mtime changes — write + touch).
     test_file.write_text("modified\n")
     import os
+
     # Force mtime change in case the write is too fast.
     stat = test_file.stat()
     os.utime(test_file, (stat.st_atime, stat.st_mtime + 1))
@@ -764,8 +850,9 @@ def test_status_consistency_passed(disposable_repo, isolated_workspace):
     """task.json.status='passed' must match event log with task.completed."""
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
     assert "status inconsistent" not in r.output
 
@@ -774,16 +861,25 @@ def test_status_consistency_approved(disposable_repo, isolated_workspace):
     """After approval, task.json.status='approved' must match event log."""
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0
 
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
     assert "status inconsistent" not in r.output
 
@@ -792,16 +888,25 @@ def test_status_consistency_rejected(disposable_repo, isolated_workspace):
     """After rejection, task.json.status='archived' must match event log."""
     task_id, store, run_dir = _run(disposable_repo, isolated_workspace)
 
-    r = runner.invoke(app, [
-        "reject", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--rejecter", "test@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--rejecter",
+            "test@example.com",
+        ],
+    )
     assert r.exit_code == 0
 
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 0
     assert "status inconsistent" not in r.output
 
@@ -817,8 +922,9 @@ def test_status_inconsistency_detected(disposable_repo, isolated_workspace):
     data["status"] = "needs_review"  # lie — event log says passed
     task_json_path.write_text(json.dumps(data, indent=2) + "\n")
 
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
     assert "status inconsistent" in r.output
     assert "event log='passed'" in r.output
@@ -835,8 +941,9 @@ def test_status_inconsistency_approved_lie(disposable_repo, isolated_workspace):
     data["status"] = "approved"  # lie — no human.approved in event log
     task_json_path.write_text(json.dumps(data, indent=2) + "\n")
 
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
     assert "status inconsistent" in r.output
 
@@ -848,37 +955,103 @@ def test_derive_status_from_events_unit():
 
     # No terminal events → None.
     events = [
-        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            prev_hash="GENESIS",
+            hash="h1",
+        ),
     ]
     assert derive_status_from_events(events) is None
 
     # task.completed → passed.
     events = [
-        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
-        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            prev_hash="GENESIS",
+            hash="h1",
+        ),
+        Event(
+            event_id="evt_000002",
+            task_id="t1",
+            type=EventType.TASK_COMPLETED,
+            prev_hash="h1",
+            hash="h2",
+        ),
     ]
     assert derive_status_from_events(events) == "passed"
 
     # human.approved overrides task.completed → approved.
     events = [
-        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
-        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
-        Event(event_id="evt_000003", task_id="t1", type=EventType.HUMAN_APPROVED, prev_hash="h2", hash="h3"),
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            prev_hash="GENESIS",
+            hash="h1",
+        ),
+        Event(
+            event_id="evt_000002",
+            task_id="t1",
+            type=EventType.TASK_COMPLETED,
+            prev_hash="h1",
+            hash="h2",
+        ),
+        Event(
+            event_id="evt_000003",
+            task_id="t1",
+            type=EventType.HUMAN_APPROVED,
+            prev_hash="h2",
+            hash="h3",
+        ),
     ]
     assert derive_status_from_events(events) == "approved"
 
     # human.rejected overrides everything → rejected.
     events = [
-        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
-        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_COMPLETED, prev_hash="h1", hash="h2"),
-        Event(event_id="evt_000003", task_id="t1", type=EventType.HUMAN_REJECTED, prev_hash="h2", hash="h3"),
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            prev_hash="GENESIS",
+            hash="h1",
+        ),
+        Event(
+            event_id="evt_000002",
+            task_id="t1",
+            type=EventType.TASK_COMPLETED,
+            prev_hash="h1",
+            hash="h2",
+        ),
+        Event(
+            event_id="evt_000003",
+            task_id="t1",
+            type=EventType.HUMAN_REJECTED,
+            prev_hash="h2",
+            hash="h3",
+        ),
     ]
     assert derive_status_from_events(events) == "rejected"
 
     # task.failed → failed.
     events = [
-        Event(event_id="evt_000001", task_id="t1", type=EventType.TASK_CREATED, prev_hash="GENESIS", hash="h1"),
-        Event(event_id="evt_000002", task_id="t1", type=EventType.TASK_FAILED, prev_hash="h1", hash="h2"),
+        Event(
+            event_id="evt_000001",
+            task_id="t1",
+            type=EventType.TASK_CREATED,
+            prev_hash="GENESIS",
+            hash="h1",
+        ),
+        Event(
+            event_id="evt_000002",
+            task_id="t1",
+            type=EventType.TASK_FAILED,
+            prev_hash="h1",
+            hash="h2",
+        ),
     ]
     assert derive_status_from_events(events) == "failed"
 
@@ -904,8 +1077,10 @@ def test_evidence_config_tamper_fails_verify(disposable_repo, isolated_workspace
     must fail acp verify — the config hash in evidence.finalized won't match."""
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.REQUIRED,
     )
 
     # Verify passes before tampering.
@@ -921,17 +1096,22 @@ def test_evidence_config_tamper_fails_verify(disposable_repo, isolated_workspace
     assert verify_evidence_manifest(run_dir) is False
 
     # CLI verify must also fail.
-    r = runner.invoke(app, ["verify", "--task", task_id,
-                            "--runs-root", str(isolated_workspace["runs_root"])])
+    r = runner.invoke(
+        app, ["verify", "--task", task_id, "--runs-root", str(isolated_workspace["runs_root"])]
+    )
     assert r.exit_code == 1
 
 
-def test_evidence_config_durable_store_tamper_fails_verify(disposable_repo, isolated_workspace, tmp_path):
+def test_evidence_config_durable_store_tamper_fails_verify(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """Changing the durable_store path in evidence_config.json must fail verify."""
     db_path = tmp_path / "events.db"
     task_id, store, run_dir = _run(
-        disposable_repo, isolated_workspace,
-        durable_store=db_path, durable_mode=DurableMode.REQUIRED,
+        disposable_repo,
+        isolated_workspace,
+        durable_store=db_path,
+        durable_mode=DurableMode.REQUIRED,
     )
 
     assert verify_evidence_manifest(run_dir) is True

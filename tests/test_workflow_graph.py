@@ -45,7 +45,7 @@ def _run_graph(
     runs_root: Path,
     vault_root: Path,
     *,
-    test_cmd: str = 'echo ok',
+    test_cmd: str = "echo ok",
     max_repair_attempts: int = 1,
     agent_factory=None,
 ):
@@ -76,7 +76,9 @@ def _event_types(store, task_id: str) -> list[str]:
 def _main_head(repo_path: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -155,7 +157,7 @@ def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, is
     events = _event_types(store, task_id)
     assert EventType.TASK_FAILED.value in events
     assert EventType.REVIEW_COMPLETED.value in events  # review still ran
-    assert EventType.REPORT_WRITTEN.value in events    # report still written
+    assert EventType.REPORT_WRITTEN.value in events  # report still written
 
     # Core invariant holds even on failure.
     assert _main_head(disposable_repo.path) == disposable_repo.main_head

@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
 from acp.events import EventWriter
 from acp.models import EventType, Mission, MissionStatus, _utcnow_iso
-
 
 # mission_20260626_0001
 _MISSION_ID_RE = re.compile(r"^mission_(\d{8})_(\d{4})$")
@@ -67,7 +66,7 @@ class MissionStore:
         Scans existing mission dirs for today's sequence number so ids
         are unique and monotonic within a day.
         """
-        today = (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
+        today = (now or datetime.now(UTC)).strftime("%Y%m%d")
         prefix = f"mission_{today}_"
         seq = 0
         for child in self.root.iterdir():
@@ -170,9 +169,7 @@ class MissionStore:
             if not yaml_path.is_file():
                 continue
             try:
-                missions.append(Mission.model_validate(
-                    yaml.safe_load(yaml_path.read_text())
-                ))
+                missions.append(Mission.model_validate(yaml.safe_load(yaml_path.read_text())))
             except Exception:  # noqa: BLE001
                 pass  # skip malformed
         return missions
@@ -224,8 +221,7 @@ class MissionStore:
         """
         mission = self.load(mission_id)
         non_terminal = [
-            i for i, s in enumerate(mission.steps)
-            if s.status not in ("completed", "failed")
+            i for i, s in enumerate(mission.steps) if s.status not in ("completed", "failed")
         ]
         if non_terminal:
             raise ValueError(

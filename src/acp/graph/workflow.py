@@ -31,12 +31,13 @@ graph to be drivable and its transitions observable.)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from acp.agents.base import AgentProtocol
 from acp.agents.registry import build_agent as _default_build_agent
@@ -86,7 +87,11 @@ def node_error_handler(node_fn: Callable) -> Callable:
             try:
                 ctx.events.write(
                     EventType.NODE_FAILED,
-                    {"node": node_fn.__name__, "exception_type": type(exc).__name__, "message": str(exc)},
+                    {
+                        "node": node_fn.__name__,
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
                 )
             except Exception:  # noqa: BLE001
                 event_write_failed = True
@@ -340,6 +345,7 @@ def build_workflow(
 # Convenience runner — used by the CLI (and tests).
 # --------------------------------------------------------------------------- #
 
+
 def run_workflow(
     *,
     config: Any,
@@ -378,6 +384,7 @@ def run_workflow(
         and evidence_cfg.durable_mode != DurableMode.DISABLED
     ):
         from acp.evidence.durable_task_store import DurableTaskStore
+
         durable_task_store = DurableTaskStore(evidence_cfg.durable_store)
         durable_task_store.init()
     store = TaskStore(
@@ -399,6 +406,7 @@ def run_workflow(
     # `cryptography` package all raise EvidenceConfigError (fail closed).
     if evidence_cfg and evidence_cfg.signing_key_path:
         from acp.errors import EvidenceConfigError
+
         try:
             key_bytes = evidence_cfg.signing_key_path.read_bytes()
         except OSError as exc:
@@ -430,33 +438,39 @@ def run_workflow(
     durable_store_failures: list[str] = []
     durable_mode = "best_effort"
     if evidence_cfg:
-        durable_mode = evidence_cfg.durable_mode.value if hasattr(evidence_cfg.durable_mode, "value") else str(evidence_cfg.durable_mode)
+        durable_mode = (
+            evidence_cfg.durable_mode.value
+            if hasattr(evidence_cfg.durable_mode, "value")
+            else str(evidence_cfg.durable_mode)
+        )
 
     if evidence_cfg and evidence_cfg.durable_store and durable_mode != "disabled":
         try:
             from acp.evidence.durable_store import DurableEventStore
+
             durable_store = DurableEventStore(evidence_cfg.durable_store)
             durable_store.init()
             # Wrap the write method to dual-write. In best_effort mode, failures
             # are recorded but don't crash the run. In required mode, failures
             # raise — the run cannot succeed without durable evidence.
             original_write = events.write
+
             def _dual_write(type, payload=None):
                 evt = original_write(type, payload)
                 try:
                     durable_store.append(evt)
                 except Exception as exc:  # noqa: BLE001
-                    durable_store_failures.append(
-                        f"{evt.event_id} ({evt.type.value}): {exc}"
-                    )
+                    durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
                     if durable_mode == "required":
                         raise  # fail closed — durable evidence is required
                 return evt
+
             events.write = _dual_write  # type: ignore[method-assign]
         except Exception as exc:
             durable_store_failures.append(f"init: {exc}")
             if durable_mode == "required":
                 from acp.errors import EvidenceConfigError
+
                 raise EvidenceConfigError(
                     f"durable store initialization failed (required mode): {exc}"
                 ) from exc

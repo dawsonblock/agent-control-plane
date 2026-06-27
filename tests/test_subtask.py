@@ -15,10 +15,9 @@ from acp.events import EventWriter, verify_event_chain
 from acp.models import EventType
 from acp.subtask import (
     SubTaskRequest,
-    parse_subtask_requests,
     emit_subtask_events,
+    parse_subtask_requests,
 )
-
 
 # --------------------------------------------------------------------------- #
 # 1. parse_subtask_requests
@@ -27,11 +26,7 @@ from acp.subtask import (
 
 def test_parse_single_subtask():
     """A single ACP_SPAWN_SUBTASK line is parsed correctly."""
-    stdout = (
-        "Starting work...\n"
-        "ACP_SPAWN_SUBTASK: Refactor the auth module\n"
-        "Done.\n"
-    )
+    stdout = "Starting work...\nACP_SPAWN_SUBTASK: Refactor the auth module\nDone.\n"
     result = parse_subtask_requests(stdout, parent_task_id="task_20260626_0001")
     assert len(result.requests) == 1
     assert result.requests[0].request == "Refactor the auth module"
@@ -64,11 +59,7 @@ def test_parse_no_subtasks():
 
 def test_parse_strips_spawn_lines_from_stdout():
     """Spawn lines are removed from the cleaned stdout."""
-    stdout = (
-        "Line 1\n"
-        "ACP_SPAWN_SUBTASK: Do something\n"
-        "Line 3\n"
-    )
+    stdout = "Line 1\nACP_SPAWN_SUBTASK: Do something\nLine 3\n"
     result = parse_subtask_requests(stdout)
     assert "ACP_SPAWN_SUBTASK" not in result.cleaned_stdout
     assert "Line 1" in result.cleaned_stdout
@@ -132,6 +123,7 @@ def test_emit_subtask_events_empty():
     """No requests → no events."""
     # Use a mock to avoid filesystem operations.
     from unittest.mock import MagicMock
+
     writer = MagicMock()
     count = emit_subtask_events([], writer)
     assert count == 0
@@ -178,11 +170,17 @@ def test_agent_section_max_subtasks_custom():
 def test_agent_section_max_subtasks_in_yaml(tmp_path):
     """Repo config loads max_subtasks from YAML."""
     import yaml
+
     config_file = tmp_path / "test.repo.yaml"
-    config_file.write_text(yaml.dump({
-        "repo": {"name": "test", "path": str(tmp_path)},
-        "agent": {"max_subtasks": 3},
-    }))
+    config_file.write_text(
+        yaml.dump(
+            {
+                "repo": {"name": "test", "path": str(tmp_path)},
+                "agent": {"max_subtasks": 3},
+            }
+        )
+    )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_file)
     assert cfg.agent.max_subtasks == 3

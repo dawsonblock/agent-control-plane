@@ -20,9 +20,9 @@ See:
 
 from __future__ import annotations
 
+from acp.executor.gvisor import GvisorExecutor
+from acp.executor.openhands import OpenHandsExecutor
 from acp.executor.protocol import Executor
 from acp.executor.sbx import SbxExecutor
-from acp.executor.openhands import OpenHandsExecutor
-from acp.executor.gvisor import GvisorExecutor
 
 __all__ = ["Executor", "SbxExecutor", "OpenHandsExecutor", "GvisorExecutor"]

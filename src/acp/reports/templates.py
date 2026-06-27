@@ -20,7 +20,6 @@ from acp.models import (
 from acp.review.gates import GateResult
 from acp.testing.parsers import summarize
 
-
 _PASS = "\u2705 pass"
 _FAIL = "\u274c fail"
 _SKIP = "\u23ed skip"
@@ -60,9 +59,15 @@ def render_report(
     lines.append(f"- **Base commit:** `{task.base_commit_sha or '(not recorded)'}`")
     lines.append(f"- **Worktree:** `{task.worktree_path}`")
     lines.append(f"- **Request:** {task.user_request}")
-    lines.append(f"- **Risk:** {review.risk.value}  --  **Recommendation:** {review.recommendation.value}")
-    lines.append(f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}")
-    lines.append(f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped")
+    lines.append(
+        f"- **Risk:** {review.risk.value}  --  **Recommendation:** {review.recommendation.value}"
+    )
+    lines.append(
+        f"- **Diff:** {len(diff.changed_files)} file(s), +{diff.insertions}/-{diff.deletions}"
+    )
+    lines.append(
+        f"- **Commands:** {summary['total']} ran, {len(summary['failed'])} failed, {len(summary['skipped'])} skipped"
+    )
     if repair_history:
         lines.append(f"- **Repair attempts:** {len(repair_history)}")
     lines.append(f"- **Created:** {task.created_at}")
@@ -85,13 +90,19 @@ def render_report(
         if gr.validation_commands_ran == 0:
             lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
         else:
-            lines.append(f"| Validation commands ran | ✅ passed | {gr.validation_commands_ran} commands ran |")
+            lines.append(
+                f"| Validation commands ran | ✅ passed | {gr.validation_commands_ran} commands ran |"
+            )
 
         if gr.validation_commands_failed > 0:
             passed = gr.validation_commands_ran - gr.validation_commands_failed
-            lines.append(f"| Validation commands passed | ❌ failed | {passed}/{gr.validation_commands_ran} passed |")
+            lines.append(
+                f"| Validation commands passed | ❌ failed | {passed}/{gr.validation_commands_ran} passed |"
+            )
         elif gr.validation_commands_ran > 0:
-            lines.append(f"| Validation commands passed | ✅ passed | {gr.validation_commands_ran}/{gr.validation_commands_ran} passed |")
+            lines.append(
+                f"| Validation commands passed | ✅ passed | {gr.validation_commands_ran}/{gr.validation_commands_ran} passed |"
+            )
         else:
             lines.append("| Validation commands passed | 🔶 needs review | n/a |")
 
@@ -132,20 +143,28 @@ def render_report(
         if len(non_skipped) == 0:
             lines.append("| Validation commands ran | 🔶 needs review | 0 commands ran |")
         else:
-            lines.append(f"| Validation commands ran | ✅ passed | {len(non_skipped)} commands ran |")
+            lines.append(
+                f"| Validation commands ran | ✅ passed | {len(non_skipped)} commands ran |"
+            )
 
         failed_cmds = [r for r in non_skipped if not r.passed]
         if failed_cmds:
-            lines.append(f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |")
+            lines.append(
+                f"| Validation commands passed | ❌ failed | {len(failed_cmds)}/{len(non_skipped)} passed |"
+            )
         elif non_skipped:
-            lines.append(f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |")
+            lines.append(
+                f"| Validation commands passed | ✅ passed | {len(non_skipped)}/{len(non_skipped)} passed |"
+            )
         else:
             lines.append("| Validation commands passed | 🔶 needs review | n/a |")
 
         if len(diff.changed_files) == 0:
             lines.append("| Diff non-empty | 🔶 needs review | 0 changed files |")
         else:
-            lines.append(f"| Diff non-empty | ✅ passed | {len(diff.changed_files)} changed files |")
+            lines.append(
+                f"| Diff non-empty | ✅ passed | {len(diff.changed_files)} changed files |"
+            )
 
         if review.hard_block:
             lines.append("| Review hard block | ❌ failed | true |")
@@ -221,18 +240,30 @@ def render_report(
     if can_promote:
         lines.append("This task **may** become a memory candidate once approved.")
         lines.append("")
-        lines.append("- All gates passed. Review the vault note and set `approved: true` to enable memory promotion.")
-        lines.append("- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria.")
+        lines.append(
+            "- All gates passed. Review the vault note and set `approved: true` to enable memory promotion."
+        )
+        lines.append(
+            "- See [memory-promotion-rules](vault/rules/memory-promotion-rules.md) for eligibility criteria."
+        )
     else:
-        lines.append("This task is **not** a memory candidate until the conditions below are resolved:")
+        lines.append(
+            "This task is **not** a memory candidate until the conditions below are resolved:"
+        )
         lines.append("")
         if task.status != TaskStatus.PASSED:
-            lines.append(f"- **Status:** {_status_word(task.status)} -- only `PASSED` tasks qualify")
+            lines.append(
+                f"- **Status:** {_status_word(task.status)} -- only `PASSED` tasks qualify"
+            )
         if review.recommendation != Recommendation.MERGE:
-            lines.append(f"- **Recommendation:** `{review.recommendation.value}` -- only `merge` qualifies")
+            lines.append(
+                f"- **Recommendation:** `{review.recommendation.value}` -- only `merge` qualifies"
+            )
         if review.hard_block:
             lines.append("- **Hard block:** active -- must be resolved before promotion")
-        lines.append(f"- **Risk:** {review.risk.value} -- see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)")
+        lines.append(
+            f"- **Risk:** {review.risk.value} -- see [memory-promotion-rules](vault/rules/memory-promotion-rules.md)"
+        )
     lines.append("")
 
     lines.append("## Agent")

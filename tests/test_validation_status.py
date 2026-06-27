@@ -26,7 +26,6 @@ from acp.testing.runner import (
     validation_status,
 )
 
-
 # --------------------------------------------------------------------------- #
 # CommandResult builder
 # --------------------------------------------------------------------------- #
@@ -110,6 +109,7 @@ def test_all_passed_returns_false_for_empty() -> None:
     validation_passed() or validation_status() instead.
     """
     import warnings
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         assert all_passed([]) is False
@@ -214,9 +214,8 @@ def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspa
 
     events = _event_types(store, result["task_id"])
     repair_events = [
-        e for e in events
+        e
+        for e in events
         if e in (EventType.REPAIR_ATTEMPTED.value, EventType.REPAIR_EXHAUSTED.value)
     ]
-    assert repair_events == [], (
-        f"no validation ran — repair must not trigger, got {repair_events}"
-    )
+    assert repair_events == [], f"no validation ran — repair must not trigger, got {repair_events}"

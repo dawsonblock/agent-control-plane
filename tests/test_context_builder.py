@@ -19,13 +19,13 @@ import pytest
 from acp.config import ContextSection, RepoConfig, RepoSection
 from acp.models import EventType
 
-
 # --------------------------------------------------------------------------- #
 # Helper: check if haystack is installed
 # --------------------------------------------------------------------------- #
 
 try:
     import haystack  # noqa: F401
+
     HAYSTACK_INSTALLED = True
 except ImportError:
     HAYSTACK_INSTALLED = False
@@ -164,12 +164,16 @@ class TestVaultFiltering:
 
         # Approved note in tasks/
         self._make_vault_note(
-            vault_root, "tasks/approved_task.md", approved=True,
+            vault_root,
+            "tasks/approved_task.md",
+            approved=True,
             content="Approved fix for authentication",
         )
         # Unapproved note in tasks/
         self._make_vault_note(
-            vault_root, "tasks/unapproved_task.md", approved=False,
+            vault_root,
+            "tasks/unapproved_task.md",
+            approved=False,
             content="Unapproved risky change to database",
         )
         # Rule note (not in tasks/ — always included)
@@ -357,9 +361,7 @@ class TestFullRAGPipeline:
             "    return check_credentials(user, password)\n",
         )
         (repo_path / "utils.py").write_text(
-            "def helper():\n"
-            "    '''A utility function.'''\n"
-            "    return 42\n",
+            "def helper():\n    '''A utility function.'''\n    return 42\n",
         )
 
         vault_root = tmp_path / "vault"
@@ -374,7 +376,8 @@ class TestFullRAGPipeline:
         )
 
         bundle = builder.build_context_bundle(
-            "authentication login password", top_k=5,
+            "authentication login password",
+            top_k=5,
         )
 
         # The bundle should contain the auth.py content
@@ -420,7 +423,8 @@ class TestFullRAGPipeline:
         )
 
         bundle = builder.build_context_bundle(
-            "database migration", top_k=10,
+            "database migration",
+            top_k=10,
         )
 
         # Unapproved task content should NOT appear
@@ -547,9 +551,7 @@ class TestReranking:
         repo_path = tmp_path / "repo"
         repo_path.mkdir()
         (repo_path / "auth.py").write_text(
-            "def login(user, password):\n"
-            "    # authenticate user with password\n"
-            "    pass\n"
+            "def login(user, password):\n    # authenticate user with password\n    pass\n"
         )
         vault_root = tmp_path / "vault"
         vault_root.mkdir()

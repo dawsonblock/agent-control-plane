@@ -103,7 +103,9 @@ class HaystackIndexer:
         indexing_pipeline.add_component(
             "splitter",
             DocumentSplitter(
-                split_by="word", split_length=250, split_overlap=25,
+                split_by="word",
+                split_length=250,
+                split_overlap=25,
             ),
         )
         # Embedder: uses the lightweight local MiniLM model

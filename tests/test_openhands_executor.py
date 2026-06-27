@@ -15,15 +15,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from acp.config import ExecutorSection
-from acp.executor import Executor, SbxExecutor, OpenHandsExecutor
+from acp.executor import Executor, OpenHandsExecutor, SbxExecutor
 from acp.executor.openhands import OpenHandsInfo, OpenHandsNotInstalledError
 from acp.models import AgentResult
-
 
 # --------------------------------------------------------------------------- #
 # 1. Executor protocol
@@ -117,9 +116,11 @@ def test_start_captures_stdout_stderr(tmp_path):
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
 
-    with patch.object(OpenHandsExecutor, "check_installed", return_value=True), \
-         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"), \
-         patch("subprocess.run", return_value=mock_result):
+    with (
+        patch.object(OpenHandsExecutor, "check_installed", return_value=True),
+        patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
+        patch("subprocess.run", return_value=mock_result),
+    ):
         result = executor.start(
             task_id="task_20260626_0001",
             prompt_path=prompt_path,
@@ -145,9 +146,11 @@ def test_start_returns_correct_agent_name(tmp_path):
     mock_result.stdout = ""
     mock_result.stderr = ""
 
-    with patch.object(OpenHandsExecutor, "check_installed", return_value=True), \
-         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"), \
-         patch("subprocess.run", return_value=mock_result):
+    with (
+        patch.object(OpenHandsExecutor, "check_installed", return_value=True),
+        patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
+        patch("subprocess.run", return_value=mock_result),
+    ):
         result = executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
@@ -162,15 +165,18 @@ def test_start_returns_correct_agent_name(tmp_path):
 def test_start_handles_timeout(tmp_path):
     """start() handles subprocess timeout gracefully."""
     import subprocess
+
     cfg = ExecutorSection(backend="openhands", agent="test-model")
     executor = OpenHandsExecutor(cfg)
 
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("test")
 
-    with patch.object(OpenHandsExecutor, "check_installed", return_value=True), \
-         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"), \
-         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="openhands", timeout=5)):
+    with (
+        patch.object(OpenHandsExecutor, "check_installed", return_value=True),
+        patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
+        patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="openhands", timeout=5)),
+    ):
         result = executor.start(
             task_id="task_001",
             prompt_path=prompt_path,
@@ -190,9 +196,11 @@ def test_start_handles_not_found(tmp_path):
 
     # check_installed returns True (so _validate passes), but subprocess.run
     # raises FileNotFoundError (race condition: openhands was uninstalled).
-    with patch.object(OpenHandsExecutor, "check_installed", return_value=True), \
-         patch.object(OpenHandsExecutor, "get_version", return_value=""), \
-         patch("subprocess.run", side_effect=FileNotFoundError):
+    with (
+        patch.object(OpenHandsExecutor, "check_installed", return_value=True),
+        patch.object(OpenHandsExecutor, "get_version", return_value=""),
+        patch("subprocess.run", side_effect=FileNotFoundError),
+    ):
         result = executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
@@ -214,9 +222,9 @@ def test_count_jsonl_events():
     """_count_jsonl_events counts valid JSON lines."""
     stdout = (
         '{"type": "action", "action": "write"}\n'
-        'not json\n'
+        "not json\n"
         '{"type": "observation", "content": "done"}\n'
-        '\n'
+        "\n"
         '{"type": "action", "action": "run"}\n'
     )
     count = OpenHandsExecutor._count_jsonl_events(stdout)
@@ -233,7 +241,7 @@ def test_extract_jsonl_events(tmp_path):
     """_extract_jsonl_events writes only valid JSON lines to a file."""
     stdout = (
         '{"type": "action", "action": "write"}\n'
-        'not json\n'
+        "not json\n"
         '{"type": "observation", "content": "done"}\n'
     )
     output_path = tmp_path / "events.jsonl"
@@ -316,16 +324,22 @@ def test_config_rejects_unknown_backend():
 def test_config_openhands_in_yaml(tmp_path):
     """Repo config loads openhands backend from YAML."""
     import yaml
+
     config_file = tmp_path / "test.repo.yaml"
-    config_file.write_text(yaml.dump({
-        "repo": {"name": "test", "path": str(tmp_path)},
-        "executor": {
-            "backend": "openhands",
-            "agent": "claude-sonnet-4-20250514",
-            "network_policy": "locked_down",
-        },
-    }))
+    config_file.write_text(
+        yaml.dump(
+            {
+                "repo": {"name": "test", "path": str(tmp_path)},
+                "executor": {
+                    "backend": "openhands",
+                    "agent": "claude-sonnet-4-20250514",
+                    "network_policy": "locked_down",
+                },
+            }
+        )
+    )
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config_file)
     assert cfg.executor.backend == "openhands"
     assert cfg.executor.agent == "claude-sonnet-4-20250514"

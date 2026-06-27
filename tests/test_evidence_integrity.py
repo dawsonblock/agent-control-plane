@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from acp.events import EventWriter, GENESIS_HASH, verify_event_chain
+from acp.events import GENESIS_HASH, EventWriter, verify_event_chain
 from acp.evidence.manifest import (
     build_evidence_manifest,
     verify_evidence_manifest,
@@ -149,7 +149,8 @@ def test_write_and_verify_manifest_roundtrip(tmp_path: Path):
     (artifacts / "commands.json").write_text("[]\n")
 
     manifest_path, manifest_hash = write_evidence_manifest(
-        run_dir=tmp_path, events_writer=w,
+        run_dir=tmp_path,
+        events_writer=w,
     )
     assert manifest_path.is_file()
     assert manifest_hash != ""

@@ -24,7 +24,7 @@ from acp.models import EventType, TaskStatus
 from acp.store import TaskStore
 
 
-def _config(repo_path: Path, *, test_cmd='echo ok', max_repair=0) -> RepoConfig:
+def _config(repo_path: Path, *, test_cmd="echo ok", max_repair=0) -> RepoConfig:
     return RepoConfig(
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=max_repair),
@@ -40,7 +40,10 @@ def _run_graph(repo_path, runs_root, vault_root, *, cfg=None):
     if cfg is None:
         cfg = _config(repo_path)
     state = initial_state(
-        config=cfg, user_request="test", vault_root=vault_root, runs_root=runs_root,
+        config=cfg,
+        user_request="test",
+        vault_root=vault_root,
+        runs_root=runs_root,
     )
     return wf.invoke(state, config={"configurable": {"thread_id": "test"}}), store
 
@@ -53,7 +56,9 @@ def _events(store, task_id):
 def _main_head(repo_path):
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -76,8 +81,7 @@ def test_dirty_repo_exactly_one_terminal_event(disposable_repo, isolated_workspa
     events = _events(store, result["task_id"])
     terminal = [e for e in events if e["type"] == EventType.TASK_FAILED.value]
     assert len(terminal) == 1, (
-        f"expected exactly 1 task.failed event, got {len(terminal)}: "
-        f"{[e['type'] for e in events]}"
+        f"expected exactly 1 task.failed event, got {len(terminal)}: {[e['type'] for e in events]}"
     )
 
 
@@ -149,8 +153,7 @@ def test_worktree_failure_exactly_one_terminal_event(disposable_repo, isolated_w
     events = _events(store, result["task_id"])
     terminal = [e for e in events if e["type"] == EventType.TASK_FAILED.value]
     assert len(terminal) == 1, (
-        f"expected exactly 1 task.failed event, got {len(terminal)}: "
-        f"{[e['type'] for e in events]}"
+        f"expected exactly 1 task.failed event, got {len(terminal)}: {[e['type'] for e in events]}"
     )
     # A node.failed event was written for the worktree failure.
     node_failed = [e for e in events if e["type"] == EventType.NODE_FAILED.value]

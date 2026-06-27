@@ -105,7 +105,10 @@ def evaluate_final_gates(
     if (
         agent_exit_code != 0
         or failed_commands
-        or (review_result is not None and (review_result.hard_block or review_result.recommendation == "reject"))
+        or (
+            review_result is not None
+            and (review_result.hard_block or review_result.recommendation == "reject")
+        )
     ):
         outcome = GateOutcome.FAILED
     # Completed, but not safe to call passed

@@ -2,24 +2,94 @@ name: validate
 
 on:
   push:
-    branches: [master]
+    branches: [master, main]
   pull_request:
-    branches: [master]
+    branches: [master, main]
 
 jobs:
-  validate:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-
       - name: Set up Python
         run: uv python install 3.12
-
       - name: Install dependencies
         run: uv sync --extra dev
+      - name: Ruff check
+        run: uv run ruff check src/acp tests/
+      - name: Ruff format check
+        run: uv run ruff format --check src/acp tests/
 
-      - name: Validate (compileall + pytest)
-        run: bash scripts/validate.sh
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra dev --extra api --extra crypto
+      - name: Mypy (non-blocking baseline)
+        run: uv run mypy src/acp || true
+      - name: Mypy (blocking — target)
+        run: uv run mypy src/acp --strict || echo "WARN: strict mypy not yet passing (baseline)"
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        extras:
+          - "--extra dev"
+          - "--extra dev --extra rag --extra memory --extra crypto --extra api"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync ${{ matrix.extras }}
+      - name: Compile check
+        run: uv run python -m compileall -q src tests
+      - name: Pytest with coverage
+        run: uv run python -m pytest -q --cov=acp --cov-report=xml
+      - name: Upload coverage
+        if: matrix.python-version == '3.12' && matrix.extras == '--extra dev --extra rag --extra memory --extra crypto --extra api'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        working-directory: ui
+        run: npm ci || npm install
+      - name: Lint
+        working-directory: ui
+        run: npm run lint
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+  desktop-check:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo check
+        working-directory: desktop/src-tauri
+        run: cargo check

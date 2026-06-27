@@ -33,7 +33,7 @@ class ACPState(TypedDict, total=False):
     """
 
     # --- inputs (set at invocation) ------------------------------------- #
-    config: Any            # RepoConfig — opaque to LangGraph's typing
+    config: Any  # RepoConfig — opaque to LangGraph's typing
     user_request: str
     vault_root: Path
     runs_root: Path
@@ -41,33 +41,33 @@ class ACPState(TypedDict, total=False):
 
     # --- accumulated as the run progresses ------------------------------ #
     task_id: str
-    task: Any              # Task — kept here so nodes can read/update it
+    task: Any  # Task — kept here so nodes can read/update it
     status: TaskStatus
     repo_path: Path
     worktree_path: Path
     artifacts_dir: Path
 
-    context_bundle_path: Path | None   # None until M6 (Haystack)
+    context_bundle_path: Path | None  # None until M6 (Haystack)
     prompt_path: Path
     agent_result: AgentResult
     command_results: list[CommandResult]
     review_result: ReviewResult
-    diff: Any              # DiffCapture
+    diff: Any  # DiffCapture
 
     report_path: Path
     vault_note_path: Path
 
     # --- gate result (v0.5.2: first-class final gate artifact) ---------- #
-    gate_result: Any         # GateResult — stored by write_report_node, consumed
-                             # by terminal nodes and report rendering.
+    gate_result: Any  # GateResult — stored by write_report_node, consumed
+    # by terminal nodes and report rendering.
 
     # --- evidence manifest (v0.5.5: tamper-evident evidence) ------------- #
-    manifest_hash: str       # sha256 over the evidence manifest; included in
-                             # the report so report ↔ evidence binding is
-                             # verifiable.
+    manifest_hash: str  # sha256 over the evidence manifest; included in
+    # the report so report ↔ evidence binding is
+    # verifiable.
 
     # --- failure tracking (for the M4 repair loop and reports) ---------- #
-    error: str             # human-readable reason if status == FAILED
+    error: str  # human-readable reason if status == FAILED
     failure_event: EventType  # which final event to write (task.failed / task.completed)
 
     # --- M4 repair loop ------------------------------------------------- #
@@ -78,15 +78,15 @@ class ACPState(TypedDict, total=False):
     repair_history: list[dict[str, Any]]
 
     # --- v0.5.13: Docker Sandboxes executor ----------------------------- #
-    sandbox_name: str           # acp-<task_id> when executor is docker_sbx
-    sandbox_remote: str         # sandbox-acp-<task_id> on the host
+    sandbox_name: str  # acp-<task_id> when executor is docker_sbx
+    sandbox_remote: str  # sandbox-acp-<task_id> on the host
     sandbox_metadata: dict[str, Any]  # recorded in sandbox.started event
 
     # --- v0.6.0: Autonomous mode ---------------------------------------- #
     # Whether autonomous mode was active for this run.
-    auto_approved: bool             # True if auto.approved was written
-    auto_merged: bool               # True if auto.merged was written
-    merge_commit_sha: str           # SHA of the merge commit (if any)
+    auto_approved: bool  # True if auto.approved was written
+    auto_merged: bool  # True if auto.merged was written
+    merge_commit_sha: str  # SHA of the merge commit (if any)
     # Circuit breaker: fingerprints of previous repair failure signatures.
     # Used to detect when the agent is repeating the same fix.
     repair_fingerprints: list[str]
@@ -97,9 +97,9 @@ class ACPState(TypedDict, total=False):
     # preceding task's artifacts. The parent_task_id is the task that ran
     # for the previous mission step; its diff.patch hash is included in
     # evidence.finalized, proving this task was generated sequentially.
-    mission_id: str                 # the mission this task belongs to
-    mission_step_index: int         # which step in the mission (0-based)
-    parent_task_id: str             # preceding step's task_id ("" for step 0)
+    mission_id: str  # the mission this task belongs to
+    mission_step_index: int  # which step in the mission (0-based)
+    parent_task_id: str  # preceding step's task_id ("" for step 0)
 
 
 def initial_state(

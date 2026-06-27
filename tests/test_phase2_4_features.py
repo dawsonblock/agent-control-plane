@@ -13,7 +13,7 @@ Phase 4.1: API endpoints for missions and skills
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -24,7 +24,6 @@ from acp.review.secret_scanner import (
     scan_diff,
     scan_patch,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Phase 3.2: Custom secret regexes
@@ -69,6 +68,7 @@ def test_custom_regexes_config_rejects_empty_name():
 def test_scan_patch_with_custom_regexes():
     """scan_patch detects custom regex matches."""
     import re
+
     custom = [("custom:internal_key", re.compile(r"IAK-[A-Z0-9]{32}"))]
     patch = '+API_KEY = "IAK-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"\n'
     findings = scan_patch(patch, custom_regexes=custom)
@@ -89,6 +89,7 @@ def test_scan_patch_without_custom_regexes():
 def test_detect_hard_block_secrets_with_custom_regex():
     """detect_hard_block_secrets treats custom regex matches as hard blocks."""
     import re
+
     custom = [("custom:company_token", re.compile(r"CT-[A-Z0-9]{40}"))]
     # The token must be 40 chars after CT-: ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 = 36... need 40
     token = "CT-" + "A" * 40
@@ -101,6 +102,7 @@ def test_detect_hard_block_secrets_with_custom_regex():
 def test_scan_diff_with_custom_regexes():
     """scan_diff passes custom regexes through to scan_patch."""
     import re
+
     custom = [("custom:jwt_internal", re.compile(r"INTJWT-[A-Z0-9]{20}"))]
     patch = '+jwt = "INTJWT-ABCDEFGHIJKLMNOPQRST"\n'
     findings = scan_diff(patch, custom_regexes=custom, use_trufflehog=False)
@@ -250,6 +252,7 @@ def test_durable_task_store_check_integrity_callback(tmp_path):
     (task_dir / "task.json").write_text(task.model_dump_json(indent=2))
 
     callback_calls = []
+
     def on_breach(task_id, json_status, sqlite_status):
         callback_calls.append((task_id, json_status, sqlite_status))
 
@@ -282,10 +285,10 @@ def test_auto_merge_refused_includes_risk_factors():
     # Verify the autonomous_merge_node function references risk_factors
     # by checking the source.
     import acp.graph.nodes as nodes_mod
+
     source = open(nodes_mod.__file__).read()
     assert "risk_factors" in source, (
-        "autonomous_merge_node should include risk_factors in the "
-        "AUTO_MERGE_REFUSED event payload"
+        "autonomous_merge_node should include risk_factors in the AUTO_MERGE_REFUSED event payload"
     )
 
 
@@ -297,6 +300,7 @@ def test_auto_merge_refused_includes_risk_factors():
 def test_gvisor_executor_backend_name():
     """GvisorExecutor.backend_name returns 'gvisor'."""
     from acp.executor.gvisor import GvisorExecutor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     assert executor.backend_name == "gvisor"
 
@@ -305,6 +309,7 @@ def test_gvisor_executor_protocol_compliance():
     """GvisorExecutor satisfies the Executor protocol."""
     from acp.executor.gvisor import GvisorExecutor
     from acp.executor.protocol import Executor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     assert isinstance(executor, Executor)
 
@@ -312,6 +317,7 @@ def test_gvisor_executor_protocol_compliance():
 def test_gvisor_executor_check_installed_returns_false_without_docker():
     """GvisorExecutor.check_installed returns False when Docker is missing."""
     from acp.executor.gvisor import GvisorExecutor
+
     with patch("shutil.which", return_value=None):
         assert GvisorExecutor.check_installed() is False
 
@@ -319,24 +325,31 @@ def test_gvisor_executor_check_installed_returns_false_without_docker():
 def test_gvisor_executor_check_installed_returns_false_without_runsc():
     """GvisorExecutor.check_installed returns False when runsc is not registered."""
     from acp.executor.gvisor import GvisorExecutor
+
     mock_proc = MagicMock(stdout='{"runc":{}}', returncode=0)
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
-         patch("subprocess.run", return_value=mock_proc):
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch("subprocess.run", return_value=mock_proc),
+    ):
         assert GvisorExecutor.check_installed() is False
 
 
 def test_gvisor_executor_check_installed_returns_true_with_runsc():
     """GvisorExecutor.check_installed returns True when runsc is registered."""
     from acp.executor.gvisor import GvisorExecutor
+
     mock_proc = MagicMock(stdout='{"runsc":{"path":"/usr/bin/runsc"}}', returncode=0)
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
-         patch("subprocess.run", return_value=mock_proc):
+    with (
+        patch("shutil.which", return_value="/usr/bin/docker"),
+        patch("subprocess.run", return_value=mock_proc),
+    ):
         assert GvisorExecutor.check_installed() is True
 
 
 def test_gvisor_executor_validate_fails_without_docker():
     """GvisorExecutor._validate raises when Docker/gVisor not installed."""
     from acp.executor.gvisor import GvisorExecutor, GvisorNotInstalledError
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     with patch.object(GvisorExecutor, "check_installed", return_value=False):
         with pytest.raises(GvisorNotInstalledError):
@@ -345,7 +358,8 @@ def test_gvisor_executor_validate_fails_without_docker():
 
 def test_gvisor_executor_validate_fails_without_agent():
     """GvisorExecutor._validate raises when agent is not set."""
-    from acp.executor.gvisor import GvisorExecutor, AgentConfigError
+    from acp.executor.gvisor import AgentConfigError, GvisorExecutor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent=""))
     with patch.object(GvisorExecutor, "check_installed", return_value=True):
         with pytest.raises(AgentConfigError, match="agent is required"):
@@ -354,7 +368,8 @@ def test_gvisor_executor_validate_fails_without_agent():
 
 def test_gvisor_executor_validate_fails_without_clone_mode():
     """GvisorExecutor._validate raises when clone_mode is False."""
-    from acp.executor.gvisor import GvisorExecutor, AgentConfigError
+    from acp.executor.gvisor import AgentConfigError, GvisorExecutor
+
     executor = GvisorExecutor(
         ExecutorSection(backend="gvisor", agent="claude", clone_mode=False),
     )
@@ -366,6 +381,7 @@ def test_gvisor_executor_validate_fails_without_clone_mode():
 def test_gvisor_executor_stop_returns_false_without_container():
     """GvisorExecutor.stop returns False when no container was started."""
     from acp.executor.gvisor import GvisorExecutor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     assert executor.stop() is False
 
@@ -373,6 +389,7 @@ def test_gvisor_executor_stop_returns_false_without_container():
 def test_gvisor_executor_remove_returns_false_without_container():
     """GvisorExecutor.remove returns False when no container was started."""
     from acp.executor.gvisor import GvisorExecutor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     assert executor.remove() is False
 
@@ -380,6 +397,7 @@ def test_gvisor_executor_remove_returns_false_without_container():
 def test_gvisor_executor_info():
     """GvisorExecutor.info returns metadata dict."""
     from acp.executor.gvisor import GvisorExecutor
+
     executor = GvisorExecutor(
         ExecutorSection(backend="gvisor", agent="claude", network_policy="locked_down"),
     )
@@ -392,6 +410,7 @@ def test_gvisor_executor_info():
 def test_gvisor_executor_fetch_remote_returns_empty():
     """GvisorExecutor.fetch_remote returns empty (volume-mounted worktree)."""
     from acp.executor.gvisor import GvisorExecutor
+
     executor = GvisorExecutor(ExecutorSection(backend="gvisor", agent="claude"))
     assert executor.fetch_remote(Path("/tmp")) == ""
 
@@ -411,6 +430,7 @@ def test_missions_endpoint_exists():
     """GET /missions endpoint is registered in the FastAPI app."""
     try:
         from acp.api.server import app
+
         routes = [r.path for r in app.routes]
         assert "/missions" in routes, "GET /missions endpoint not found"
         assert "/missions/{mission_id}" in routes, "GET /missions/{mission_id} not found"
@@ -422,6 +442,7 @@ def test_skills_endpoint_exists():
     """GET /skills endpoint is registered in the FastAPI app."""
     try:
         from acp.api.server import app
+
         routes = [r.path for r in app.routes]
         assert "/skills" in routes, "GET /skills endpoint not found"
     except ImportError:

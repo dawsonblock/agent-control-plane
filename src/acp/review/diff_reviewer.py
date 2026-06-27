@@ -42,38 +42,89 @@ from acp.testing.runner import validation_passed, validation_ran, validation_sta
 # --- path heuristics (lowercase substring matches) ------------------------- #
 
 _AUTH_PATTERNS = (
-    "auth", "session", "login", "password", "secret", "token",
-    "jwt", "oauth", "saml", "rbac", "crypto",
+    "auth",
+    "session",
+    "login",
+    "password",
+    "secret",
+    "token",
+    "jwt",
+    "oauth",
+    "saml",
+    "rbac",
+    "crypto",
 )
 _DB_PATTERNS = (
-    "migration", "migrations/", "schema", "db/", "database/",
-    "alembic", "flyway", "prisma/", "schema.prisma",
+    "migration",
+    "migrations/",
+    "schema",
+    "db/",
+    "database/",
+    "alembic",
+    "flyway",
+    "prisma/",
+    "schema.prisma",
 )
 _MANIFEST_PATTERNS = (
-    "package.json", "requirements.txt", "pyproject.toml",
-    "go.mod", "cargo.toml", "gemfile", "composer.json",
-    "pom.xml", "build.gradle",
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "go.mod",
+    "cargo.toml",
+    "gemfile",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
 )
 _LOCKFILE_PATTERNS = (
-    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-    "poetry.lock", "uv.lock", "go.sum", "cargo.lock",
-    "gemfile.lock", "composer.lock", "build.gradle.kts",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "go.sum",
+    "cargo.lock",
+    "gemfile.lock",
+    "composer.lock",
+    "build.gradle.kts",
 )
 _NETWORK_PATTERNS = (
-    "fetch(", "httpclient", "http.client", "requests", "axios",
-    "urllib", "socket", "websocket", "grpc", "rpc/client",
-    "net/http", "/client.go",
+    "fetch(",
+    "httpclient",
+    "http.client",
+    "requests",
+    "axios",
+    "urllib",
+    "socket",
+    "websocket",
+    "grpc",
+    "rpc/client",
+    "net/http",
+    "/client.go",
 )
 _PERMISSION_PATTERNS = (
-    "sudoers", "chmod", "chown", "permissions", "policy.json",
-    "iam/", "rbac.yaml", "capability", "acl",
+    "sudoers",
+    "chmod",
+    "chown",
+    "permissions",
+    "policy.json",
+    "iam/",
+    "rbac.yaml",
+    "capability",
+    "acl",
 )
 # Files whose presence in the diff is itself a hard block (secrets at rest).
 _ENV_FILE_PATTERNS = (".env", ".env.", "secrets.yaml", "secrets.yml", "credentials.json")
 # Tests/docs don't count as "behavior" for the tests-missing check.
 _TEST_PATTERNS = (
-    "test_", "_test.", ".test.", ".spec.", "/tests/", "/test/",
-    "conftest.py", "__tests__/",
+    "test_",
+    "_test.",
+    ".test.",
+    ".spec.",
+    "/tests/",
+    "/test/",
+    "conftest.py",
+    "__tests__/",
 )
 _BEHAVIOR_EXCLUDES = _TEST_PATTERNS + ("readme", "changelog", "license", ".md", "docs/")
 
@@ -97,9 +148,7 @@ def review_diff(
     """
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     review = _evaluate(diff, command_results, repo_config, worktree_path=worktree_path)
-    (artifacts_dir / "review.json").write_text(
-        review.model_dump_json(indent=2)
-    )
+    (artifacts_dir / "review.json").write_text(review.model_dump_json(indent=2))
     return review
 
 
@@ -120,10 +169,7 @@ def _compile_custom_regexes(
     """
     if not configs:
         return None
-    return [
-        (f"custom:{entry['name']}", re.compile(entry["pattern"]))
-        for entry in configs
-    ]
+    return [(f"custom:{entry['name']}", re.compile(entry["pattern"])) for entry in configs]
 
 
 def _evaluate(
@@ -156,8 +202,7 @@ def _evaluate(
             kinds = sorted({f.kind for f in findings})
             engine.add(
                 RiskCategory.SECRET,
-                f"Secret-like content detected in diff: {kinds}. "
-                f"Review and rotate if real.",
+                f"Secret-like content detected in diff: {kinds}. Review and rotate if real.",
                 level=RiskLevel.HIGH,
                 hard_block=True,
             )
@@ -191,13 +236,14 @@ def _evaluate(
     if diff.insertions > cfg.review.max_added_lines:
         engine.add(
             RiskCategory.QUANTITY,
-            f"Added {diff.insertions} lines; "
-            f"max_added_lines={cfg.review.max_added_lines}",
+            f"Added {diff.insertions} lines; max_added_lines={cfg.review.max_added_lines}",
             level=RiskLevel.HIGH,
         )
 
     # --- large / generated single file ------------------------------------ #
-    large = [p for p in diff.changed_files if _file_insertions(diff.patch, p) >= _LARGE_FILE_INSERTIONS]
+    large = [
+        p for p in diff.changed_files if _file_insertions(diff.patch, p) >= _LARGE_FILE_INSERTIONS
+    ]
     if large:
         engine.add(
             RiskCategory.LARGE_FILE,

@@ -27,11 +27,11 @@ from acp.memory.graphiti_client import (
     search_graphiti_facts,
 )
 from acp.memory.promotion_rules import (
-    PROMOTION_BLOCKED,
     PRIORITY_HIGH,
     PRIORITY_LOW,
     PRIORITY_NORMAL,
     PRIORITY_URGENT,
+    PROMOTION_BLOCKED,
     get_promotion_exclusions,
     get_promotion_metadata,
     get_promotion_priority,

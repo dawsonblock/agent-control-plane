@@ -13,8 +13,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter
@@ -70,9 +70,7 @@ def test_node_error_handler_sets_status_failed(disposable_repo, isolated_workspa
     state = {"config": _config(disposable_repo.path), "user_request": "test"}
     result = graph.invoke(state, config={"configurable": {"thread_id": "acp-fail-st"}})
 
-    assert result.get("status") == TaskStatus.FAILED, (
-        f"expected FAILED, got {result.get('status')}"
-    )
+    assert result.get("status") == TaskStatus.FAILED, f"expected FAILED, got {result.get('status')}"
     error = result.get("error", "")
     assert error, "error field should not be empty after node failure"
 
@@ -91,7 +89,9 @@ def _build_minimal_graph_with_broken_node(ctx: NodeContext) -> Any:
     g.add_node("broken", wrapped)
     g.add_node("done", lambda s: s)
     g.add_edge(START, "broken")
-    g.add_conditional_edges("broken", lambda s: "done" if s.get("status") != TaskStatus.FAILED else END)
+    g.add_conditional_edges(
+        "broken", lambda s: "done" if s.get("status") != TaskStatus.FAILED else END
+    )
     g.add_edge("done", END)
     return g.compile(checkpointer=MemorySaver())
 
@@ -115,9 +115,7 @@ def test_node_failure_writes_node_failed_event_directly(disposable_repo, isolate
     if evts_path.exists():
         events_list = [json.loads(l) for l in evts_path.read_text().splitlines() if l.strip()]
         node_failed = [e for e in events_list if e["type"] == EventType.NODE_FAILED.value]
-        assert len(node_failed) >= 1, (
-            f"expected at least one node.failed event, got {events_list}"
-        )
+        assert len(node_failed) >= 1, f"expected at least one node.failed event, got {events_list}"
         payload = node_failed[0]["payload"]
         assert payload["node"] == "broken_node"
         assert "intentional node crash" in payload["message"]

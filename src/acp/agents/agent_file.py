@@ -37,7 +37,6 @@ import yaml
 
 from acp.errors import AgentConfigError
 
-
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
@@ -83,8 +82,7 @@ class AgentFile:
     ) -> None:
         if role not in VALID_ROLES:
             raise AgentConfigError(
-                f"Agent role '{role}' is invalid. "
-                f"Valid roles: {', '.join(sorted(VALID_ROLES))}."
+                f"Agent role '{role}' is invalid. Valid roles: {', '.join(sorted(VALID_ROLES))}."
             )
         self.name = name
         self.version = version
@@ -98,10 +96,7 @@ class AgentFile:
         self.source_path = source_path
 
     def __repr__(self) -> str:
-        return (
-            f"AgentFile(name={self.name!r}, version={self.version!r}, "
-            f"role={self.role!r})"
-        )
+        return f"AgentFile(name={self.name!r}, version={self.version!r}, role={self.role!r})"
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AgentFile):
@@ -154,14 +149,10 @@ def load_agent_file(path: Path) -> AgentFile:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as exc:
-        raise AgentConfigError(
-            f"Failed to parse agent file {path}: {exc}"
-        ) from exc
+        raise AgentConfigError(f"Failed to parse agent file {path}: {exc}") from exc
 
     if not isinstance(data, dict):
-        raise AgentConfigError(
-            f"Agent file must be a YAML mapping: {path}"
-        )
+        raise AgentConfigError(f"Agent file must be a YAML mapping: {path}")
 
     return _validate_and_build(data, source_path=path)
 
@@ -189,9 +180,7 @@ def _validate_and_build(
     """Internal: validate fields and build the AgentFile."""
     for field in REQUIRED_FIELDS:
         if field not in data:
-            raise AgentConfigError(
-                f"Agent file missing required field '{field}'"
-            )
+            raise AgentConfigError(f"Agent file missing required field '{field}'")
 
     name = data["name"]
     if not isinstance(name, str) or not name.strip():
@@ -204,15 +193,12 @@ def _validate_and_build(
     role = data["role"]
     if role not in VALID_ROLES:
         raise AgentConfigError(
-            f"Agent role '{role}' is invalid. "
-            f"Valid roles: {', '.join(sorted(VALID_ROLES))}."
+            f"Agent role '{role}' is invalid. Valid roles: {', '.join(sorted(VALID_ROLES))}."
         )
 
     command_template = data["command_template"]
     if not isinstance(command_template, str) or not command_template.strip():
-        raise AgentConfigError(
-            "Agent 'command_template' must be a non-empty string"
-        )
+        raise AgentConfigError("Agent 'command_template' must be a non-empty string")
 
     capabilities = data.get("capabilities", [])
     if not isinstance(capabilities, list):
@@ -224,9 +210,7 @@ def _validate_and_build(
 
     max_repair = data.get("max_repair_attempts", 5)
     if not isinstance(max_repair, int) or max_repair < 0:
-        raise AgentConfigError(
-            "Agent 'max_repair_attempts' must be a non-negative int"
-        )
+        raise AgentConfigError("Agent 'max_repair_attempts' must be a non-negative int")
 
     sha256 = data.get("sha256", "")
     if not isinstance(sha256, str):
@@ -298,9 +282,7 @@ def verify_agent_hash(agent: AgentFile) -> bool:
         return True  # No hash to verify
 
     if not agent.binary_path.is_file():
-        raise FileNotFoundError(
-            f"Agent binary not found: {agent.binary_path}"
-        )
+        raise FileNotFoundError(f"Agent binary not found: {agent.binary_path}")
 
     actual = compute_file_hash(agent.binary_path)
     if actual != agent.sha256:

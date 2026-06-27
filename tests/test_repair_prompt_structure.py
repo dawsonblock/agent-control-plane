@@ -30,13 +30,12 @@ from acp.agents.base import write_missing_tests_prompt, write_repair_prompt
 from acp.config import (
     AgentSection,
     CommandsSection,
-    FederationServerConfig,
     FederationSection,
+    FederationServerConfig,
     RepoConfig,
     RepoSection,
     ReviewSection,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -53,9 +52,9 @@ def _make_config(
     """Build a minimal RepoConfig for prompt-generation tests."""
     fed = FederationSection()
     if federation_servers:
-        fed = FederationSection(servers=[
-            FederationServerConfig(name=s[0], command=s[1]) for s in federation_servers
-        ])
+        fed = FederationSection(
+            servers=[FederationServerConfig(name=s[0], command=s[1]) for s in federation_servers]
+        )
     return RepoConfig(
         repo=RepoSection(name="my-app", path=Path("/tmp/test"), default_branch="main"),
         commands=CommandsSection(
@@ -85,7 +84,7 @@ def _sample_failures() -> list[dict[str, object]]:
                 "______________________________ test_login_success "
                 "______________________________\n"
                 "    def test_login_success():\n"
-                ">       assert login(\"user\", \"pass\") == {\"status\": 200}\n"
+                '>       assert login("user", "pass") == {"status": 200}\n'
                 "E       AssertionError: assert {'status': 500} == {'status': 200}\n"
             ),
             "stderr": "",

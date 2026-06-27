@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -20,6 +21,17 @@ from acp.models import CommandResult, EventType
 
 if TYPE_CHECKING:
     from acp.events import EventWriter
+
+# Shell metacharacters and builtins that require shell=True. Validation
+# commands come from repo config (trusted operator), but we log when shell
+# interpretation is used so the evidence trail shows which commands ran with
+# shell features. ``!`` is the shell negate builtin (e.g., ``! grep -q ...``).
+_SHELL_METACHARS = set("|<>;&$\n`!")
+
+
+def _needs_shell(command: str) -> bool:
+    """Return True if the command contains shell metacharacters."""
+    return any(ch in _SHELL_METACHARS for ch in command)
 
 
 def run_commands(
@@ -46,7 +58,10 @@ def run_commands(
             results.append(_skipped(name, command, worktree_path, artifact_dir))
             continue
         if event_writer is not None:
-            event_writer.write(EventType.COMMAND_STARTED, {"command": command, "name": name, "cwd": str(worktree_path)})
+            event_writer.write(
+                EventType.COMMAND_STARTED,
+                {"command": command, "name": name, "cwd": str(worktree_path)},
+            )
         result = _run_one(name, command, worktree_path, artifact_dir, timeout_seconds)
         if event_writer is not None:
             event_writer.write(
@@ -92,10 +107,15 @@ def _run_one(
         # staged by `git add --all` in capture_diff and pollute the evidence.
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # Use shlex.split + shell=False when the command has no shell
+        # metacharacters, avoiding unnecessary shell interpretation. Fall
+        # back to shell=True only when the command uses pipes/redirects/etc.
+        use_shell = _needs_shell(command)
+        run_args: list[str] | str = command if use_shell else shlex.split(command)
         proc = subprocess.run(
-            command,
+            run_args,
             cwd=str(cwd),
-            shell=True,
+            shell=use_shell,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

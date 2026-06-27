@@ -77,7 +77,8 @@ def rerender_vault_note_from_state(
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "failed to parse review.json for vault note re-render: %s — "
-                    "using default review (low risk, merge)", exc,
+                    "using default review (low risk, merge)",
+                    exc,
                 )
 
         # Build a minimal diff capture for frontmatter stats.
@@ -91,6 +92,7 @@ def rerender_vault_note_from_state(
         diff_stat_path = run_dir / "artifacts" / "diff_stat.txt"
         if diff_stat_path.is_file():
             from acp.gitops.diff import _parse_stat
+
             try:
                 changed, ins, dels = _parse_stat(diff_stat_path.read_text())
                 diff = DiffCapture(
@@ -102,8 +104,8 @@ def rerender_vault_note_from_state(
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "failed to parse diff stat for vault note re-render: %s — "
-                    "using empty diff", exc,
+                    "failed to parse diff stat for vault note re-render: %s — using empty diff",
+                    exc,
                 )
 
         rerender_vault_note(
@@ -177,8 +179,7 @@ def record_lifecycle_event(
             key_bytes = signing_key_path.read_bytes()
         except OSError as exc:
             raise EvidenceConfigError(
-                f"run was signed but signing key is not readable: "
-                f"{signing_key_path} ({exc})"
+                f"run was signed but signing key is not readable: {signing_key_path} ({exc})"
             ) from exc
         if len(key_bytes) != 32:
             raise EvidenceConfigError(
@@ -202,9 +203,7 @@ def record_lifecycle_event(
     event_checkpoint = events.checkpoint()
     report_backup = report_path.read_bytes() if report_path.is_file() else None
     lifecycle_manifest_backup = (
-        lifecycle_manifest_path.read_bytes()
-        if lifecycle_manifest_path.is_file()
-        else None
+        lifecycle_manifest_path.read_bytes() if lifecycle_manifest_path.is_file() else None
     )
 
     durable_store_path = ev_cfg["durable_store"]
@@ -222,6 +221,7 @@ def record_lifecycle_event(
         # Open the durable store connection once and begin a transaction.
         if durable_store_path is not None:
             from acp.evidence.durable_store import DurableEventStore
+
             durable_db = DurableEventStore(durable_store_path)
             durable_db.init()
             if durable_mode == "required":
@@ -248,11 +248,12 @@ def record_lifecycle_event(
         # 3. Re-render the report (this overwrites final_report.md).
         try:
             from acp.reports.writer import rerender_report_from_run
+
             rerender_report_from_run(run_dir)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "report re-render failed during lifecycle event: %s — "
-                "final_report.md may be stale", exc,
+                "report re-render failed during lifecycle event: %s — final_report.md may be stale",
+                exc,
             )
 
         # 4. Write the evidence.report_bound event to events.jsonl.
@@ -294,13 +295,11 @@ def record_lifecycle_event(
 
         # 7. Write the lifecycle manifest (best-effort).
         try:
-            write_lifecycle_manifest(
-                run_dir=run_dir, events_writer=events, report_hash=report_hash
-            )
+            write_lifecycle_manifest(run_dir=run_dir, events_writer=events, report_hash=report_hash)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "lifecycle manifest write failed: %s — "
-                "evidence manifest may be stale", exc,
+                "lifecycle manifest write failed: %s — evidence manifest may be stale",
+                exc,
             )
 
     except Exception:

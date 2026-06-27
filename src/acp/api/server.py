@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +33,7 @@ try:
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
-    raise ImportError(
-        "FastAPI is not installed. Install with: uv sync --extra api"
-    ) from None
+    raise ImportError("FastAPI is not installed. Install with: uv sync --extra api") from None
 
 import logging
 
@@ -54,6 +53,7 @@ def _recover_orphaned_tasks() -> None:
     if durable_db_path.is_file():
         try:
             from acp.evidence.durable_task_store import DurableTaskStore
+
             with DurableTaskStore(durable_db_path) as db:
                 recovered = db.recover_orphaned_tasks(runs_root=runs_root)
                 for tid in recovered:
@@ -71,7 +71,11 @@ def _recover_orphaned_tasks() -> None:
                     continue
                 try:
                     task = store.load(task_dir.name)
-                    if task.status in (TaskStatus.CREATED, TaskStatus.EXECUTING, TaskStatus.REVIEWING):
+                    if task.status in (
+                        TaskStatus.CREATED,
+                        TaskStatus.EXECUTING,
+                        TaskStatus.REVIEWING,
+                    ):
                         task.status = TaskStatus.FAILED
                         task.touch()
                         store.save(task)
@@ -80,9 +84,6 @@ def _recover_orphaned_tasks() -> None:
                     pass
     except Exception as exc:  # noqa: BLE001
         _logger.warning("task.json scan for orphans failed: %s", exc)
-
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
@@ -99,6 +100,7 @@ async def lifespan(app: FastAPI):
 
 class RunRequest(BaseModel):
     """Request body for POST /tasks/run."""
+
     task: str
     config_path: str = ""
     vault_root: str = "vault"
@@ -107,6 +109,7 @@ class RunRequest(BaseModel):
 
 class RunResponse(BaseModel):
     """Response for POST /tasks/run."""
+
     task_id: str
     status: str
     report_path: str | None = None
@@ -116,17 +119,20 @@ class RunResponse(BaseModel):
 
 class ApproveRequest(BaseModel):
     """Request body for POST /tasks/{task_id}/approve."""
+
     approver: str = ""
 
 
 class RejectRequest(BaseModel):
     """Request body for POST /tasks/{task_id}/reject."""
+
     rejecter: str = ""
     reason: str = ""
 
 
 class TaskSummary(BaseModel):
     """Summary of a task for the list endpoint."""
+
     task_id: str
     repo_name: str
     status: str
@@ -137,6 +143,7 @@ class TaskSummary(BaseModel):
 
 class EventResponse(BaseModel):
     """A single event from the event log."""
+
     event_id: str
     task_id: str
     type: str
@@ -156,10 +163,7 @@ def _validate_task_id(task_id: str) -> None:
     if not is_valid_task_id(task_id):
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Invalid task id: {task_id!r} "
-                "(expected task_<YYYYMMDD>_<NNNN>)"
-            ),
+            detail=(f"Invalid task id: {task_id!r} (expected task_<YYYYMMDD>_<NNNN>)"),
         )
 
 
@@ -289,15 +293,13 @@ class ServerState:
         if self._config_cache is None:
             if not self.config_path:
                 raise HTTPException(
-                    status_code=500,
-                    detail="No config path set. Use --config or POST /config."
+                    status_code=500, detail="No config path set. Use --config or POST /config."
                 )
             try:
                 self._config_cache = load_repo_config(Path(self.config_path))
             except FileNotFoundError as exc:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Config file not found: {exc}"
+                    status_code=404, detail=f"Config file not found: {exc}"
                 ) from exc
         return self._config_cache
 
@@ -385,7 +387,9 @@ async def run_task(request: RunRequest) -> RunResponse:
         task_id=result.get("task_id", ""),
         status=status_str,
         report_path=str(result.get("report_path")) if result.get("report_path") else None,
-        vault_note_path=str(result.get("vault_note_path")) if result.get("vault_note_path") else None,
+        vault_note_path=str(result.get("vault_note_path"))
+        if result.get("vault_note_path")
+        else None,
         error=result.get("error"),
     )
 
@@ -410,6 +414,7 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
     # stall the event loop.
     async def _run() -> None:
         from acp.graph.workflow import run_workflow
+
         try:
             await asyncio.to_thread(
                 run_workflow,
@@ -446,27 +451,28 @@ async def list_tasks(
 
     # Collect valid task dir names sorted newest-first.
     task_dirs = sorted(
-        (d for d in store.root.iterdir()
-         if d.is_dir() and (d / "task.json").is_file()),
+        (d for d in store.root.iterdir() if d.is_dir() and (d / "task.json").is_file()),
         reverse=True,
     )
 
     if limit > 0:
-        task_dirs = task_dirs[offset:offset + limit]
+        task_dirs = task_dirs[offset : offset + limit]
     elif offset > 0:
         task_dirs = task_dirs[offset:]
 
     for task_dir in task_dirs:
         try:
             task = store.load(task_dir.name)
-            tasks.append(TaskSummary(
-                task_id=task.task_id,
-                repo_name=task.repo_name,
-                status=task.status.value,
-                user_request=task.user_request,
-                created_at=task.created_at,
-                updated_at=task.updated_at,
-            ))
+            tasks.append(
+                TaskSummary(
+                    task_id=task.task_id,
+                    repo_name=task.repo_name,
+                    status=task.status.value,
+                    user_request=task.user_request,
+                    created_at=task.created_at,
+                    updated_at=task.updated_at,
+                )
+            )
         except Exception:  # noqa: BLE001
             continue
 
@@ -517,8 +523,7 @@ async def approve_task(
         actor=request.approver or "unknown",
         status_check=can_approve,
         status_error=(
-            "Task status is not approvable — only 'passed' or"
-            " 'needs_review' can be approved."
+            "Task status is not approvable — only 'passed' or 'needs_review' can be approved."
         ),
     )
 
@@ -535,18 +540,20 @@ async def reject_task(
     Uses the shared lifecycle service (acp.evidence.lifecycle) to ensure
     full transactional integrity — same as ``acp reject``.
     """
-    _non_rejectable = frozenset({
-        TaskStatus.APPROVED,
-        TaskStatus.REJECTED,
-        TaskStatus.ARCHIVED,
-        TaskStatus.CREATED,
-        TaskStatus.EXECUTING,
-        TaskStatus.REVIEWING,
-        TaskStatus.REPAIRING,
-        TaskStatus.TESTING,
-        TaskStatus.WORKTREE_CREATED,
-        TaskStatus.CONTEXT_BUILT,
-    })
+    _non_rejectable = frozenset(
+        {
+            TaskStatus.APPROVED,
+            TaskStatus.REJECTED,
+            TaskStatus.ARCHIVED,
+            TaskStatus.CREATED,
+            TaskStatus.EXECUTING,
+            TaskStatus.REVIEWING,
+            TaskStatus.REPAIRING,
+            TaskStatus.TESTING,
+            TaskStatus.WORKTREE_CREATED,
+            TaskStatus.CONTEXT_BUILT,
+        }
+    )
 
     def _can_reject(status: TaskStatus) -> bool:
         return status not in _non_rejectable
@@ -625,7 +632,7 @@ async def memory_search(
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"Memory extra not installed: {exc}. Install with: uv sync --extra memory"
+            detail=f"Memory extra not installed: {exc}. Install with: uv sync --extra memory",
         ) from exc
 
     cfg = state.get_config()
@@ -674,7 +681,8 @@ async def list_missions(
 ) -> list[MissionSummary]:
     """List all missions ordered by creation date."""
     from acp.missions.store import MissionStore
-    store = MissionStore(missions_root=Path(missions_root))
+
+    store = MissionStore(missions_dir=Path(missions_root))
     missions = store.list_missions()
     return [
         MissionSummary(
@@ -697,9 +705,10 @@ async def get_mission(
 ) -> MissionDetailResponse:
     """Get detailed information about a specific mission."""
     from acp.missions.store import MissionStore
+
     if not mission_id.startswith("mission_"):
         raise HTTPException(status_code=400, detail="Invalid mission ID format")
-    store = MissionStore(missions_root=Path(missions_root))
+    store = MissionStore(missions_dir=Path(missions_root))
     mission = store.load(mission_id)
     if mission is None:
         raise HTTPException(status_code=404, detail="Mission not found")
@@ -727,6 +736,7 @@ async def list_skills(
 ) -> list[dict[str, Any]]:
     """List all available skill playbooks from the skills directory."""
     from acp.skills.loader import load_skills
+
     skills_path = Path(skills_dir)
     if not skills_path.is_dir():
         return []
@@ -859,7 +869,4 @@ if _UI_DIST.is_dir():
         index = _UI_DIST / "index.html"
         if index.is_file():
             return index.read_text(encoding="utf-8")
-        raise HTTPException(
-            status_code=404,
-            detail="UI not built. Run: cd ui && npm run build"
-        )
+        raise HTTPException(status_code=404, detail="UI not built. Run: cd ui && npm run build")

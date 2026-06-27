@@ -163,23 +163,32 @@ class GvisorExecutor:
         prompt_content = prompt_path.read_text()
 
         cmd = [
-            "docker", "run", "--rm",
+            "docker",
+            "run",
+            "--rm",
             "--runtime=runsc",
-            "--name", self._container_name,
+            "--name",
+            self._container_name,
             f"--network={network_flag}",
-            "-v", f"{repo_path}:/workspace:rw",
-            "-w", "/workspace",
+            "-v",
+            f"{repo_path}:/workspace:rw",
+            "-w",
+            "/workspace",
             "-i",  # stdin for prompt
             # Use a minimal image with git + the agent. The user is
             # responsible for building/pulling an image that has their
             # agent installed. We default to a generic image.
             "ubuntu:22.04",
-            "bash", "-c", f"{self.config.agent} 2>&1",
+            "bash",
+            "-c",
+            f"{self.config.agent} 2>&1",
         ]
 
         logger.info(
             "gvisor: starting container %s for task %s (network=%s)",
-            self._container_name, task_id, network_flag,
+            self._container_name,
+            task_id,
+            network_flag,
         )
 
         start = time.monotonic()

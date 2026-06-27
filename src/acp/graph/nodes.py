@@ -21,15 +21,15 @@ services).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
-from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.evidence.manifest import (
     build_evidence_manifest,
     compute_artifact_content_hash,
@@ -39,12 +39,13 @@ from acp.evidence.manifest import (
     write_evidence_config,
     write_evidence_manifest,
 )
+from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
 from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean
 from acp.models import EventType, RiskLevel, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
-from acp.review.gates import evaluate_final_gates, GateOutcome
+from acp.review.gates import GateOutcome, evaluate_final_gates
 from acp.store import TaskStore
 from acp.testing.parsers import extract_failures
 from acp.testing.runner import run_commands, validation_status
@@ -160,6 +161,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         parent_task_id = state.get("parent_task_id", "")
         if parent_task_id:
             from acp.missions.store import compute_parent_artifact_hash
+
             parent_hash = compute_parent_artifact_hash(
                 runs_root=state.get("runs_root", ctx.store.root),
                 parent_task_id=parent_task_id,
@@ -322,6 +324,7 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
 
         # Record the base commit sha (current HEAD of the base branch).
         from git import Repo
+
         repo = Repo(str(state["repo_path"]))
         base_sha = repo.heads[cfg.repo.default_branch].commit.hexsha
         task.base_commit_sha = base_sha
@@ -376,7 +379,11 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     ctx.store.save(task)
     ctx.events.write(
         EventType.WORKTREE_CREATED,
-        {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
+        {
+            "branch": task.task_branch,
+            "worktree_path": str(worktree_path),
+            "base_commit_sha": task.base_commit_sha,
+        },
     )
     return {"worktree_path": worktree_path}
 
@@ -448,9 +455,7 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
             "prompt_path": str(prompt_path),
             "haystack": haystack_active,
             "retrieved_documents": retrieved_count,
-            "context_bundle_path": (
-                str(context_bundle_path) if context_bundle_path else None
-            ),
+            "context_bundle_path": (str(context_bundle_path) if context_bundle_path else None),
         },
     )
 
@@ -478,7 +483,8 @@ def _parse_and_emit_subtasks(
         stdout = Path(stdout_path).read_text(encoding="utf-8", errors="replace")
         if "ACP_SPAWN_SUBTASK" not in stdout:
             return  # fast path — no spawn requests
-        from acp.subtask import parse_subtask_requests, emit_subtask_events
+        from acp.subtask import emit_subtask_events, parse_subtask_requests
+
         cfg = state["config"]
         max_subtasks = getattr(cfg.agent, "max_subtasks", 5)
         result = parse_subtask_requests(
@@ -527,7 +533,11 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             )
             ctx.events.write(
                 EventType.AGENT_FINISHED,
-                {"agent": f"sbx:{cfg.executor.agent}", "exit_code": -1, "summary": f"sbx failed: {exc}"},
+                {
+                    "agent": f"sbx:{cfg.executor.agent}",
+                    "exit_code": -1,
+                    "summary": f"sbx failed: {exc}",
+                },
             )
             task.status = TaskStatus.FAILED
             ctx.store.save(task)
@@ -572,7 +582,11 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             ctx.events.write(
                 EventType.NODE_FAILED,
-                {"node": "run_agent", "reason": "sandbox remote fetch/worktree failed", "detail": str(exc)},
+                {
+                    "node": "run_agent",
+                    "reason": "sandbox remote fetch/worktree failed",
+                    "detail": str(exc),
+                },
             )
         return {
             "agent_result": agent_result,
@@ -582,6 +596,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # --- openhands backend: run OpenHands in headless mode ----------------- #
     if cfg.executor.backend == "openhands":
         from acp.executor.openhands import OpenHandsExecutor
+
         executor = OpenHandsExecutor(cfg.executor)
         task.status = TaskStatus.EXECUTING
         ctx.store.save(task)
@@ -647,6 +662,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # same as the worktree backend — no remote fetch needed.
     if cfg.executor.backend == "gvisor":
         from acp.executor.gvisor import GvisorExecutor
+
         executor = GvisorExecutor(cfg.executor)
         task.status = TaskStatus.EXECUTING
         ctx.store.save(task)
@@ -746,6 +762,7 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # but the cap blocked it." This is distinct from repair.attempted (which
     # is written for every attempt, including the last one).
     from acp.testing.runner import validation_passed, validation_ran
+
     attempts = int(state.get("repair_attempts", 0))
     max_attempts = cfg.agent.max_repair_attempts
     has_failures = validation_ran(command_results) and not validation_passed(command_results)
@@ -810,7 +827,11 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         except Exception as exc:  # noqa: BLE001
             ctx.events.write(
                 EventType.NODE_FAILED,
-                {"node": "capture_diff", "reason": "sandbox remote diff failed", "detail": str(exc)},
+                {
+                    "node": "capture_diff",
+                    "reason": "sandbox remote diff failed",
+                    "detail": str(exc),
+                },
             )
             return {"status": TaskStatus.FAILED, "error": str(exc)}
         ctx.events.write(
@@ -856,6 +877,7 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # contains a likely secret — even before TruffleHog verifies it.
     if cfg.review.block_secret_leaks:
         from acp.review.secret_scanner import detect_hard_block_secrets
+
         hard_blocks = detect_hard_block_secrets(state["diff"].patch)
         if hard_blocks:
             ctx.events.write(
@@ -881,9 +903,10 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     if cfg.proxy.enabled:
         from acp.egress import (
             EgressLogger,
-            has_egress_violations,
             analyze_egress_log,
+            has_egress_violations,
         )
+
         artifacts_dir = state["artifacts_dir"]
         egress_artifact_path = artifacts_dir / cfg.proxy.log_artifact
         if not egress_artifact_path.is_file():
@@ -939,7 +962,12 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     review = state.get("review_result")
     agent_result = state.get("agent_result")
     command_results = state.get("command_results", [])
-    diff = state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0, binary_files=[]))
+    diff = state.get(
+        "diff",
+        DiffCapture(
+            patch="", stat="", changed_files=[], insertions=0, deletions=0, binary_files=[]
+        ),
+    )
 
     # Evaluate gates directly — GateResult is now the single truth object.
     gate_result = evaluate_final_gates(
@@ -949,8 +977,10 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         changed_files=diff.changed_files,
     )
     task.status = (
-        TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
-        else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
+        TaskStatus.PASSED
+        if gate_result.outcome == GateOutcome.PASSED
+        else TaskStatus.NEEDS_REVIEW
+        if gate_result.outcome == GateOutcome.NEEDS_REVIEW
         else TaskStatus.FAILED
     )
     ctx.store.save(task)
@@ -1046,6 +1076,7 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
     try:
         if cfg.executor.backend == "gvisor":
             from acp.executor.gvisor import GvisorExecutor
+
             executor = GvisorExecutor(cfg.executor)
             executor._container_name = sandbox_name
         else:
@@ -1062,9 +1093,9 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "sandbox cleanup failed (sandbox=%s): %s — "
-            "orphaned sandbox may remain",
-            sandbox_name, exc,
+            "sandbox cleanup failed (sandbox=%s): %s — orphaned sandbox may remain",
+            sandbox_name,
+            exc,
         )
         ctx.events.write(
             EventType.NODE_FAILED,
@@ -1081,9 +1112,13 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         {
             "status": task.status.value,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
-            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
+            "recommendation": state["review_result"].recommendation.value
+            if state.get("review_result")
+            else "unknown",
         },
     )
     manifest_hash = _finalize_evidence(state, ctx)
@@ -1161,7 +1196,9 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "status": task.status.value,
             "error": error,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
         },
     )
@@ -1173,7 +1210,12 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         state["report_path"] = report_path
     manifest_hash = _finalize_evidence(state, ctx)
     _cleanup_sandbox(state, ctx)
-    return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path, "manifest_hash": manifest_hash}
+    return {
+        "status": TaskStatus.FAILED,
+        "report_path": report_path,
+        "vault_note_path": vault_note_path,
+        "manifest_hash": manifest_hash,
+    }
 
 
 def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
@@ -1192,9 +1234,13 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             "status": task.status.value,
             "report_path": str(state.get("report_path", "")),
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
-            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
+            "recommendation": state["review_result"].recommendation.value
+            if state.get("review_result")
+            else "unknown",
         },
     )
     manifest_hash = _finalize_evidence(state, ctx)
@@ -1218,7 +1264,8 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
 
 
 def auto_approve_node(
-    state: dict[str, Any], ctx: NodeContext,
+    state: dict[str, Any],
+    ctx: NodeContext,
 ) -> dict[str, Any]:
     """Bypass human review by programmatically approving the task.
 
@@ -1248,8 +1295,7 @@ def auto_approve_node(
                 {
                     "node": "auto_approve",
                     "message": (
-                        "event chain verification failed "
-                        "(tampered or incomplete audit trail)"
+                        "event chain verification failed (tampered or incomplete audit trail)"
                     ),
                 },
             )
@@ -1337,7 +1383,8 @@ def auto_approve_node(
             logger.warning(
                 "Auto-promotion to Graphiti failed for task %s: %s "
                 "— approval still stands, promote manually later.",
-                task.task_id, exc,
+                task.task_id,
+                exc,
             )
             ctx.events.write(
                 EventType.NODE_FAILED,
@@ -1349,11 +1396,16 @@ def auto_approve_node(
                 },
             )
 
-    return {"status": TaskStatus.APPROVED, "auto_approved": True, "memory_promoted": memory_promoted}
+    return {
+        "status": TaskStatus.APPROVED,
+        "auto_approved": True,
+        "memory_promoted": memory_promoted,
+    }
 
 
 def auto_merge_node(
-    state: dict[str, Any], ctx: NodeContext,
+    state: dict[str, Any],
+    ctx: NodeContext,
 ) -> dict[str, Any]:
     """Merge the task branch into the default branch.
 
@@ -1508,7 +1560,7 @@ def auto_merge_node(
         }
 
 
-def _risk_exceeds(actual: "RiskLevel", ceiling: "RiskLevel") -> bool:
+def _risk_exceeds(actual: RiskLevel, ceiling: RiskLevel) -> bool:
     """Return True if ``actual`` is riskier than ``ceiling``.
 
     Order: LOW < MEDIUM < HIGH. ``actual`` exceeds ``ceiling`` when it
@@ -1609,11 +1661,13 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         )
 
     history = list(state.get("repair_history", []))
-    history.append({
-        "attempt": attempts,
-        "prompt_path": str(prompt_path),
-        "tests_missing": tests_missing,
-    })
+    history.append(
+        {
+            "attempt": attempts,
+            "prompt_path": str(prompt_path),
+            "tests_missing": tests_missing,
+        }
+    )
 
     # v0.6.0: Compute a fingerprint of the current failure signature.
     # The circuit breaker in _route_after_tests uses this to detect when
@@ -1621,12 +1675,9 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # the failing command names + exit codes (not stdout/stderr, which
     # may vary slightly even for the same root cause).
     import hashlib
-    fp_input = "|".join(
-        f"{f['command']}:{f['exit_code']}" for f in failures
-    )
-    fingerprint = hashlib.sha256(
-        fp_input.encode()
-    ).hexdigest()[:16] if fp_input else "no_failures"
+
+    fp_input = "|".join(f"{f['command']}:{f['exit_code']}" for f in failures)
+    fingerprint = hashlib.sha256(fp_input.encode()).hexdigest()[:16] if fp_input else "no_failures"
     fingerprints = list(state.get("repair_fingerprints", []))
     fingerprints.append(fingerprint)
 

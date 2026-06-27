@@ -22,7 +22,6 @@ from acp.config import EvidenceSection
 from acp.models import Task, TaskStatus
 from acp.store import TaskStore
 
-
 runner = CliRunner()
 
 
@@ -42,11 +41,13 @@ def _make_repo_config(
         f"  path: {repo_path}",
     ]
     if durable_store is not None:
-        lines.extend([
-            "evidence:",
-            f"  durable_store: {durable_store}",
-            f"  task_store_primary: {task_store_primary}",
-        ])
+        lines.extend(
+            [
+                "evidence:",
+                f"  durable_store: {durable_store}",
+                f"  task_store_primary: {task_store_primary}",
+            ]
+        )
     config_path.write_text("\n".join(lines) + "\n")
     return config_path
 
@@ -86,6 +87,7 @@ def test_task_store_primary_in_yaml(tmp_path):
     db = tmp_path / "tasks.db"
     config = _make_repo_config(tmp_path, durable_store=db, task_store_primary="sqlite")
     from acp.config import load_repo_config
+
     cfg = load_repo_config(config)
     assert cfg.evidence.task_store_primary == "sqlite"
     assert cfg.evidence.durable_store is not None
@@ -273,12 +275,17 @@ def test_migrate_dry_run(tmp_path):
             ).model_dump_json(indent=2)
         )
 
-    result = runner.invoke(app, [
-        "migrate",
-        "--config", str(config),
-        "--runs-root", str(runs_root),
-        "--dry-run",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--config",
+            str(config),
+            "--runs-root",
+            str(runs_root),
+            "--dry-run",
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "found 2 task.json file(s)" in result.output
     assert "dry-run" in result.output
@@ -305,17 +312,23 @@ def test_migrate_imports_tasks(tmp_path):
             ).model_dump_json(indent=2)
         )
 
-    result = runner.invoke(app, [
-        "migrate",
-        "--config", str(config),
-        "--runs-root", str(runs_root),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--config",
+            str(config),
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "migrated 2 task(s)" in result.output
     assert "task.store_migrated" in result.output
 
     # Verify the SQLite database has the tasks.
     from acp.evidence.durable_task_store import DurableTaskStore
+
     store = DurableTaskStore(db)
     store.init()
     assert store.count() == 2
@@ -329,22 +342,32 @@ def test_migrate_no_durable_store_configured(tmp_path):
     """`acp migrate` fails when durable_store is not configured."""
     config = _make_repo_config(tmp_path)  # no durable_store
 
-    result = runner.invoke(app, [
-        "migrate",
-        "--config", str(config),
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--config",
+            str(config),
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert result.exit_code == 1, result.output
     assert "durable_store is not configured" in result.output
 
 
 def test_migrate_config_not_found(tmp_path):
     """`acp migrate` exits with error when config file is missing."""
-    result = runner.invoke(app, [
-        "migrate",
-        "--config", str(tmp_path / "nonexistent.yaml"),
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--config",
+            str(tmp_path / "nonexistent.yaml"),
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert result.exit_code == 1, result.output
     assert "config file not found" in result.output
 
@@ -357,10 +380,15 @@ def test_migrate_empty_runs_root(tmp_path):
     runs_root = tmp_path / "runs"
     runs_root.mkdir()
 
-    result = runner.invoke(app, [
-        "migrate",
-        "--config", str(config),
-        "--runs-root", str(runs_root),
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--config",
+            str(config),
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "migrated 0 task(s)" in result.output

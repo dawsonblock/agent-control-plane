@@ -191,7 +191,8 @@ class OpenHandsExecutor:
             "openhands",
             "--headless",
             "--json",
-            "-f", str(prompt_path),
+            "-f",
+            str(prompt_path),
         ]
 
         # Pass the model via LLM_MODEL env var with --override-with-envs.
@@ -219,7 +220,7 @@ class OpenHandsExecutor:
         except subprocess.TimeoutExpired as exc:
             exit_code = 124
             out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = (exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             err = f"acp: openhands agent timed out after {timeout_seconds}s\n{err}"
         except FileNotFoundError:
             exit_code = 127

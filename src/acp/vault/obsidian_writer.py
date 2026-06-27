@@ -19,7 +19,7 @@ synchronized in-place vault note edits with the event log.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -67,9 +67,7 @@ def write_vault_note(
                 f"refusing to overwrite note with malformed frontmatter: {note_path}"
             )
         if frontmatter.approved:
-            raise PermissionError(
-                f"refusing to overwrite an approved note: {note_path}"
-            )
+            raise PermissionError(f"refusing to overwrite an approved note: {note_path}")
 
     frontmatter = build_frontmatter(task=task, review=review, diff=diff, today=today)
     note = f"{frontmatter}\n\n{report_body.lstrip()}\n"
@@ -121,32 +119,38 @@ def rerender_vault_note(
         if event.type == EventType.HUMAN_APPROVED:
             approved = True
             memory_status = MemoryStatus.ACTIVE.value
-            audit_trail.append({
-                "action": "approved",
-                "actor": event.payload.get("approver", "unknown"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "approved",
+                    "actor": event.payload.get("approver", "unknown"),
+                    "timestamp": event.timestamp,
+                }
+            )
         elif event.type == EventType.AUTO_APPROVED:
             # v0.6.0: Autonomous mode approval — equivalent to human approval
             # for frontmatter purposes. The approver is "ACP-Autonomous-Bot".
             approved = True
             memory_status = MemoryStatus.ACTIVE.value
-            audit_trail.append({
-                "action": "auto_approved",
-                "actor": event.payload.get("approver", "ACP-Autonomous-Bot"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "auto_approved",
+                    "actor": event.payload.get("approver", "ACP-Autonomous-Bot"),
+                    "timestamp": event.timestamp,
+                }
+            )
         elif event.type == EventType.HUMAN_REJECTED:
             memory_status = MemoryStatus.ARCHIVED.value
-            audit_trail.append({
-                "action": "rejected",
-                "actor": event.payload.get("rejecter", "unknown"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "rejected",
+                    "actor": event.payload.get("rejecter", "unknown"),
+                    "timestamp": event.timestamp,
+                }
+            )
 
     # Build the frontmatter data directly (not via build_frontmatter, which
     # always sets approved=false). We need the event-log-derived values.
-    created = (today or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    created = (today or datetime.now(UTC)).strftime("%Y-%m-%d")
     sources = ["diff.patch", "diff_stat.txt", "review.json", "commands.json"]
     data = {
         "type": "task_report",
