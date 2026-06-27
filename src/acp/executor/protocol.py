@@ -58,7 +58,7 @@ class Executor(Protocol):
         """The backend identifier (e.g. 'docker_sbx', 'openhands')."""
         ...
 
-    def start(
+    async def start(
         self,
         *,
         task_id: str,

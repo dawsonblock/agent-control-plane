@@ -44,7 +44,7 @@ rag_skip = pytest.mark.skipif(
 class TestImportErrorFallback:
     """build_context_node gracefully falls back when rag isn't installed."""
 
-    def test_context_built_event_has_haystack_false(self, tmp_path):
+    async def test_context_built_event_has_haystack_false(self, tmp_path):
         """When rag isn't installed, context.built event has haystack: False."""
         if HAYSTACK_INSTALLED:
             pytest.skip("rag is installed — fallback path not tested here")
@@ -76,7 +76,7 @@ class TestImportErrorFallback:
             "vault_root": tmp_path / "vault",
         }
 
-        result = build_context_node(state, ctx)
+        result = await build_context_node(state, ctx)
 
         # Prompt should be written
         assert result["prompt_path"].exists()
@@ -89,7 +89,7 @@ class TestImportErrorFallback:
         assert ctx_event.payload["retrieved_documents"] == 0
         assert ctx_event.payload["context_bundle_path"] is None
 
-    def test_prompt_written_without_context_bundle(self, tmp_path):
+    async def test_prompt_written_without_context_bundle(self, tmp_path):
         """Agent prompt is written even when rag isn't installed."""
         if HAYSTACK_INSTALLED:
             pytest.skip("rag is installed — fallback path not tested here")
@@ -121,7 +121,7 @@ class TestImportErrorFallback:
             "vault_root": tmp_path / "vault",
         }
 
-        result = build_context_node(state, ctx)
+        result = await build_context_node(state, ctx)
 
         prompt_content = result["prompt_path"].read_text()
         assert "add a feature" in prompt_content
@@ -298,7 +298,7 @@ class TestScannerIntegration:
 class TestContextBuiltEvent:
     """context.built event correctly records haystack status and document count."""
 
-    def test_event_payload_fields_exist(self, tmp_path):
+    async def test_event_payload_fields_exist(self, tmp_path):
         """context.built event has all required fields."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, build_context_node
@@ -327,7 +327,7 @@ class TestContextBuiltEvent:
             "vault_root": tmp_path / "vault",
         }
 
-        build_context_node(state, ctx)
+        await build_context_node(state, ctx)
 
         all_events = events.read_all()
         ctx_event = [e for e in all_events if e.type == EventType.CONTEXT_BUILT][0]

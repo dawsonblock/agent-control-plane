@@ -62,33 +62,33 @@ class TestNeedsShell:
 class TestWorktreeModeRefusesShell:
     """In worktree mode, shell metacharacters in the template are refused."""
 
-    def test_pipe_refused(self, tmp_path: Path):
+    async def test_pipe_refused(self, tmp_path: Path):
         cfg = _cfg(tmp_path, "cat {prompt_path} | grep foo")
         agent = CLIAgent(cfg)
         with pytest.raises(AgentConfigError, match="shell metacharacters"):
-            agent.run(
+            await agent.run(
                 prompt_path=tmp_path / "prompt.txt",
                 worktree_path=tmp_path,
                 artifact_dir=tmp_path / "artifacts",
                 timeout_seconds=10,
             )
 
-    def test_redirect_refused(self, tmp_path: Path):
+    async def test_redirect_refused(self, tmp_path: Path):
         cfg = _cfg(tmp_path, "claude-code > {artifact_dir}/out.txt")
         agent = CLIAgent(cfg)
         with pytest.raises(AgentConfigError, match="shell metacharacters"):
-            agent.run(
+            await agent.run(
                 prompt_path=tmp_path / "prompt.txt",
                 worktree_path=tmp_path,
                 artifact_dir=tmp_path / "artifacts",
                 timeout_seconds=10,
             )
 
-    def test_plain_command_allowed(self, tmp_path: Path):
+    async def test_plain_command_allowed(self, tmp_path: Path):
         """A command without shell metacharacters should work fine."""
         cfg = _cfg(tmp_path, "echo hello")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -101,12 +101,12 @@ class TestWorktreeModeRefusesShell:
 class TestDockerSbxAllowsShell:
     """In docker_sbx mode, shell metacharacters are allowed (sandboxed)."""
 
-    def test_pipe_allowed_in_sbx(self, tmp_path: Path):
+    async def test_pipe_allowed_in_sbx(self, tmp_path: Path):
         cfg = _cfg(tmp_path, "echo hello | cat", backend="docker_sbx")
         agent = CLIAgent(cfg)
         # In docker_sbx mode, shell metacharacters are allowed.
         # The command runs with shell=True — it should succeed.
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",

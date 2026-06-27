@@ -58,7 +58,7 @@ def _make_agent_factory(cfg: RepoConfig):
     return factory
 
 
-def _run_graph(
+async def _run_graph(
     repo_path: Path,
     runs_root: Path,
     vault_root: Path,
@@ -79,7 +79,7 @@ def _run_graph(
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-sentinel-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-sentinel-test"}})
     return result, store
 
 
@@ -104,7 +104,7 @@ def _main_head(repo_path: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_graph_sentinel_secret_abort_routes_to_failed(
+async def test_graph_sentinel_secret_abort_routes_to_failed(
     disposable_repo, isolated_workspace, tmp_path
 ):
     """When the sentinel kills the agent for a secret leak, the graph routes to `failed`.
@@ -122,7 +122,7 @@ def test_graph_sentinel_secret_abort_routes_to_failed(
     script = tmp_path / "leak_agent.py"
     script.write_text(f"print('working on the task')\nprint('export AWS_KEY={secret}')\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -173,7 +173,7 @@ def test_graph_sentinel_secret_abort_routes_to_failed(
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_sentinel_strange_loop_abort_routes_to_failed(
+async def test_graph_sentinel_strange_loop_abort_routes_to_failed(
     disposable_repo, isolated_workspace, tmp_path
 ):
     """When the sentinel kills the agent for a strange loop, the graph routes to `failed`."""
@@ -212,7 +212,7 @@ def test_graph_sentinel_strange_loop_abort_routes_to_failed(
         vault_root=isolated_workspace["vault_root"],
         runs_root=isolated_workspace["runs_root"],
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-loop-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-loop-test"}})
 
     assert result["status"] == TaskStatus.FAILED
     task_id = result["task_id"]
@@ -227,7 +227,7 @@ def test_graph_sentinel_strange_loop_abort_routes_to_failed(
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_sentinel_dangerous_path_abort_routes_to_failed(
+async def test_graph_sentinel_dangerous_path_abort_routes_to_failed(
     disposable_repo, isolated_workspace, tmp_path
 ):
     """When the sentinel kills the agent for a dangerous path, the graph routes to `failed`."""
@@ -261,7 +261,7 @@ def test_graph_sentinel_dangerous_path_abort_routes_to_failed(
         vault_root=isolated_workspace["vault_root"],
         runs_root=isolated_workspace["runs_root"],
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-danger-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-danger-test"}})
 
     assert result["status"] == TaskStatus.FAILED
     task_id = result["task_id"]
@@ -275,7 +275,9 @@ def test_graph_sentinel_dangerous_path_abort_routes_to_failed(
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_streaming_disabled_completes_normally(disposable_repo, isolated_workspace, tmp_path):
+async def test_graph_streaming_disabled_completes_normally(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """When streaming is disabled, a benign agent completes normally through the graph."""
     script = tmp_path / "benign_agent.py"
     script.write_text("print('editing files')\nprint('done')\n")
@@ -304,7 +306,7 @@ def test_graph_streaming_disabled_completes_normally(disposable_repo, isolated_w
         vault_root=isolated_workspace["vault_root"],
         runs_root=isolated_workspace["runs_root"],
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-no-stream-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-no-stream-test"}})
 
     # Should complete normally — no sentinel involvement.
     task_id = result["task_id"]

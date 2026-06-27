@@ -300,9 +300,13 @@ class CognitiveMemoryRetriever:
     ) -> list[MemoryItem]:
         """Retrieve semantic memory items via Graphiti."""
         try:
+            import asyncio
+
             from acp.memory.graphiti_client import search_graphiti_facts
 
-            facts = search_graphiti_facts(query, num_results=max_items)
+            # v0.8.0: search_graphiti_facts is now async-native.
+            # Use asyncio.run() since this method is called from sync contexts.
+            facts = asyncio.run(search_graphiti_facts(query, num_results=max_items))
             return [
                 MemoryItem(
                     tier="semantic",

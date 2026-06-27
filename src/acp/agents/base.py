@@ -140,7 +140,7 @@ class AgentProtocol(Protocol):
 
     name: str
 
-    def run(
+    async def run(
         self,
         *,
         prompt_path: Path,

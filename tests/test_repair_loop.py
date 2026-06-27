@@ -47,7 +47,9 @@ class ScriptedAgent:
         self._actions = list(actions)
         self._calls = 0
 
-    def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds) -> AgentResult:
+    async def run(
+        self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds
+    ) -> AgentResult:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "agent_stdout.txt").write_text(f"scripted call {self._calls}\n")
         (artifact_dir / "agent_stderr.txt").write_text("")
@@ -73,7 +75,7 @@ def _factory_for(agent: ScriptedAgent):
 # --------------------------------------------------------------------------- #
 
 
-def _run(repo_path, runs_root, vault_root, *, agent, test_cmd, max_repair_attempts):
+async def _run(repo_path, runs_root, vault_root, *, agent, test_cmd, max_repair_attempts):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events, agent_factory=_factory_for(agent))
@@ -89,7 +91,7 @@ def _run(repo_path, runs_root, vault_root, *, agent, test_cmd, max_repair_attemp
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "m4-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "m4-test"}})
     return result, store
 
 
@@ -112,7 +114,7 @@ def _main_head(repo_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
+async def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
     """A failing test triggers one repair attempt that fixes it → PASSED.
 
     The test command reads a marker file; the initial agent writes a marker
@@ -132,7 +134,7 @@ def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
 
     agent = ScriptedAgent([initial_action, repair_action])
 
-    result, store = _run(
+    result, store = await _run(
         repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -179,7 +181,7 @@ def test_repair_loop_fixes_failing_test(disposable_repo, isolated_workspace):
 # --------------------------------------------------------------------------- #
 
 
-def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
+async def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
     """Failing tests after max attempts fall through to FAILED + report.
 
     max_repair_attempts=2 → exactly 2 repair attempts, then the run stops
@@ -196,7 +198,7 @@ def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
     # Initial + 2 repair attempts all leave it bad.
     agent = ScriptedAgent([always_bad, always_bad, always_bad])
 
-    result, store = _run(
+    result, store = await _run(
         repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -237,7 +239,7 @@ def test_repair_loop_caps_at_max_attempts(disposable_repo, isolated_workspace):
 # --------------------------------------------------------------------------- #
 
 
-def test_repair_disabled_when_max_zero(disposable_repo, isolated_workspace):
+async def test_repair_disabled_when_max_zero(disposable_repo, isolated_workspace):
     """max_repair_attempts=0 → failing test goes straight to FAILED, no repair."""
     repo = disposable_repo
 
@@ -246,7 +248,7 @@ def test_repair_disabled_when_max_zero(disposable_repo, isolated_workspace):
 
     agent = ScriptedAgent([initial_action])
 
-    result, store = _run(
+    result, store = await _run(
         repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],

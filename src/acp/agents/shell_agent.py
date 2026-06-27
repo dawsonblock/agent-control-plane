@@ -16,6 +16,7 @@ chew on.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -28,7 +29,7 @@ class ShellAgent:
 
     name = "shell"
 
-    def run(
+    async def run(
         self,
         *,
         prompt_path: Path,
@@ -55,7 +56,12 @@ class ShellAgent:
 
         shell = os.environ.get("SHELL", "/bin/bash")
         try:
-            subprocess.run(
+            # v0.8.0: Run the interactive sub-shell in a thread to avoid
+            # blocking the event loop. The sub-shell is inherently blocking
+            # (waits for human input), so asyncio.to_thread is the correct
+            # bridge between async and interactive blocking I/O.
+            await asyncio.to_thread(
+                subprocess.run,
                 [shell],
                 cwd=str(worktree_path),
                 check=False,

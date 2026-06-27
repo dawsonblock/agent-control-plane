@@ -505,7 +505,7 @@ class RateLimitMiddleware:
         self._redis: Any = None
         if redis_url:
             try:
-                import redis  # type: ignore[import-not-found]
+                import redis
 
                 self._redis = redis.from_url(redis_url, decode_responses=True)
                 self._redis.ping()  # Verify connection
@@ -985,7 +985,7 @@ async def memory_search(
 
     cfg = state.get_config()
     try:
-        results = search_graphiti_facts(
+        results = await search_graphiti_facts(
             query,
             group_id=cfg.memory.graphiti_group_id,
             num_results=num_results,

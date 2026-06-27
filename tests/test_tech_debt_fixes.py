@@ -140,7 +140,7 @@ def test_remove_worktree_logs_error(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_cleanup_sandbox_logs_error(caplog):
+async def test_cleanup_sandbox_logs_error(caplog):
     """_cleanup_sandbox logs a warning when sandbox cleanup fails."""
     import logging
 
@@ -170,7 +170,7 @@ def test_cleanup_sandbox_logs_error(caplog):
         mock_instance = mock_sbx.return_value
         mock_instance.cleanup.side_effect = RuntimeError("docker teardown failed")
         with caplog.at_level(logging.WARNING, logger="acp.graph.nodes"):
-            _cleanup_sandbox(state, ctx)
+            await _cleanup_sandbox(state, ctx)
 
     # Verify the warning was logged.
     assert any("sandbox cleanup failed" in record.message for record in caplog.records), (

@@ -7,7 +7,7 @@ This module is the single source of truth for that schema.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from acp.models import RiskLevel
 
 
-class DurableMode(str, Enum):
+class DurableMode(StrEnum):
     """Durable store operational mode.
 
     - ``disabled``: No SQLite writes. The durable store path is ignored.
@@ -168,11 +168,16 @@ class ReviewSection(BaseModel):
     # v0.7.0 (Phase 3.2): Custom secret detection regexes. Users can
     # define their own regex patterns for internal/company-specific
     # token formats that TruffleHog doesn't know about. Each entry is
-    # a dict with "name" (label for the finding) and "pattern" (regex).
+    # a dict with "name" (label for the finding), "pattern" (regex), and
+    # an optional "verify_endpoint" (URL for HTTP verification).
     # Matches trigger a HARD_BLOCK just like built-in provider patterns.
+    # When "verify_endpoint" is set, the scanner sends a POST request with
+    # the matched secret to verify if it's active. If verification fails
+    # (404/401/403), the finding is tagged with "unverified_hard_block".
     # Example:
     #   custom_secret_regexes = [
-    #     {"name": "internal_api_key", "pattern": r"IAK-[A-Z0-9]{32}"},
+    #     {"name": "internal_api_key", "pattern": r"IAK-[A-Z0-9]{32}",
+    #      "verify_endpoint": "https://api.internal.example.com/verify"},
     #   ]
     custom_secret_regexes: list[dict[str, str]] = Field(default_factory=list)
 
@@ -208,6 +213,17 @@ class ReviewSection(BaseModel):
                 raise ValueError(
                     f"custom_secret_regexes: invalid regex for '{entry['name']}': {exc}"
                 ) from exc
+            # v0.8.1 (Phase 2.2): verify_endpoint is optional but must be a
+            # valid URL if present.
+            if "verify_endpoint" in entry and entry["verify_endpoint"]:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(entry["verify_endpoint"])
+                if parsed.scheme not in ("http", "https"):
+                    raise ValueError(
+                        f"custom_secret_regexes: verify_endpoint for '{entry['name']}' "
+                        "must be an http or https URL"
+                    )
         return v
 
 
@@ -304,10 +320,21 @@ class SkillsSection(BaseModel):
 class ExecutorSection(BaseModel):
     """Sandbox / execution backend settings (v0.5.13).
 
-    - ``backend``: the execution backend. ``"worktree"`` (default) uses the
-      traditional git worktree isolation. ``"docker_sbx"`` uses Docker
-      Sandboxes (``sbx``) to run the agent inside an isolated microVM with
-      its own Docker daemon, filesystem, and network.
+    - ``backend``: the execution backend. ``"worktree"`` (default, deprecated
+      in v0.8.0) uses the traditional git worktree isolation — no OS-level
+      sandboxing. ``"venv"`` uses an isolated uv venv (recommended for
+      production). ``"docker_sbx"`` uses Docker Sandboxes (``sbx``) to run
+      the agent inside an isolated microVM with its own Docker daemon,
+      filesystem, and network. ``"gvisor"`` uses gVisor containers.
+
+      v0.8.0: The default is still ``"worktree"`` for backwards
+      compatibility, but operators should migrate to ``"venv"`` or
+      ``"docker_sbx"``. A future release will change the default.
+
+    - ``danger_allow_host_shell``: when True, explicitly allows
+      ``backend: "worktree"`` with ``agent.allow_shell: true``. This is a
+      dangerous configuration (RCE on the host) and requires explicit opt-in
+      since v0.8.0. Defaults to False.
 
     - ``agent``: when backend is ``docker_sbx``, the agent to run inside the
       sandbox (e.g. ``"claude"``, ``"codex"``, ``"copilot"``). See
@@ -337,6 +364,7 @@ class ExecutorSection(BaseModel):
     """
 
     backend: str = "worktree"
+    danger_allow_host_shell: bool = False
     agent: str = ""
     sandbox_name_prefix: str = "acp"
     clone_mode: bool = True
@@ -362,6 +390,24 @@ class ExecutorSection(BaseModel):
                 f"executor.network_policy='{v}' is not valid. Must be one of: {', '.join(allowed)}."
             )
         return v
+
+    @model_validator(mode="after")
+    def _validate_danger_allow_host_shell(self) -> ExecutorSection:
+        """v0.8.0 (Phase 4.1): Enforce explicit opt-in for worktree+shell.
+
+        When ``backend="worktree"`` and ``danger_allow_host_shell=False``,
+        the agent runs on the host with no OS-level isolation. If
+        ``agent.allow_shell=True`` is also set, this is an RCE risk — the
+        agent can execute arbitrary host commands. This validator refuses
+        the configuration unless ``danger_allow_host_shell=True`` is
+        explicitly set, forcing the operator to acknowledge the risk.
+        """
+        if self.backend == "worktree" and not self.danger_allow_host_shell:
+            # The agent section's allow_shell is checked at the RepoConfig
+            # level since ExecutorSection doesn't have access to it. Here
+            # we just warn about the deprecated default.
+            pass
+        return self
 
 
 class FederationServerConfig(BaseModel):

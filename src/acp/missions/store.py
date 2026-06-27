@@ -93,6 +93,10 @@ class MissionStore:
     def events_path(self, mission_id: str) -> Path:
         return self.mission_dir(mission_id) / "events.jsonl"
 
+    def events_writer(self, mission_id: str) -> EventWriter:
+        """Return an EventWriter for the mission's event log."""
+        return EventWriter(mission_id, self.mission_dir(mission_id))
+
     # ------------------------------------------------------------------ #
     # Create / read / update
     # ------------------------------------------------------------------ #

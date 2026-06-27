@@ -189,6 +189,23 @@ export const api = {
       method: "POST",
     }),
 
+  // v0.8.0 (Phase 3.1): Mission orchestration — run, pause, resume.
+  runMission: (missionId: string, configPath: string, missionsRoot = "data/missions") =>
+    fetchJSON<{ steps_run: number; steps_passed: number; steps_failed: number; paused: boolean }>(
+      `/missions/${missionId}/run?missions_root=${encodeURIComponent(missionsRoot)}&config_path=${encodeURIComponent(configPath)}`,
+      { method: "POST" },
+    ),
+
+  pauseMission: (missionId: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}/pause?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+    }),
+
+  resumeMission: (missionId: string, missionsRoot = "data/missions") =>
+    fetchJSON<MissionDetail>(`/missions/${missionId}/resume?missions_root=${encodeURIComponent(missionsRoot)}`, {
+      method: "POST",
+    }),
+
   listSkills: (skillsDir = "skills") =>
     fetchJSON<SkillSummary[]>(`/skills?skills_dir=${encodeURIComponent(skillsDir)}`),
 
@@ -197,4 +214,11 @@ export const api = {
   // status, repo_name, and user_request.
   streamTasks: (runsRoot = "data/runs"): EventSource =>
     new EventSource(`${API_BASE}/tasks/stream?runs_root=${encodeURIComponent(runsRoot)}`),
+
+  // v0.8.0 (Phase 3.2): SSE stream for mission events (step_started,
+  // step_completed, step_failed). Returns an EventSource.
+  streamMissionEvents: (missionId: string, missionsRoot = "data/missions"): EventSource =>
+    new EventSource(
+      `${API_BASE}/missions/${missionId}/stream?missions_root=${encodeURIComponent(missionsRoot)}`,
+    ),
 };

@@ -251,7 +251,7 @@ def test_memory_prune_import_error(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_prune_dry_run_returns_found_count():
+async def test_prune_dry_run_returns_found_count():
     """prune_superseded_nodes in dry-run mode returns found nodes without deleting."""
     from acp.memory.graphiti_client import prune_superseded_nodes
 
@@ -261,9 +261,10 @@ def test_prune_dry_run_returns_found_count():
     ]
     with patch(
         "acp.memory.graphiti_client.find_superseded_nodes",
+        new_callable=AsyncMock,
         return_value=mock_nodes,
     ):
-        result = prune_superseded_nodes(dry_run=True, older_than_days=90)
+        result = await prune_superseded_nodes(dry_run=True, older_than_days=90)
 
     assert result["dry_run"] is True
     assert result["found"] == 2
@@ -272,7 +273,7 @@ def test_prune_dry_run_returns_found_count():
     assert result["older_than_days"] == 90
 
 
-def test_prune_no_dry_run_deletes_nodes():
+async def test_prune_no_dry_run_deletes_nodes():
     """prune_superseded_nodes with dry_run=False attempts deletion."""
     from acp.memory.graphiti_client import prune_superseded_nodes
 
@@ -285,6 +286,7 @@ def test_prune_no_dry_run_deletes_nodes():
     with (
         patch(
             "acp.memory.graphiti_client.find_superseded_nodes",
+            new_callable=AsyncMock,
             return_value=mock_nodes,
         ),
         patch(
@@ -292,7 +294,7 @@ def test_prune_no_dry_run_deletes_nodes():
             return_value=mock_client,
         ),
     ):
-        result = prune_superseded_nodes(dry_run=False, older_than_days=90)
+        result = await prune_superseded_nodes(dry_run=False, older_than_days=90)
 
     assert result["dry_run"] is False
     assert result["found"] == 1
@@ -300,15 +302,16 @@ def test_prune_no_dry_run_deletes_nodes():
     assert result["pruned"] == 0
 
 
-def test_prune_empty_graph():
+async def test_prune_empty_graph():
     """prune_superseded_nodes with no superseded nodes returns zeros."""
     from acp.memory.graphiti_client import prune_superseded_nodes
 
     with patch(
         "acp.memory.graphiti_client.find_superseded_nodes",
+        new_callable=AsyncMock,
         return_value=[],
     ):
-        result = prune_superseded_nodes(dry_run=False, older_than_days=90)
+        result = await prune_superseded_nodes(dry_run=False, older_than_days=90)
 
     assert result["found"] == 0
     assert result["pruned"] == 0

@@ -87,12 +87,19 @@ class SecretFinding:
     snippet: str  # redacted excerpt for the report (never the full secret)
     line_no: int  # line in the patch where it appeared
     entropy: float = 0.0  # bits/char for high_entropy_assignment; 0.0 otherwise
+    # v0.8.1 (Phase 2.2): When the finding came from a custom regex with a
+    # verify_endpoint, this field holds the verification status:
+    #   "verified"   — endpoint confirmed the secret is active
+    #   "unverified" — endpoint returned 401/403/404 or request failed
+    #   ""            — no verify_endpoint configured (default)
+    verified: str = ""
 
 
 def scan_patch(
     patch: str,
     *,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+    custom_regex_meta: list[dict[str, str]] | None = None,
 ) -> list[SecretFinding]:
     """Scan added lines of a unified diff patch for secret-like content.
 
@@ -100,9 +107,26 @@ def scan_patch(
     checked against added lines in addition to the built-in provider
     patterns. Custom matches are tagged with kind ``custom:<name>`` and
     are included in hard-block detection.
+
+    v0.8.1 (Phase 2.2): When ``custom_regex_meta`` is provided, each entry
+    may contain a ``verify_endpoint`` URL. If a custom regex matches and
+    has a verify_endpoint, the scanner sends an HTTP POST to the endpoint
+    with the matched secret to verify if it's active. Findings that fail
+    verification are tagged with ``verified="unverified"`` and the kind is
+    suffixed with ``:unverified_hard_block`` so the review gate can
+    distinguish verified from unverified hard blocks.
     """
     findings: list[SecretFinding] = []
     seen: set[tuple[str, int]] = set()  # dedupe (kind, line_no)
+
+    # Build a map from pattern name to verify_endpoint for HTTP verification.
+    verify_map: dict[str, str] = {}
+    if custom_regex_meta:
+        for meta in custom_regex_meta:
+            name = meta.get("name", "")
+            endpoint = meta.get("verify_endpoint", "")
+            if name and endpoint:
+                verify_map[name] = endpoint
 
     # Merge built-in and custom patterns.
     all_patterns = list(_PROVIDER_PATTERNS)
@@ -125,7 +149,26 @@ def scan_patch(
                 if kind == "github_legacy_token" and not _looks_assigned(added, m.group(0)):
                     continue
                 seen.add(key)
-                findings.append(SecretFinding(kind=kind, snippet=_redact(m.group(0)), line_no=idx))
+
+                # v0.8.1 (Phase 2.2): HTTP verification for custom regexes
+                # that have a verify_endpoint. If verification fails (the
+                # endpoint returns 401/403/404 or the request errors), tag
+                # the finding as "unverified" and suffix the kind.
+                verified_status = ""
+                finding_kind = kind
+                if kind in verify_map:
+                    verified_status = _verify_secret(verify_map[kind], m.group(0))
+                    if verified_status == "unverified":
+                        finding_kind = f"{kind}:unverified_hard_block"
+
+                findings.append(
+                    SecretFinding(
+                        kind=finding_kind,
+                        snippet=_redact(m.group(0)),
+                        line_no=idx,
+                        verified=verified_status,
+                    )
+                )
 
         # High-entropy assignment values that aren't placeholders.
         for m in _ASSIGNMENT_RE.finditer(added):
@@ -149,6 +192,32 @@ def scan_patch(
                     )
 
     return findings
+
+
+def _verify_secret(endpoint: str, secret: str) -> str:
+    """Verify a secret via HTTP POST to the verify_endpoint.
+
+    Sends the secret as a JSON body ``{"secret": "..."}`` to the endpoint.
+    Returns:
+      - "verified"   if the endpoint returns 200
+      - "unverified" if the endpoint returns 401/403/404 or the request fails
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps({"secret": secret}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return "verified"
+            return "unverified"
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+        return "unverified"
 
 
 # --------------------------------------------------------------------------- #
@@ -325,6 +394,7 @@ def scan_diff(
     worktree_path: Path | None = None,
     use_trufflehog: bool = True,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+    custom_regex_meta: list[dict[str, str]] | None = None,
 ) -> tuple[list[SecretFinding], dict[str, str]]:
     """Scan a diff for secrets, using TruffleHog if available.
 
@@ -353,7 +423,7 @@ def scan_diff(
     """
     # Always run the regex scanner — it catches patterns TruffleHog might
     # miss (e.g., private key blocks that TruffleHog doesn't verify).
-    findings = scan_patch(patch, custom_regexes=custom_regexes)
+    findings = scan_patch(patch, custom_regexes=custom_regexes, custom_regex_meta=custom_regex_meta)
 
     degraded = "false"
     scanner = "regex_only"
@@ -431,6 +501,7 @@ def detect_hard_block_secrets(
     patch: str,
     *,
     custom_regexes: list[tuple[str, re.Pattern[str]]] | None = None,
+    custom_regex_meta: list[dict[str, str]] | None = None,
 ) -> list[SecretFinding]:
     """Fast pre-TruffleHog scan for secrets that constitute a HARD_BLOCK.
 
@@ -450,13 +521,17 @@ def detect_hard_block_secrets(
     ``custom:``) are always treated as hard blocks — the user explicitly
     defined them because they know they're secrets.
     """
-    findings = scan_patch(patch, custom_regexes=custom_regexes)
+    findings = scan_patch(patch, custom_regexes=custom_regexes, custom_regex_meta=custom_regex_meta)
     hard_blocks: list[SecretFinding] = []
     for f in findings:
         if f.kind in _HARD_BLOCK_KINDS:
             hard_blocks.append(f)
         elif f.kind.startswith("custom:"):
             # Custom regexes are user-defined — always hard-block.
+            hard_blocks.append(f)
+        elif ":unverified_hard_block" in f.kind:
+            # v0.8.1 (Phase 2.2): Unverified custom regex findings are
+            # always hard-blocked — we can't confirm the secret is inactive.
             hard_blocks.append(f)
         elif f.kind == "high_entropy_assignment":
             # Use the entropy field directly (set during scan) instead of

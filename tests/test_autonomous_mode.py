@@ -167,7 +167,7 @@ class TestAutoApproveNode:
             review=review,
         )
 
-    def test_auto_approve_writes_event(self, tmp_path):
+    async def test_auto_approve_writes_event(self, tmp_path):
         """auto_approve_node writes auto.approved when enabled."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -199,7 +199,7 @@ class TestAutoApproveNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result.get("auto_approved") is True
         assert result.get("status") == TaskStatus.APPROVED
@@ -209,7 +209,7 @@ class TestAutoApproveNode:
         approved = [e for e in all_events if e.type == EventType.AUTO_APPROVED]
         assert approved[0].payload["approver"] == "ACP-Autonomous-Bot"
 
-    def test_auto_approve_noop_when_disabled(self, tmp_path):
+    async def test_auto_approve_noop_when_disabled(self, tmp_path):
         """auto_approve_node is a no-op when autonomous_mode is False."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -236,12 +236,12 @@ class TestAutoApproveNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result == {}
         assert len(events.read_all()) == 0
 
-    def test_auto_approve_refused_on_broken_event_chain(
+    async def test_auto_approve_refused_on_broken_event_chain(
         self,
         tmp_path,
     ):
@@ -279,7 +279,7 @@ class TestAutoApproveNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result.get("auto_approved") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
@@ -294,7 +294,7 @@ class TestAutoApproveNode:
 class TestAutoMergeNode:
     """auto_merge_node merges and writes auto.merged event."""
 
-    def test_auto_merge_writes_event(self, tmp_path):
+    async def test_auto_merge_writes_event(self, tmp_path):
         """auto_merge_node writes auto.merged on success."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
@@ -354,7 +354,7 @@ class TestAutoMergeNode:
             "repo_path": repo_path,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is True
         assert "merge_commit_sha" in result
@@ -362,7 +362,7 @@ class TestAutoMergeNode:
         all_events = events.read_all()
         assert any(e.type == EventType.AUTO_MERGED for e in all_events)
 
-    def test_auto_merge_noop_when_disabled(self, tmp_path):
+    async def test_auto_merge_noop_when_disabled(self, tmp_path):
         """auto_merge_node is a no-op when auto_merge is False."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
@@ -392,10 +392,10 @@ class TestAutoMergeNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
         assert result == {}
 
-    def test_auto_merge_conflict_downgrades_to_needs_review(
+    async def test_auto_merge_conflict_downgrades_to_needs_review(
         self,
         tmp_path,
     ):
@@ -466,12 +466,12 @@ class TestAutoMergeNode:
             "repo_path": repo_path,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
 
-    def test_auto_merge_refused_on_high_risk(self, tmp_path):
+    async def test_auto_merge_refused_on_high_risk(self, tmp_path):
         """auto_merge_node refuses when review risk exceeds auto_merge_max_risk.
 
         Human firewall: a HIGH-risk change (database, secrets, auth) may
@@ -545,7 +545,7 @@ class TestAutoMergeNode:
             "review_result": review,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
@@ -567,7 +567,7 @@ class TestAutoMergeNode:
         repo.git.checkout("main")
         assert not (repo_path / "feature.py").exists()
 
-    def test_auto_merge_allowed_when_risk_at_ceiling(self, tmp_path):
+    async def test_auto_merge_allowed_when_risk_at_ceiling(self, tmp_path):
         """auto_merge proceeds when review risk equals auto_merge_max_risk.
 
         MEDIUM risk with auto_merge_max_risk=MEDIUM is allowed (not
@@ -639,13 +639,13 @@ class TestAutoMergeNode:
             "review_result": review,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is True
         all_events = events.read_all()
         assert any(e.type == EventType.AUTO_MERGED for e in all_events)
 
-    def test_auto_merge_refused_on_broken_event_chain(self, tmp_path):
+    async def test_auto_merge_refused_on_broken_event_chain(self, tmp_path):
         """auto_merge_node refuses when the event chain is tampered/broken.
 
         Integrity gate: a task with no tamper-proof audit trail may not
@@ -726,7 +726,7 @@ class TestAutoMergeNode:
             "review_result": review,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
@@ -1059,7 +1059,7 @@ class TestTestsMissingPrompt:
         assert "Write unit tests" in content
         assert "Test generation attempt" in content
 
-    def test_tests_missing_event_written(self, tmp_path):
+    async def test_tests_missing_event_written(self, tmp_path):
         """repair_plan_node writes TEST_GENERATION_ATTEMPTED when tests_missing."""
         from acp.config import (
             AgentSection,
@@ -1116,7 +1116,7 @@ class TestTestsMissingPrompt:
             "review_result": review,
         }
 
-        repair_plan_node(state, ctx)
+        await repair_plan_node(state, ctx)
 
         all_events = events.read_all()
         types = [e.type for e in all_events]

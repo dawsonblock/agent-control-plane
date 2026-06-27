@@ -329,7 +329,7 @@ def test_list_command_warns_on_malformed_task_json(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_workspace):
+async def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_workspace):
     """If agent.run() returns None, the graph raises RuntimeError, not AttributeError."""
     os.environ["ACP_TEST"] = "1"
     cfg = _config(disposable_repo.path)
@@ -340,7 +340,7 @@ def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_wor
     class NoneAgent(AgentProtocol):
         name = "none-agent"
 
-        def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds):
+        async def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds):
             return None
 
     from acp.graph.workflow import build_workflow
@@ -352,7 +352,7 @@ def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_wor
 
     from acp.graph.state import initial_state
 
-    result = wf.invoke(
+    result = await wf.ainvoke(
         initial_state(
             config=cfg,
             user_request="test",

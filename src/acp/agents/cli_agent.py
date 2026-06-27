@@ -71,7 +71,7 @@ class CLIAgent:
         # Used by the sentinel in stream.aborted event payloads.
         self.task_id: str = ""
 
-    def run(
+    async def run(
         self,
         *,
         prompt_path: Path,
@@ -119,7 +119,7 @@ class CLIAgent:
         # sentinel feeds each line of stdout to real-time safety checks
         # (secret detection, strange-loop detection, dangerous paths).
         if self.config.streaming.enabled:
-            return self._run_streaming(
+            return await self._run_streaming(
                 argv=argv,
                 cwd=str(worktree_path),
                 use_shell=use_shell,
@@ -131,14 +131,15 @@ class CLIAgent:
 
         start = time.monotonic()
         try:
-            # v0.7.4: Stream stdout/stderr directly to files instead of
-            # capturing into memory. Same OOM fix as the OpenHands/sbx/gvisor
-            # executors — prevents memory exhaustion on long agent runs.
+            # v0.8.0: Use asyncio.to_thread to run the blocking subprocess
+            # in a thread pool, keeping the event loop free. This replaces
+            # the direct subprocess.run call from the sync era.
             with (
                 open(stdout_path, "w") as stdout_f,
                 open(stderr_path, "w") as stderr_f,
             ):
-                proc = subprocess.run(
+                proc = await asyncio.to_thread(
+                    subprocess.run,
                     argv,
                     cwd=str(worktree_path),
                     shell=use_shell,
@@ -201,7 +202,7 @@ class CLIAgent:
         """Debug helper: show how a template would split into argv."""
         return shlex.split(template.format(**kwargs))
 
-    def _run_streaming(
+    async def _run_streaming(
         self,
         *,
         argv: list[str] | str,
@@ -215,7 +216,7 @@ class CLIAgent:
         """Run the agent via the async streaming path with mid-stream safety checks.
 
         This is the v0.7.3 streaming execution path. Instead of blocking on
-        ``subprocess.run``, it uses ``asyncio.run`` to drive
+        ``subprocess.run``, it directly awaits
         :func:`~acp.streaming.midstream.run_agent_streaming`, which feeds
         each line of agent stdout to a
         :class:`~acp.streaming.midstream.StreamSentinel` for real-time
@@ -225,9 +226,9 @@ class CLIAgent:
         strange-loop, or dangerous-path pattern is detected. The abort is
         recorded as a ``stream.aborted`` event in the hash-chained event log.
 
-        This method is safe to call from the sync graph node because the
-        graph is invoked via ``wf.invoke()`` (sync) — there is no running
-        event loop in the calling thread, so ``asyncio.run`` is valid.
+        v0.8.0: Now async-native — called from an async ``run()`` method,
+        so we ``await`` the streaming function directly instead of using
+        ``asyncio.run()``.
         """
         from acp.streaming.midstream import StreamSentinel, run_agent_streaming
 
@@ -246,14 +247,12 @@ class CLIAgent:
         )
 
         start = time.monotonic()
-        exit_code, out, err = asyncio.run(
-            run_agent_streaming(
-                cmd=argv if isinstance(argv, list) else [argv],
-                cwd=cwd,
-                sentinel=sentinel,
-                timeout=timeout_seconds,
-                use_shell=use_shell,
-            )
+        exit_code, out, err = await run_agent_streaming(
+            cmd=argv if isinstance(argv, list) else [argv],
+            cwd=cwd,
+            sentinel=sentinel,
+            timeout=timeout_seconds,
+            use_shell=use_shell,
         )
         duration = time.monotonic() - start
 

@@ -12,7 +12,7 @@ Tests the temporal memory feature:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -532,7 +532,7 @@ class TestCLIMemoryPromote:
 class TestAutoPromotion:
     """auto_approve_node auto-promotes when promote_reports_by_default=True."""
 
-    def test_auto_promote_when_configured(self, tmp_path):
+    async def test_auto_promote_when_configured(self, tmp_path):
         """When promote_reports_by_default=True, auto_approve promotes to Graphiti."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -577,14 +577,16 @@ class TestAutoPromotion:
         }
 
         # Mock the Graphiti ingestion (memory extra may not be installed).
-        with patch("acp.memory.graphiti_client.ingest_task_to_graphiti") as mock_ingest:
+        with patch(
+            "acp.memory.graphiti_client.ingest_task_to_graphiti", new_callable=AsyncMock
+        ) as mock_ingest:
             mock_ingest.return_value = {
                 "task_id": task.task_id,
                 "episode_id": "ep-123",
                 "nodes_created": 3,
                 "edges_created": 2,
             }
-            result = auto_approve_node(state, ctx)
+            result = await auto_approve_node(state, ctx)
 
         assert result["auto_approved"] is True
         assert result["memory_promoted"] is True
@@ -596,7 +598,7 @@ class TestAutoPromotion:
         assert len(promoted_events) == 1
         assert promoted_events[0].payload["auto_promoted"] is True
 
-    def test_no_auto_promote_when_not_configured(self, tmp_path):
+    async def test_no_auto_promote_when_not_configured(self, tmp_path):
         """When promote_reports_by_default=False, no auto-promotion."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -624,12 +626,12 @@ class TestAutoPromotion:
             "task": task,
         }
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result["auto_approved"] is True
         assert result["memory_promoted"] is False
 
-    def test_auto_promote_silent_on_import_error(self, tmp_path):
+    async def test_auto_promote_silent_on_import_error(self, tmp_path):
         """When memory extra not installed, auto-promote fails silently."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -659,7 +661,7 @@ class TestAutoPromotion:
             "vault_note_path": None,  # No vault note path
         }
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         # Approval still stands, memory not promoted.
         assert result["auto_approved"] is True
@@ -675,7 +677,7 @@ class TestAutoPromotion:
 class TestFullGraphitiIntegration:
     """Full Graphiti integration tests (require memory extra + FalkorDB)."""
 
-    def test_ingest_rejects_unapproved(self, tmp_path):
+    async def test_ingest_rejects_unapproved(self, tmp_path):
         """ingest_task_to_graphiti rejects unapproved notes."""
         from acp.memory.graphiti_client import (
             HumanFirewallError,
@@ -688,9 +690,9 @@ class TestFullGraphitiIntegration:
         note_path.write_text("---\napproved: false\n---\nbody")
 
         with pytest.raises(HumanFirewallError):
-            ingest_task_to_graphiti(task, fm, note_path)
+            await ingest_task_to_graphiti(task, fm, note_path)
 
-    def test_ingest_rejects_already_ingested(self, tmp_path):
+    async def test_ingest_rejects_already_ingested(self, tmp_path):
         """ingest_task_to_graphiti rejects already-ingested notes."""
         from acp.memory.graphiti_client import (
             HumanFirewallError,
@@ -703,7 +705,7 @@ class TestFullGraphitiIntegration:
         note_path.write_text("content")
 
         with pytest.raises(HumanFirewallError):
-            ingest_task_to_graphiti(task, fm, note_path)
+            await ingest_task_to_graphiti(task, fm, note_path)
 
     def test_mark_as_ingested_updates_frontmatter(self, tmp_path):
         """_mark_as_ingested flips graphiti_ingested to true."""

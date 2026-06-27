@@ -24,6 +24,7 @@ Configuration (ExecutorSection):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shlex
@@ -124,7 +125,7 @@ class VenvExecutor:
     # Run the agent
     # ------------------------------------------------------------------ #
 
-    def start(
+    async def start(
         self,
         *,
         task_id: str,
@@ -186,13 +187,16 @@ class VenvExecutor:
             )
 
         try:
-            out, err = self._proc.communicate(input=prompt_content, timeout=timeout_seconds)
+            # v0.8.0: Use asyncio.to_thread for the blocking communicate call.
+            out, err = await asyncio.to_thread(
+                self._proc.communicate, input=prompt_content, timeout=timeout_seconds
+            )
             exit_code = self._proc.returncode
         except subprocess.TimeoutExpired:
             self.stop()
             # Drain any partial output after termination.
             try:
-                out, err = self._proc.communicate(timeout=5)
+                out, err = await asyncio.to_thread(self._proc.communicate, timeout=5)
             except subprocess.TimeoutExpired:
                 out, err = "", f"venv: agent timed out after {timeout_seconds}s"
             else:

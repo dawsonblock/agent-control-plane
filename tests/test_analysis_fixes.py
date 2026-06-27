@@ -52,7 +52,7 @@ from acp.review.secret_scanner import SecretFinding, detect_hard_block_secrets
 # --------------------------------------------------------------------------- #
 
 
-def test_openhands_start_uses_env_var_not_model_flag(tmp_path):
+async def test_openhands_start_uses_env_var_not_model_flag(tmp_path):
     """start() uses LLM_MODEL env var + --override-with-envs, not --model."""
     cfg = ExecutorSection(backend="openhands", agent="claude-sonnet-4-20250514")
     executor = OpenHandsExecutor(cfg)
@@ -70,7 +70,7 @@ def test_openhands_start_uses_env_var_not_model_flag(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
         patch("subprocess.run", return_value=mock_result) as mock_run,
     ):
-        executor.start(
+        await executor.start(
             task_id="task_001",
             prompt_path=prompt_path,
             repo_path=tmp_path,
@@ -90,7 +90,7 @@ def test_openhands_start_uses_env_var_not_model_flag(tmp_path):
     assert env.get("LLM_MODEL") == "claude-sonnet-4-20250514"
 
 
-def test_openhands_start_without_agent_no_override(tmp_path):
+async def test_openhands_start_without_agent_no_override(tmp_path):
     """start() without agent doesn't add --override-with-envs.
 
     The executor requires an agent to be set, so we mock _validate to
@@ -109,7 +109,7 @@ def test_openhands_start_without_agent_no_override(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
         patch("subprocess.run", return_value=mock_result) as mock_run,
     ):
-        executor.start(
+        await executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
             repo_path=tmp_path,

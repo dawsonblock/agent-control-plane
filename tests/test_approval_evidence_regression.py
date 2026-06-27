@@ -380,7 +380,7 @@ def test_signing_fail_closed_on_bad_key_length(disposable_repo, isolated_workspa
 # --------------------------------------------------------------------------- #
 
 
-def test_early_failure_report_includes_terminal_event_and_manifest_hash(
+async def test_early_failure_report_includes_terminal_event_and_manifest_hash(
     disposable_repo, isolated_workspace
 ):
     """Worktree-failure report timeline includes task.failed + manifest hash."""
@@ -402,7 +402,7 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
-    result = wf.invoke(
+    result = await wf.ainvoke(
         initial_state(
             config=cfg,
             user_request="test",
@@ -861,7 +861,7 @@ def test_approve_corrupt_evidence_config_fails_closed(
     assert len(approved) == 0, "no event should be written on corrupt sidecar"
 
 
-def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_workspace):
+async def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_workspace):
     """_finalize_evidence re-renders the failure report even when only one of
     diff/review is present (partial failure), not just when both are absent.
 
@@ -896,7 +896,7 @@ def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_wor
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
-    result = wf.invoke(
+    result = await wf.ainvoke(
         initial_state(
             config=cfg,
             user_request="test",

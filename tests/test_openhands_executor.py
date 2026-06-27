@@ -98,7 +98,7 @@ def test_validate_passes_when_installed_and_agent_set():
 # --------------------------------------------------------------------------- #
 
 
-def test_start_captures_stdout_stderr(tmp_path):
+async def test_start_captures_stdout_stderr(tmp_path):
     """start() captures stdout and stderr to artifact files."""
     cfg = ExecutorSection(backend="openhands", agent="test-model")
     executor = OpenHandsExecutor(cfg)
@@ -131,7 +131,7 @@ def test_start_captures_stdout_stderr(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
         patch("subprocess.run", side_effect=_mock_run),
     ):
-        result = executor.start(
+        result = await executor.start(
             task_id="task_20260626_0001",
             prompt_path=prompt_path,
             repo_path=repo_path,
@@ -146,7 +146,7 @@ def test_start_captures_stdout_stderr(tmp_path):
     assert "write" in result.stdout_path.read_text()
 
 
-def test_start_returns_correct_agent_name(tmp_path):
+async def test_start_returns_correct_agent_name(tmp_path):
     """start() returns AgentResult with 'openhands:<model>' agent name."""
     cfg = ExecutorSection(backend="openhands", agent="claude-sonnet-4-20250514")
     executor = OpenHandsExecutor(cfg)
@@ -161,7 +161,7 @@ def test_start_returns_correct_agent_name(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
         patch("subprocess.run", return_value=mock_result),
     ):
-        result = executor.start(
+        result = await executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
             repo_path=tmp_path,
@@ -172,7 +172,7 @@ def test_start_returns_correct_agent_name(tmp_path):
     assert result.agent_name == "openhands:claude-sonnet-4-20250514"
 
 
-def test_start_handles_timeout(tmp_path):
+async def test_start_handles_timeout(tmp_path):
     """start() handles subprocess timeout gracefully."""
     import subprocess
 
@@ -187,7 +187,7 @@ def test_start_handles_timeout(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value="0.1.0"),
         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="openhands", timeout=5)),
     ):
-        result = executor.start(
+        result = await executor.start(
             task_id="task_001",
             prompt_path=prompt_path,
             repo_path=tmp_path,
@@ -199,7 +199,7 @@ def test_start_handles_timeout(tmp_path):
     assert "timed out" in result.stderr_path.read_text()
 
 
-def test_start_handles_not_found(tmp_path):
+async def test_start_handles_not_found(tmp_path):
     """start() handles FileNotFoundError when openhands is not on PATH."""
     cfg = ExecutorSection(backend="openhands", agent="test-model")
     executor = OpenHandsExecutor(cfg)
@@ -211,7 +211,7 @@ def test_start_handles_not_found(tmp_path):
         patch.object(OpenHandsExecutor, "get_version", return_value=""),
         patch("subprocess.run", side_effect=FileNotFoundError),
     ):
-        result = executor.start(
+        result = await executor.start(
             task_id="task_001",
             prompt_path=tmp_path / "prompt.txt",
             repo_path=tmp_path,

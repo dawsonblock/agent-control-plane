@@ -230,7 +230,7 @@ class TestNetworkPolicyEnum:
 
 
 class TestNetworkPolicyPassedToSbx:
-    def test_network_policy_in_command(self, tmp_path):
+    async def test_network_policy_in_command(self, tmp_path):
         """The sbx command includes --network <policy>."""
         cfg = _executor_config(network_policy="locked_down")
         executor = SbxExecutor(cfg)
@@ -258,7 +258,7 @@ class TestNetworkPolicyPassedToSbx:
                 side_effect=fake_run,
             ),
         ):
-            executor.start(
+            await executor.start(
                 task_id="task_20260101_0001",
                 prompt_path=prompt_path,
                 repo_path=tmp_path,
@@ -270,7 +270,7 @@ class TestNetworkPolicyPassedToSbx:
         network_idx = captured_cmd.index("--network")
         assert captured_cmd[network_idx + 1] == "locked_down"
 
-    def test_network_policy_balanced_in_command(self, tmp_path):
+    async def test_network_policy_balanced_in_command(self, tmp_path):
         """The sbx command includes --network balanced when configured."""
         cfg = _executor_config(network_policy="balanced")
         executor = SbxExecutor(cfg)
@@ -298,7 +298,7 @@ class TestNetworkPolicyPassedToSbx:
                 side_effect=fake_run,
             ),
         ):
-            executor.start(
+            await executor.start(
                 task_id="task_20260101_0001",
                 prompt_path=prompt_path,
                 repo_path=tmp_path,
@@ -355,7 +355,7 @@ exit 0
         sbx_path.chmod(0o755)
         return bin_dir
 
-    def test_fake_sbx_run_command_argv(self, tmp_path):
+    async def test_fake_sbx_run_command_argv(self, tmp_path):
         """The sbx run command has the correct argv."""
         bin_dir = self._create_fake_sbx(tmp_path)
         cfg = _executor_config(network_policy="locked_down")
@@ -377,7 +377,7 @@ exit 0
                 return_value="1.0.0-fake",
             ),
         ):
-            result = executor.start(
+            result = await executor.start(
                 task_id="task_20260101_0001",
                 prompt_path=prompt_path,
                 repo_path=tmp_path,

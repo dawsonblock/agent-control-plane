@@ -21,6 +21,7 @@ services).
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,7 +75,7 @@ class NodeContext:
 # --------------------------------------------------------------------------- #
 
 
-def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
+async def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
     """Write the evidence manifest, bind it to the signed event log, re-render.
 
     Called by terminal nodes AFTER the terminal event is written. The sequence:
@@ -244,7 +245,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         return None
 
 
-def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     repo_path = cfg.repo.path
     preallocated = state.get("preallocated_task_id")
@@ -273,7 +274,7 @@ def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     }
 
 
-def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     repo_path = state["repo_path"]
     # For docker_sbx with clone mode, the host repo is mounted read-only.
@@ -297,7 +298,7 @@ def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {}
 
 
-def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
 
@@ -389,7 +390,7 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     return {"worktree_path": worktree_path}
 
 
-def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """M6: Build context bundle via Haystack RAG, fallback to M1 prompt-only.
 
     When the ``rag`` optional dependency group is installed
@@ -513,7 +514,7 @@ def _parse_and_emit_subtasks(
         logger.warning("sub-task parsing failed (best-effort, run continues): %s", exc)
 
 
-def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
 
@@ -521,11 +522,21 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # Worktree mode provides no OS-level isolation — a malicious agent with
     # allow_shell=True can execute arbitrary commands on the host. Warn loudly
     # so operators know the risk. Consider using docker_sbx, gvisor, or venv.
+    # v0.8.0 (Phase 4.1): Hard refuse when worktree+shell without explicit opt-in.
     if cfg.executor.backend == "worktree":
         if getattr(cfg.agent, "allow_shell", False):
+            if not getattr(cfg.executor, "danger_allow_host_shell", False):
+                raise RuntimeError(
+                    "SECURITY REFUSAL: executor.backend='worktree' with agent.allow_shell=True "
+                    "is refused without explicit opt-in. This configuration gives the agent "
+                    "arbitrary host command execution (RCE). To override, set "
+                    "executor.danger_allow_host_shell: true in the repo config. "
+                    "Consider using docker_sbx, gvisor, or venv for OS-level isolation."
+                )
             logger.warning(
                 "SECURITY RISK: executor.backend='worktree' with agent.allow_shell=True "
                 "— agent can execute arbitrary host commands (RCE). "
+                "Operator explicitly opted in via danger_allow_host_shell. "
                 "Consider using docker_sbx, gvisor, or venv for OS-level isolation."
             )
         else:
@@ -548,7 +559,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         # v0.5.15: sandbox.started is written ONLY after sbx actually launches.
         # If executor.start() fails, we write sandbox.failed instead.
         try:
-            agent_result = executor.start(
+            agent_result = await executor.start(
                 task_id=state["task_id"],
                 prompt_path=state["prompt_path"],
                 repo_path=state["repo_path"],
@@ -642,7 +653,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         )
 
         try:
-            agent_result = executor.start(
+            agent_result = await executor.start(
                 task_id=state["task_id"],
                 prompt_path=state["prompt_path"],
                 repo_path=state["worktree_path"],
@@ -709,7 +720,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             },
         )
         try:
-            agent_result = executor.start(
+            agent_result = await executor.start(
                 task_id=task.task_id,
                 prompt_path=state["prompt_path"],
                 repo_path=state["worktree_path"],
@@ -786,7 +797,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 "environment": executor.get_environment_info(),
             },
         )
-        agent_result = executor.start(
+        agent_result = await executor.start(
             task_id=state["task_id"],
             prompt_path=state["prompt_path"],
             repo_path=state["repo_path"],
@@ -846,12 +857,54 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         logger.warning("environment info collection failed (best-effort): %s", exc)
 
     ctx.events.write(EventType.AGENT_STARTED, agent_started_payload)
-    agent_result = agent.run(
-        prompt_path=state["prompt_path"],
-        worktree_path=state["worktree_path"],
-        artifact_dir=state["artifacts_dir"],
-        timeout_seconds=cfg.agent.timeout_seconds,
-    )
+
+    # v0.8.0 (Phase 1.2): Start the MITM egress proxy when enabled. The proxy
+    # intercepts all agent HTTP/HTTPS traffic, logs it to the EgressLogger,
+    # and blocks domains not in the allowlist. Env vars (HTTP_PROXY etc.) are
+    # injected into os.environ so the agent's subprocess inherits them.
+    egress_proxy: Any = None
+    old_env: dict[str, str] = {}
+    if cfg.proxy.enabled:
+        from acp.egress_proxy import EgressProxyDaemon
+
+        egress_proxy = EgressProxyDaemon(
+            port=cfg.proxy.proxy_port,
+            allowed_domains=cfg.proxy.allowed_domains,
+        )
+        try:
+            egress_proxy.start()
+            proxy_env = egress_proxy.get_proxy_env_vars()
+            old_env = {k: os.environ.get(k, "") for k in proxy_env}
+            os.environ.update(proxy_env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("egress proxy failed to start (continuing without): %s", exc)
+            egress_proxy = None
+
+    try:
+        agent_result = await agent.run(
+            prompt_path=state["prompt_path"],
+            worktree_path=state["worktree_path"],
+            artifact_dir=state["artifacts_dir"],
+            timeout_seconds=cfg.agent.timeout_seconds,
+        )
+    finally:
+        # Restore env vars and stop the proxy.
+        if egress_proxy is not None:
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                if k in old_env:
+                    os.environ[k] = old_env[k]
+                else:
+                    os.environ.pop(k, None)
+            egress_proxy.stop()
+            # Write the egress log artifact.
+            try:
+                egress_proxy.egress_logger.write_artifact(
+                    state["artifacts_dir"],
+                    allowed_domains=cfg.proxy.allowed_domains,
+                    log_filename=cfg.proxy.log_artifact,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("egress artifact write failed (best-effort): %s", exc)
     if agent_result is None:
         raise RuntimeError(
             f"agent '{agent.name}' returned None instead of an AgentResult — "
@@ -901,7 +954,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {"agent_result": agent_result}
 
 
-def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.TESTING
     ctx.store.save(state["task"])
@@ -959,7 +1012,7 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {"command_results": command_results}
 
 
-def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
     base_sha = task.base_commit_sha or cfg.repo.default_branch
@@ -1022,7 +1075,7 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     return {"diff": diff}
 
 
-def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.REVIEWING
     ctx.store.save(state["task"])
@@ -1114,7 +1167,7 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {"review_result": review}
 
 
-def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
     review: ReviewResult = state["review_result"]
     agent_result = state.get("agent_result")
@@ -1218,7 +1271,7 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     }
 
 
-def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
+async def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
     """Stop or remove the sandbox after a run (docker_sbx backend only).
 
     Best-effort: writes a ``sandbox.stopped`` event on success, a
@@ -1260,7 +1313,7 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
         )
 
 
-def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal success node. Writes task.completed with gate-derived validation fields."""
     task = state["task"]
     gate_result = state.get("gate_result")
@@ -1278,12 +1331,12 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             else "unknown",
         },
     )
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
     return {"status": task.status, "manifest_hash": manifest_hash}
 
 
-def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal failure node — the ONLY node that writes ``TASK_FAILED``.
 
     If ``write_report_node`` already wrote the report (normal graph path),
@@ -1365,8 +1418,8 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # the early-failure report with the final event timeline + manifest hash.
     if report_path is not None:
         state["report_path"] = report_path
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
     return {
         "status": TaskStatus.FAILED,
         "report_path": report_path,
@@ -1375,7 +1428,7 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     }
 
 
-def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal node for tasks that completed but need human review.
 
     ``write_report_node`` already wrote the report; this node only writes
@@ -1400,8 +1453,8 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             else "unknown",
         },
     )
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
     return {
         "status": TaskStatus.NEEDS_REVIEW,
         "report_path": state.get("report_path"),
@@ -1420,7 +1473,7 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
 # --------------------------------------------------------------------------- #
 
 
-def auto_approve_node(
+async def auto_approve_node(
     state: dict[str, Any],
     ctx: NodeContext,
 ) -> dict[str, Any]:
@@ -1517,7 +1570,7 @@ def auto_approve_node(
                 content = Path(vault_note_path).read_text(encoding="utf-8")
                 fm, _ = parse_frontmatter(content)
                 if should_promote_to_graphiti(task, fm, Path(vault_note_path)):
-                    result = ingest_task_to_graphiti(
+                    result = await ingest_task_to_graphiti(
                         task=task,
                         frontmatter=fm,
                         vault_note_path=Path(vault_note_path),
@@ -1561,7 +1614,7 @@ def auto_approve_node(
     }
 
 
-def auto_merge_node(
+async def auto_merge_node(
     state: dict[str, Any],
     ctx: NodeContext,
 ) -> dict[str, Any]:
@@ -1741,7 +1794,7 @@ def _risk_exceeds(actual: RiskLevel, ceiling: RiskLevel) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Build a repair prompt from the most recent command failures.
 
     Increments ``repair_attempts`` and records a history entry. Every repair
@@ -1847,7 +1900,7 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     }
 
 
-def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Run the configured agent against the repair prompt.
 
     Reuses the same agent registry + run contract as the initial ``run_agent``
@@ -1878,7 +1931,7 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
             "timeout_seconds": cfg.agent.timeout_seconds,
         },
     )
-    agent_result = agent.run(
+    agent_result = await agent.run(
         prompt_path=state["prompt_path"],
         worktree_path=state["worktree_path"],
         artifact_dir=state["artifacts_dir"],

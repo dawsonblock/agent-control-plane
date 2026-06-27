@@ -33,7 +33,7 @@ recovery. Without it, an in-memory ``MemorySaver`` is used.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -72,18 +72,23 @@ from acp.testing.runner import validation_passed, validation_ran
 _logger = logging.getLogger(__name__)
 
 
-def node_error_handler(node_fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+def node_error_handler(
+    node_fn: Callable[..., Awaitable[dict[str, Any]]],
+) -> Callable[..., Awaitable[dict[str, Any]]]:
     """Wrap a graph node so unhandled exceptions produce a FAILED state.
 
     If the wrapped node raises, instead of crashing the graph we return a
     state patch with ``status=FAILED`` and an ``error`` message. The graph's
     conditional edges route this to the ``failed`` terminal node, which
     writes whatever evidence it can.
+
+    v0.8.0: Now wraps async node functions. The wrapper is itself async
+    and awaits the wrapped node.
     """
 
-    def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    async def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         try:
-            result: dict[str, Any] = node_fn(state, ctx)
+            result: dict[str, Any] = await node_fn(state, ctx)
             return result
         except Exception as exc:
             # Write a node failure event directly (best effort). If the event
@@ -303,7 +308,7 @@ def build_workflow(
     state persists across process restarts. Requires the ``checkpoint``
     extra (``langgraph-checkpoint-sqlite``).
 
-    Returns a compiled graph ready to ``.invoke(initial_state)``.
+    Returns a compiled graph ready to ``.ainvoke(initial_state)``.
     """
     ctx = NodeContext(
         store=store,
@@ -315,7 +320,10 @@ def build_workflow(
 
     # Wrap every node with the error handler so unhandled exceptions produce
     # a FAILED state instead of crashing the graph.
-    def _wrap(n: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    # v0.8.0: Nodes are now async — the wrapper and _wrap handle Awaitable.
+    def _wrap(
+        n: Callable[..., Awaitable[dict[str, Any]]],
+    ) -> Callable[..., Awaitable[dict[str, Any]]]:
         return partial(node_error_handler(n), ctx=ctx)
 
     # Bind ctx into each node so LangGraph sees a single-arg callable.
@@ -438,182 +446,30 @@ def run_workflow(
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
 
-    Handles the placeholder-writer setup: the EventWriter is constructed with
-    a sentinel id, and the ``create_task`` node relocates it to the real run
-    dir once the task id is minted. Returns the graph's final state dict.
+    v0.8.0: This is now a thin sync wrapper around
+    :func:`run_workflow_async`. It uses ``asyncio.run()`` to drive the
+    async workflow. All node functions are async, and the graph is
+    invoked via ``wf.ainvoke()`` exclusively — no more ``wf.invoke()``.
 
-    When ``config.evidence.signing_key_path`` is set, events are Ed25519-signed.
-    When ``config.evidence.durable_store`` is set, events are dual-written to
-    a SQLite database in addition to the JSONL log.
-
-    v0.7.0 (M14): When ``mission_id`` and ``parent_task_id`` are provided,
-    the task is linked to a mission step. The ``evidence.finalized`` event
-    will include ``parent_artifact_hash`` — the sha256 of the preceding
-    step's ``diff.patch`` — proving sequential generation.
+    When called from an async context (e.g. FastAPI), use
+    :func:`run_workflow_async` directly instead.
     """
-    # v0.7.0 (Phase 1.1): Wire SQLite-as-primary if configured.
-    # Only initialize the durable task store when durable_mode is not
-    # DISABLED — respecting the operator's explicit choice to skip SQLite.
-    evidence_cfg = getattr(config, "evidence", None)
-    durable_task_store = None
-    if (
-        evidence_cfg
-        and evidence_cfg.durable_store
-        and evidence_cfg.durable_mode != DurableMode.DISABLED
-    ):
-        from acp.evidence.durable_task_store import DurableTaskStore
+    import asyncio
 
-        durable_task_store = DurableTaskStore(evidence_cfg.durable_store)
-        durable_task_store.init()
-    store = TaskStore(
-        runs_root=runs_root,
-        durable_store=durable_task_store,
-        primary=evidence_cfg.task_store_primary if evidence_cfg else "json",
-    )
-    # Ensure vault_root exists — the workflow writes a vault note at the end
-    # and the vault directory must be present by then.
-    Path(vault_root).mkdir(parents=True, exist_ok=True)
-    # Placeholder writer — create_task will relocate it to the real run dir.
-    events = EventWriter("__pending__", store.root / "__pending__")
-
-    # Wire Ed25519 signing if a signing key is configured. Signing is a trust
-    # mode: if it is configured, failure to sign must be FATAL. We never
-    # silently downgrade configured signed evidence to unsigned evidence —
-    # that is exactly the kind of integrity gap this control plane exists to
-    # prevent. A missing key file, a malformed key, or an unavailable
-    # `cryptography` package all raise EvidenceConfigError (fail closed).
-    if evidence_cfg and evidence_cfg.signing_key_path:
-        from acp.errors import EvidenceConfigError
-
-        try:
-            key_bytes = evidence_cfg.signing_key_path.read_bytes()
-        except OSError as exc:
-            raise EvidenceConfigError(
-                f"signing key file not readable: {evidence_cfg.signing_key_path} ({exc})"
-            ) from exc
-        # v0.7.4: Key size validation is algorithm-aware.
-        algorithm = evidence_cfg.signature_algorithm
-        expected_sizes = {"ed25519": 32, "mldsa44": 2560, "mldsa65": 4032, "mldsa87": 4896}
-        expected = expected_sizes.get(algorithm, 32)
-        if len(key_bytes) != expected:
-            raise EvidenceConfigError(
-                f"signing key file for {algorithm} must be exactly {expected} bytes, "
-                f"got {len(key_bytes)}: {evidence_cfg.signing_key_path}"
-            )
-        try:
-            events.set_signing_key(key_bytes, algorithm=algorithm)
-        except ImportError as exc:
-            if algorithm == "ed25519":
-                raise EvidenceConfigError(
-                    "signing is configured but the 'cryptography' package is not "
-                    "installed — refusing to run unsigned. "
-                    "Install with: uv sync --extra crypto"
-                ) from exc
-            else:
-                raise EvidenceConfigError(
-                    f"{algorithm} signing requires cryptography>=49 with ML-DSA "
-                    "support — refusing to run unsigned. "
-                    "Install with: uv sync --extra mldsa"
-                ) from exc
-
-    # Wire SQLite durable store if configured. The store is additive: events
-    # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
-    # EventWriter's write method to dual-write.
-    #
-    # Durable mode controls failure behavior:
-    #   - disabled: no SQLite writes (durable_store path is ignored)
-    #   - best_effort: failures are recorded as warnings, run continues
-    #   - required: failures are fatal — the run cannot succeed
-    durable_store = None
-    durable_store_failures: list[str] = []
-    durable_mode = "best_effort"
-    if evidence_cfg:
-        durable_mode = (
-            evidence_cfg.durable_mode.value
-            if hasattr(evidence_cfg.durable_mode, "value")
-            else str(evidence_cfg.durable_mode)
+    return asyncio.run(
+        run_workflow_async(
+            config=config,
+            user_request=user_request,
+            runs_root=runs_root,
+            vault_root=vault_root,
+            agent_factory=agent_factory,
+            task_id=task_id,
+            mission_id=mission_id,
+            mission_step_index=mission_step_index,
+            parent_task_id=parent_task_id,
+            recursion_depth=recursion_depth,
         )
-
-    if evidence_cfg and evidence_cfg.durable_store and durable_mode != "disabled":
-        try:
-            from acp.evidence.durable_store import DurableEventStore
-
-            durable_store = DurableEventStore(evidence_cfg.durable_store)
-            durable_store.init()
-            # Wrap the write method to dual-write. In best_effort mode, failures
-            # are recorded but don't crash the run. In required mode, failures
-            # raise — the run cannot succeed without durable evidence.
-            original_write = events.write
-
-            def _dual_write(type: EventType, payload: dict[str, Any] | None = None) -> Event:
-                evt = original_write(type, payload)
-                try:
-                    durable_store.append(evt)
-                except Exception as exc:  # noqa: BLE001
-                    durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
-                    if durable_mode == "required":
-                        raise  # fail closed — durable evidence is required
-                return evt
-
-            events.write = _dual_write  # type: ignore[method-assign]
-        except Exception as exc:
-            durable_store_failures.append(f"init: {exc}")
-            if durable_mode == "required":
-                from acp.errors import EvidenceConfigError
-
-                raise EvidenceConfigError(
-                    f"durable store initialization failed (required mode): {exc}"
-                ) from exc
-
-    # v0.7.4: Durable checkpointing — use SQLite checkpointer when configured.
-    checkpoint_db_path = None
-    if evidence_cfg and evidence_cfg.checkpoint_store:
-        checkpoint_db_path = evidence_cfg.checkpoint_store
-
-    wf = build_workflow(
-        store=store,
-        events=events,
-        agent_factory=agent_factory,
-        checkpoint_db_path=checkpoint_db_path,
     )
-
-    state = {
-        "config": config,
-        "user_request": user_request,
-        "vault_root": Path(vault_root),
-        "runs_root": Path(runs_root),
-    }
-    if task_id is not None:
-        state["preallocated_task_id"] = task_id
-    # v0.7.0 (M14): Mission context for cross-task artifact sharing.
-    if mission_id:
-        state["mission_id"] = mission_id
-        state["mission_step_index"] = mission_step_index
-        state["parent_task_id"] = parent_task_id
-    # v0.7.4: Subtask recursion depth — prevents agent fork bombs.
-    state["recursion_depth"] = recursion_depth
-    # v0.7.4: Use task_id as thread_id for checkpoint isolation. When a
-    # pre-allocated task_id is provided, each run gets its own checkpoint
-    # thread. When not provided, fall back to a unique id so concurrent
-    # runs don't overwrite each other's checkpoints.
-    import uuid
-
-    thread_id = task_id if task_id else f"acp-run-{uuid.uuid4().hex[:8]}"
-    result: dict[str, Any] = wf.invoke(state, config={"configurable": {"thread_id": thread_id}})
-
-    # Close the durable stores if they were opened.
-    if durable_store is not None:
-        durable_store.close()
-    if durable_task_store is not None:
-        durable_task_store.close()
-
-    # Surface durable-store failures to the caller. The JSONL log is canonical,
-    # so the run can succeed, but the operator must know the durable index is
-    # incomplete — silent evidence loss is unacceptable in a trust system.
-    if durable_store_failures:
-        result["durable_store_warnings"] = durable_store_failures
-
-    return result
 
 
 async def run_workflow_async(

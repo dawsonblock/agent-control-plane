@@ -147,7 +147,7 @@ def test_summary_validation_failed(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_attempts=2):
+async def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_attempts=2):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     from acp.graph.workflow import build_workflow
@@ -167,7 +167,7 @@ def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_atte
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "no-val"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "no-val"}})
     return result, store
 
 
@@ -176,7 +176,7 @@ def _event_types(store, task_id):
     return [json.loads(l)["type"] for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspace):
+async def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspace):
     """All commands skipped + max_repair_attempts=2 → no repair attempts.
 
     Previously the empty-list-as-pass pattern returned True so repair was
@@ -184,7 +184,7 @@ def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspa
     explicitly, so
     no-validation flows straight to capture_diff → review → NEEDS_REVIEW.
     """
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],

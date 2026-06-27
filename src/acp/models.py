@@ -8,7 +8,7 @@ Events and reports are truth; these models enforce that truth is well-formed.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ def _utcnow_iso() -> str:
 # --------------------------------------------------------------------------- #
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     """Lifecycle of a task. Every transition is an event."""
 
     CREATED = "created"
@@ -47,7 +47,7 @@ class TaskStatus(str, Enum):
     ARCHIVED = "archived"
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Every meaningful action writes exactly one of these.
 
     The event log is the source of truth — if it's not here, it didn't happen.
@@ -103,8 +103,12 @@ class EventType(str, Enum):
     # v0.7.0 (M14): Mission layer — group tasks into larger epics.
     # mission.created   = a new mission was defined from a YAML goal
     # mission.completed = all steps in a mission finished (approved or aborted)
+    # mission.step_started/completed/failed = v0.8.0 mission orchestration events
     MISSION_CREATED = "mission.created"
     MISSION_COMPLETED = "mission.completed"
+    MISSION_STEP_STARTED = "mission.step_started"
+    MISSION_STEP_COMPLETED = "mission.step_completed"
+    MISSION_STEP_FAILED = "mission.step_failed"
     # v0.7.0+: Forward-declared event types for upcoming layers.
     # These are defined now (Layer 0 schema) so downstream features can
     # emit and verify them without waiting for a models.py change.
@@ -132,19 +136,19 @@ class EventType(str, Enum):
     STREAM_ABORTED = "stream.aborted"
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
 
-class Recommendation(str, Enum):
+class Recommendation(StrEnum):
     MERGE = "merge"
     REVISE = "revise"
     REJECT = "reject"
 
 
-class MemoryStatus(str, Enum):
+class MemoryStatus(StrEnum):
     """Synthadoc-style 5-state lifecycle for vault notes."""
 
     DRAFT = "draft"
@@ -275,13 +279,16 @@ class ReviewResult(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-class MissionStatus(str, Enum):
+class MissionStatus(StrEnum):
     """Lifecycle of a mission. A mission groups sequential tasks toward a goal."""
 
     CREATED = "created"
     IN_PROGRESS = "in_progress"
+    RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     ABORTED = "aborted"
+    FAILED = "failed"
 
 
 class MissionStep(BaseModel):
@@ -294,6 +301,7 @@ class MissionStep(BaseModel):
     """
 
     description: str
+    prompt: str = ""  # v0.8.0: the user_request for this step's task run
     task_id: str = ""  # filled in when acp spawns the task for this step
     status: str = "pending"  # pending | running | completed | failed
 
@@ -349,11 +357,19 @@ def compute_final_status(
 ) -> TaskStatus:
     """Determine the final task status using gate-correct logic.
 
-    Delegates to ``acp.review.gates.evaluate_final_gates`` which is the
-    single source of truth for gate outcomes. This function remains for
-    backward compatibility; new code should call ``evaluate_final_gates``
-    directly for richer results.
+    .. deprecated:: v0.8.1
+        Use :func:`acp.review.gates.evaluate_final_gates` directly for
+        richer results (returns ``GateResult`` with outcome + reasons).
+        This function remains as a thin wrapper for backward compatibility
+        but will be removed in a future release.
     """
+    import warnings
+
+    warnings.warn(
+        "compute_final_status is deprecated — use evaluate_final_gates directly",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from acp.review.gates import GateOutcome, evaluate_final_gates
 
     agent_exit_code = 0 if agent_passed else 1

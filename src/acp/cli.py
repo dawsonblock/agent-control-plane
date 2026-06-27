@@ -10,6 +10,7 @@ test-only equivalence checks.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -56,19 +57,6 @@ def _require_valid_task_id(task_id: str) -> None:
             f"(expected task_<YYYYMMDD>_<NNNN>, e.g. task_20260624_0001)"
         )
         raise typer.Exit(code=1)
-
-
-def _revert_vault_note(note_path: Path, original_content: str) -> None:
-    """Best-effort revert of a vault note to its pre-modification content.
-
-    Deprecated in v0.5.14: with pure-projection re-rendering, the vault note
-    is no longer modified before the event log is written, so this function
-    is only kept for backward compatibility with any external callers.
-    """
-    try:
-        note_path.write_text(original_content)
-    except Exception:  # noqa: BLE001
-        console.print(f"[red]✗[/] could not revert vault note: {note_path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1327,12 +1315,14 @@ def memory_promote(
             content = note_path.read_text(encoding="utf-8")
             fm, _ = parse_frontmatter(content)
 
-            result = ingest_task_to_graphiti(
-                task=task,
-                frontmatter=fm,
-                vault_note_path=note_path,
-                graphiti_group_id=group_id,
-                memory_config=cfg.memory,
+            result = asyncio.run(
+                ingest_task_to_graphiti(
+                    task=task,
+                    frontmatter=fm,
+                    vault_note_path=note_path,
+                    graphiti_group_id=group_id,
+                    memory_config=cfg.memory,
+                )
             )
 
             # Write memory.promoted event to the event log.
@@ -1410,11 +1400,13 @@ def memory_search(
         raise typer.Exit(code=1) from exc
 
     try:
-        results = search_graphiti_facts(
-            query,
-            group_id=group_id,
-            num_results=num_results,
-            memory_config=cfg.memory,
+        results = asyncio.run(
+            search_graphiti_facts(
+                query,
+                group_id=group_id,
+                num_results=num_results,
+                memory_config=cfg.memory,
+            )
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/] search failed: {exc}")
@@ -1490,11 +1482,13 @@ def memory_prune(
     )
 
     try:
-        result = prune_superseded_nodes(
-            group_id=group_id,
-            older_than_days=older_than_days,
-            dry_run=dry_run,
-            memory_config=cfg.memory,
+        result = asyncio.run(
+            prune_superseded_nodes(
+                group_id=group_id,
+                older_than_days=older_than_days,
+                dry_run=dry_run,
+                memory_config=cfg.memory,
+            )
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/] prune failed: {exc}")
@@ -1893,6 +1887,148 @@ def mission_complete(
     console.print(f"[green]✓[/] mission {mission_id} completed")
     console.print(f"  steps: {completed} completed, {failed} failed, {len(mission.steps)} total")
     console.print(f"  event: mission.completed written to {store.events_path(mission_id)}")
+
+
+@mission_app.command("run")
+def mission_run(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to run (e.g. mission_20260626_0001).",
+    ),
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
+        help="Path to a <name>.repo.yaml repo config.",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data (default: data/missions).",
+    ),
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory for task runs (default: data/runs).",
+    ),
+    vault_root: Path = typer.Option(
+        Path("data/vault"),
+        "--vault-root",
+        help="Root directory for vault notes (default: data/vault).",
+    ),
+) -> None:
+    """Run all pending steps in a mission sequentially (v0.8.0, Phase 3.1).
+
+    Each step is executed via the ACP workflow with cross-task artifact
+    chaining — each step's evidence includes the sha256 of the preceding
+    step's diff.patch. Mission-level events (step_started, step_completed,
+    step_failed) are written to the mission's event log for real-time
+    progress tracking.
+
+    The mission can be paused between steps by setting its status to
+    ``paused`` (via the API or by editing mission.yaml). The orchestrator
+    stops after the current step completes and can be resumed with
+    ``acp mission run`` again.
+    """
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    orchestrator = MissionOrchestrator(
+        config_path=config,
+        missions_dir=missions_dir,
+        runs_root=runs_root,
+        vault_root=vault_root,
+    )
+    try:
+        result = orchestrator.run(mission_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/] mission run failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]✓[/] mission {mission_id} run complete")
+    console.print(f"  steps run: {result['steps_run']}")
+    console.print(f"  passed: {result['steps_passed']}")
+    console.print(f"  failed: {result['steps_failed']}")
+    if result.get("paused"):
+        console.print("[yellow]  mission paused — resume with `acp mission run`[/]")
+    if result.get("message"):
+        console.print(f"  {result['message']}")
+
+
+@mission_app.command("pause")
+def mission_pause(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to pause.",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data.",
+    ),
+) -> None:
+    """Pause a running mission — stops after the current step completes."""
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    orchestrator = MissionOrchestrator(
+        config_path=Path(".repo.yaml"),  # not needed for pause
+        missions_dir=missions_dir,
+    )
+    try:
+        orchestrator.pause(mission_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        console.print(f"[red]✗[/] cannot pause: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[yellow]⏸[/] mission {mission_id} paused (will stop after current step)")
+
+
+@mission_app.command("resume")
+def mission_resume(
+    mission_id: str = typer.Option(
+        ...,
+        "--mission",
+        "-m",
+        help="Mission id to resume.",
+    ),
+    missions_dir: Path = typer.Option(
+        Path("data/missions"),
+        "--missions-dir",
+        help="Root directory for mission data.",
+    ),
+) -> None:
+    """Resume a paused mission."""
+    _require_valid_mission_id(mission_id)
+
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    orchestrator = MissionOrchestrator(
+        config_path=Path(".repo.yaml"),  # not needed for resume
+        missions_dir=missions_dir,
+    )
+    try:
+        orchestrator.resume(mission_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/] mission not found: {exc}")
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        console.print(f"[red]✗[/] cannot resume: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]▶[/] mission {mission_id} resumed (status=running)")
 
 
 # --------------------------------------------------------------------------- #

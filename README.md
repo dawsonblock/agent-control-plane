@@ -1,4 +1,4 @@
-# agent-control-plane (ACP) v0.7.5
+# agent-control-plane (ACP) v0.8.0
 
 A Mac-first **local control plane for coding agents**. Its job:
 

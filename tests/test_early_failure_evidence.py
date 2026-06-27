@@ -33,7 +33,7 @@ def _config(repo_path: Path, *, test_cmd="echo ok", max_repair=0) -> RepoConfig:
     )
 
 
-def _run_graph(repo_path, runs_root, vault_root, *, cfg=None):
+async def _run_graph(repo_path, runs_root, vault_root, *, cfg=None):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
@@ -45,7 +45,7 @@ def _run_graph(repo_path, runs_root, vault_root, *, cfg=None):
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    return wf.invoke(state, config={"configurable": {"thread_id": "test"}}), store
+    return await wf.ainvoke(state, config={"configurable": {"thread_id": "test"}}), store
 
 
 def _events(store, task_id):
@@ -67,11 +67,11 @@ def _main_head(repo_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_dirty_repo_exactly_one_terminal_event(disposable_repo, isolated_workspace):
+async def test_dirty_repo_exactly_one_terminal_event(disposable_repo, isolated_workspace):
     """Dirty repo → exactly one task.failed event, no duplicates."""
     (disposable_repo.path / "README.md").write_text("# dirty\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -85,11 +85,11 @@ def test_dirty_repo_exactly_one_terminal_event(disposable_repo, isolated_workspa
     )
 
 
-def test_dirty_repo_writes_minimal_failure_report(disposable_repo, isolated_workspace):
+async def test_dirty_repo_writes_minimal_failure_report(disposable_repo, isolated_workspace):
     """Dirty repo → a failure report is written even without a diff."""
     (disposable_repo.path / "README.md").write_text("# dirty\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -102,11 +102,11 @@ def test_dirty_repo_writes_minimal_failure_report(disposable_repo, isolated_work
     assert "Failure" in body  # the failure section
 
 
-def test_dirty_repo_writes_evidence_manifest(disposable_repo, isolated_workspace):
+async def test_dirty_repo_writes_evidence_manifest(disposable_repo, isolated_workspace):
     """Dirty repo → evidence manifest is written."""
     (disposable_repo.path / "README.md").write_text("# dirty\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -116,10 +116,10 @@ def test_dirty_repo_writes_evidence_manifest(disposable_repo, isolated_workspace
     assert manifest_path.is_file(), "evidence manifest should exist for early failure"
 
 
-def test_dirty_repo_main_untouched(disposable_repo, isolated_workspace):
+async def test_dirty_repo_main_untouched(disposable_repo, isolated_workspace):
     """Dirty repo → main branch HEAD unchanged."""
     (disposable_repo.path / "README.md").write_text("# dirty\n")
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -132,7 +132,7 @@ def test_dirty_repo_main_untouched(disposable_repo, isolated_workspace):
 # --------------------------------------------------------------------------- #
 
 
-def test_worktree_failure_exactly_one_terminal_event(disposable_repo, isolated_workspace):
+async def test_worktree_failure_exactly_one_terminal_event(disposable_repo, isolated_workspace):
     """Worktree creation failure (bad branch) → exactly one task.failed."""
     # Use a non-existent default branch to force worktree creation to fail.
     cfg = RepoConfig(
@@ -142,7 +142,7 @@ def test_worktree_failure_exactly_one_terminal_event(disposable_repo, isolated_w
         review=ReviewSection(),
     )
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -165,9 +165,9 @@ def test_worktree_failure_exactly_one_terminal_event(disposable_repo, isolated_w
 # --------------------------------------------------------------------------- #
 
 
-def test_mid_run_failure_exactly_one_terminal_event(disposable_repo, isolated_workspace):
+async def test_mid_run_failure_exactly_one_terminal_event(disposable_repo, isolated_workspace):
     """Failing test (no repair) → exactly one task.failed, full report."""
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],

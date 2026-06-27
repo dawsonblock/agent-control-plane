@@ -62,7 +62,7 @@ class TestRealSbxE2E:
 
         assert SbxExecutor.check_installed() is True
 
-    def test_sbx_run_and_cleanup(
+    async def test_sbx_run_and_cleanup(
         self,
         sbx_available,  # pylint: disable=redefined-outer-name
         tmp_path,
@@ -90,7 +90,7 @@ class TestRealSbxE2E:
         artifact_dir.mkdir()
 
         # Start the sandbox.
-        result = executor.start(
+        result = await executor.start(
             task_id="task_e2e_test",
             prompt_path=prompt_path,
             repo_path=tmp_path,

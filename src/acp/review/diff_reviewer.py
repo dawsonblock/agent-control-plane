@@ -196,11 +196,15 @@ def _evaluate(
     if cfg.review.block_secret_leaks:
         use_th = getattr(cfg.review, "use_trufflehog", True)
         custom_regexes = _compile_custom_regexes(cfg.review.custom_secret_regexes)
+        # v0.8.1 (Phase 2.2): Pass custom regex metadata (including
+        # verify_endpoint) for HTTP-based secret verification.
+        custom_meta = cfg.review.custom_secret_regexes if cfg.review.custom_secret_regexes else None
         findings, scan_info = scan_diff(
             diff.patch,
             worktree_path=worktree_path,
             use_trufflehog=use_th,
             custom_regexes=custom_regexes,
+            custom_regex_meta=custom_meta,
         )
         if scan_info.get("degraded") == "true":
             engine.add(

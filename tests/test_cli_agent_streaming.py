@@ -74,12 +74,12 @@ def _write_script(tmp_path: Path, name: str, code: str) -> Path:
 class TestCLIAgentStreamingNormal:
     """Normal commands complete successfully via the streaming path."""
 
-    def test_simple_echo(self, tmp_path: Path) -> None:
+    async def test_simple_echo(self, tmp_path: Path) -> None:
         """A simple echo command completes via streaming."""
         script = _write_script(tmp_path, "echo.py", "print('hello streaming')\n")
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -89,7 +89,7 @@ class TestCLIAgentStreamingNormal:
         assert not result.aborted_by_sentinel
         assert "hello streaming" in (tmp_path / "artifacts" / "agent_stdout.txt").read_text()
 
-    def test_multi_line_output(self, tmp_path: Path) -> None:
+    async def test_multi_line_output(self, tmp_path: Path) -> None:
         """Multi-line output is captured completely via streaming."""
         script = _write_script(
             tmp_path,
@@ -98,7 +98,7 @@ class TestCLIAgentStreamingNormal:
         )
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -110,12 +110,12 @@ class TestCLIAgentStreamingNormal:
         assert "line2" in stdout
         assert "line3" in stdout
 
-    def test_nonzero_exit_propagated(self, tmp_path: Path) -> None:
+    async def test_nonzero_exit_propagated(self, tmp_path: Path) -> None:
         """A non-zero exit code is propagated through the streaming path."""
         script = _write_script(tmp_path, "exit42.py", "import sys\nsys.exit(42)\n")
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -128,7 +128,7 @@ class TestCLIAgentStreamingNormal:
 class TestCLIAgentStreamingSecretAbort:
     """Secret detection kills the agent via the streaming path."""
 
-    def test_aws_key_aborts(self, tmp_path: Path) -> None:
+    async def test_aws_key_aborts(self, tmp_path: Path) -> None:
         """An AWS key in agent output triggers a sentinel abort."""
         parts = ["AKIA", "IOSFODNN7EXAMPLE"]
         secret = "".join(parts)
@@ -139,7 +139,7 @@ class TestCLIAgentStreamingSecretAbort:
         )
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -152,12 +152,12 @@ class TestCLIAgentStreamingSecretAbort:
         stdout = (tmp_path / "artifacts" / "agent_stdout.txt").read_text()
         assert "working" in stdout
 
-    def test_private_key_aborts(self, tmp_path: Path) -> None:
+    async def test_private_key_aborts(self, tmp_path: Path) -> None:
         """A private key block in agent output triggers a sentinel abort."""
         script = _write_script(tmp_path, "pkey.py", "print('-----BEGIN RSA PRIVATE KEY-----')\n")
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -166,7 +166,7 @@ class TestCLIAgentStreamingSecretAbort:
         assert result.aborted_by_sentinel
         assert result.sentinel_abort_reason == "secret_detected"
 
-    def test_benign_output_not_aborted(self, tmp_path: Path) -> None:
+    async def test_benign_output_not_aborted(self, tmp_path: Path) -> None:
         """Output without secrets does not trigger an abort."""
         script = _write_script(
             tmp_path,
@@ -175,7 +175,7 @@ class TestCLIAgentStreamingSecretAbort:
         )
         cfg = _streaming_cfg(tmp_path, f"{sys.executable} {script}")
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -188,7 +188,7 @@ class TestCLIAgentStreamingSecretAbort:
 class TestCLIAgentStreamingStrangeLoopAbort:
     """Strange-loop detection kills the agent via the streaming path."""
 
-    def test_repeated_output_aborts(self, tmp_path: Path) -> None:
+    async def test_repeated_output_aborts(self, tmp_path: Path) -> None:
         """Repeated identical output triggers a strange-loop abort."""
         script = _write_script(
             tmp_path,
@@ -205,7 +205,7 @@ class TestCLIAgentStreamingStrangeLoopAbort:
             ),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -214,7 +214,7 @@ class TestCLIAgentStreamingStrangeLoopAbort:
         assert result.aborted_by_sentinel
         assert result.sentinel_abort_reason == "strange_loop"
 
-    def test_progressive_output_not_aborted(self, tmp_path: Path) -> None:
+    async def test_progressive_output_not_aborted(self, tmp_path: Path) -> None:
         """Progressive, non-repeating output does not trigger a loop abort."""
         script = _write_script(
             tmp_path,
@@ -230,7 +230,7 @@ class TestCLIAgentStreamingStrangeLoopAbort:
             ),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -243,7 +243,7 @@ class TestCLIAgentStreamingStrangeLoopAbort:
 class TestCLIAgentStreamingDangerousPathAbort:
     """Dangerous-path detection kills the agent via the streaming path."""
 
-    def test_dangerous_path_aborts(self, tmp_path: Path) -> None:
+    async def test_dangerous_path_aborts(self, tmp_path: Path) -> None:
         """A configured dangerous-path pattern triggers an abort."""
         script = _write_script(tmp_path, "danger.py", "print('Running: rm -rf / to clean up')\n")
         cfg = _streaming_cfg(
@@ -255,7 +255,7 @@ class TestCLIAgentStreamingDangerousPathAbort:
             ),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -268,7 +268,7 @@ class TestCLIAgentStreamingDangerousPathAbort:
 class TestCLIAgentStreamingEventWriter:
     """The event_writer receives stream.aborted events with valid hash chains."""
 
-    def test_stream_aborted_event_written(self, tmp_path: Path) -> None:
+    async def test_stream_aborted_event_written(self, tmp_path: Path) -> None:
         """A stream.aborted event is written to the event log on abort."""
         parts = ["AKIA", "IOSFODNN7EXAMPLE"]
         secret = "".join(parts)
@@ -282,7 +282,7 @@ class TestCLIAgentStreamingEventWriter:
         agent.event_writer = writer
         agent.task_id = "test-stream-1"
 
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -306,7 +306,7 @@ class TestCLIAgentStreamingEventWriter:
         # Verify the hash chain is intact.
         assert verify_event_chain(events), "hash chain broken by streaming event writes"
 
-    def test_no_event_writer_still_works(self, tmp_path: Path) -> None:
+    async def test_no_event_writer_still_works(self, tmp_path: Path) -> None:
         """CLIAgent streaming works without an event_writer (no events written)."""
         parts = ["AKIA", "IOSFODNN7EXAMPLE"]
         secret = "".join(parts)
@@ -316,7 +316,7 @@ class TestCLIAgentStreamingEventWriter:
         agent = CLIAgent(cfg)
         # Don't set event_writer — it defaults to None.
 
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -330,7 +330,7 @@ class TestCLIAgentStreamingEventWriter:
 class TestCLIAgentStreamingDisabled:
     """When streaming is disabled, the normal subprocess.run path is used."""
 
-    def test_disabled_uses_normal_path(self, tmp_path: Path) -> None:
+    async def test_disabled_uses_normal_path(self, tmp_path: Path) -> None:
         """Streaming disabled falls back to subprocess.run."""
         script = _write_script(tmp_path, "normal.py", "print('normal path')\n")
         cfg = _streaming_cfg(
@@ -339,7 +339,7 @@ class TestCLIAgentStreamingDisabled:
             streaming=StreamingSection(enabled=False),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -350,7 +350,7 @@ class TestCLIAgentStreamingDisabled:
         # The summary should NOT say "streaming" — it's the normal path.
         assert "streaming" not in result.summary.lower()
 
-    def test_disabled_does_not_detect_secrets(self, tmp_path: Path) -> None:
+    async def test_disabled_does_not_detect_secrets(self, tmp_path: Path) -> None:
         """When streaming is disabled, secrets in output are NOT caught mid-stream.
 
         The post-run review_diff scanner will still catch them, but the
@@ -365,7 +365,7 @@ class TestCLIAgentStreamingDisabled:
             streaming=StreamingSection(enabled=False),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",
@@ -379,7 +379,7 @@ class TestCLIAgentStreamingDisabled:
 class TestCLIAgentStreamingCustomRegex:
     """Custom secret regexes from the review config are used by the sentinel."""
 
-    def test_custom_regex_aborts(self, tmp_path: Path) -> None:
+    async def test_custom_regex_aborts(self, tmp_path: Path) -> None:
         """A custom secret regex from review config triggers a sentinel abort."""
         script = _write_script(
             tmp_path,
@@ -394,7 +394,7 @@ class TestCLIAgentStreamingCustomRegex:
             ),
         )
         agent = CLIAgent(cfg)
-        result = agent.run(
+        result = await agent.run(
             prompt_path=tmp_path / "prompt.txt",
             worktree_path=tmp_path,
             artifact_dir=tmp_path / "artifacts",

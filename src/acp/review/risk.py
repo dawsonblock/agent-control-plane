@@ -15,12 +15,12 @@ reviewer grew into.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from acp.models import Recommendation, RiskLevel
 
 
-class RiskCategory(str, Enum):
+class RiskCategory(StrEnum):
     """Why a signal was raised. Surfaced in review.json for filtering/audit."""
 
     QUANTITY = "quantity"

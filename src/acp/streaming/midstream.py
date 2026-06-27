@@ -199,7 +199,7 @@ class StreamSentinel:
             return
 
         try:
-            import numpy as np  # type: ignore[import-not-found]
+            import numpy as np
 
             embedding = self._semantic_model.encode(chunk, show_progress_bar=False)
             self._semantic_embeddings.append(embedding)

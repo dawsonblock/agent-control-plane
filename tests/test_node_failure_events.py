@@ -34,7 +34,7 @@ def _config(repo_path: Path) -> RepoConfig:
     )
 
 
-def test_node_error_handler_writes_node_failed_event(disposable_repo, isolated_workspace):
+async def test_node_error_handler_writes_node_failed_event(disposable_repo, isolated_workspace):
     """When node_error_handler catches an exception, node.failed event must exist."""
     store = TaskStore(runs_root=Path(isolated_workspace["runs_root"]) / "fail_evt")
     events = EventWriter("__pending__", store.root / "__pending__")
@@ -44,7 +44,7 @@ def test_node_error_handler_writes_node_failed_event(disposable_repo, isolated_w
     graph = _build_minimal_graph_with_broken_node(ctx)
 
     state = {"config": _config(disposable_repo.path), "user_request": "test"}
-    result = graph.invoke(state, config={"configurable": {"thread_id": "acp-fail-evt"}})
+    result = await graph.ainvoke(state, config={"configurable": {"thread_id": "acp-fail-evt"}})
 
     assert result.get("status") == TaskStatus.FAILED
 
@@ -58,7 +58,7 @@ def test_node_error_handler_writes_node_failed_event(disposable_repo, isolated_w
         assert "intentional node crash" in payload.get("message", "")
 
 
-def test_node_error_handler_sets_status_failed(disposable_repo, isolated_workspace):
+async def test_node_error_handler_sets_status_failed(disposable_repo, isolated_workspace):
     """When node_error_handler catches an exception, status must be FAILED."""
     store = TaskStore(runs_root=Path(isolated_workspace["runs_root"]) / "fail_st")
     events = EventWriter("__pending__", store.root / "__pending__")
@@ -68,7 +68,7 @@ def test_node_error_handler_sets_status_failed(disposable_repo, isolated_workspa
     graph = _build_minimal_graph_with_broken_node(ctx)
 
     state = {"config": _config(disposable_repo.path), "user_request": "test"}
-    result = graph.invoke(state, config={"configurable": {"thread_id": "acp-fail-st"}})
+    result = await graph.ainvoke(state, config={"configurable": {"thread_id": "acp-fail-st"}})
 
     assert result.get("status") == TaskStatus.FAILED, f"expected FAILED, got {result.get('status')}"
     error = result.get("error", "")
@@ -78,16 +78,19 @@ def test_node_error_handler_sets_status_failed(disposable_repo, isolated_workspa
 def _build_minimal_graph_with_broken_node(ctx: NodeContext) -> Any:
     """Build a minimal graph with a node that always raises."""
 
-    def broken_node(state: dict[str, Any], _ctx: NodeContext) -> dict[str, Any]:
+    async def broken_node(state: dict[str, Any], _ctx: NodeContext) -> dict[str, Any]:
         msg = "intentional node crash for test"
         raise RuntimeError(msg)
 
     # Wrap broken_node with the same error handler used by the real workflow.
     wrapped = partial(node_error_handler(broken_node), ctx=ctx)
 
+    async def done_node(state: dict[str, Any]) -> dict[str, Any]:
+        return state
+
     g = StateGraph(ACPState)
     g.add_node("broken", wrapped)
-    g.add_node("done", lambda s: s)
+    g.add_node("done", done_node)
     g.add_edge(START, "broken")
     g.add_conditional_edges(
         "broken", lambda s: "done" if s.get("status") != TaskStatus.FAILED else END
@@ -96,7 +99,7 @@ def _build_minimal_graph_with_broken_node(ctx: NodeContext) -> Any:
     return g.compile(checkpointer=MemorySaver())
 
 
-def test_node_failure_writes_node_failed_event_directly(disposable_repo, isolated_workspace):
+async def test_node_failure_writes_node_failed_event_directly(disposable_repo, isolated_workspace):
     """When node_error_handler catches an exception, node.failed is written."""
     store = TaskStore(runs_root=Path(isolated_workspace["runs_root"]) / "direct_fail")
     events = EventWriter("__pending__", store.root / "__pending__")
@@ -106,7 +109,7 @@ def test_node_failure_writes_node_failed_event_directly(disposable_repo, isolate
     graph = _build_minimal_graph_with_broken_node(ctx)
 
     state = {"config": _config(disposable_repo.path), "user_request": "test"}
-    result = graph.invoke(state, config={"configurable": {"thread_id": "acp-direct-fail"}})
+    result = await graph.ainvoke(state, config={"configurable": {"thread_id": "acp-direct-fail"}})
 
     assert result.get("status") == TaskStatus.FAILED
     assert "intentional node crash" in (result.get("error") or "")

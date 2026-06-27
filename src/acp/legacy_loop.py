@@ -202,11 +202,19 @@ class EvidenceLoop:
             EventType.AGENT_STARTED,
             {"agent": agent.name, "timeout_seconds": cfg.agent.timeout_seconds},
         )
-        agent_result = agent.run(
-            prompt_path=prompt_path,
-            worktree_path=worktree_path,
-            artifact_dir=artifacts,
-            timeout_seconds=cfg.agent.timeout_seconds,
+        # v0.8.0: agent.run() is now async. The legacy loop is sync, so we
+        # use asyncio.run() to drive the coroutine. This is safe because the
+        # legacy loop is quarantined (test-only) and never runs inside an
+        # existing event loop.
+        import asyncio
+
+        agent_result = asyncio.run(
+            agent.run(
+                prompt_path=prompt_path,
+                worktree_path=worktree_path,
+                artifact_dir=artifacts,
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
         )
         events.write(
             EventType.AGENT_FINISHED,

@@ -16,14 +16,14 @@ around this module. All new code should call ``evaluate_final_gates`` directly.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
 from acp.models import CommandResult, ReviewResult
 
 
-class GateOutcome(str, Enum):
+class GateOutcome(StrEnum):
     """Three possible gate outcomes."""
 
     PASSED = "passed"

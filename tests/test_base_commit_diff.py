@@ -29,7 +29,7 @@ def _config(repo_path: Path) -> RepoConfig:
     )
 
 
-def _run_graph(
+async def _run_graph(
     repo_path: Path,
     runs_root: Path,
     vault_root: Path,
@@ -45,7 +45,7 @@ def _run_graph(
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-test"}})
     return result, store
 
 
@@ -60,9 +60,9 @@ def _events(store: TaskStore, task_id: str) -> list[dict]:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
+async def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
     """Task.base_commit_sha must be non-empty after worktree creation."""
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha",
         isolated_workspace["vault_root"],
@@ -73,9 +73,9 @@ def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
     assert len(task.base_commit_sha) == 40, f"expected 40-char SHA, got {len(task.base_commit_sha)}"
 
 
-def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolated_workspace):
+async def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolated_workspace):
     """The worktree.created event must carry base_commit_sha."""
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha_event",
         isolated_workspace["vault_root"],
@@ -93,7 +93,7 @@ def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolat
     )
 
 
-def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_workspace):
+async def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_workspace):
     """Diff must compare against the recorded base SHA, not a moving branch tip.
 
     Scenario:
@@ -110,7 +110,7 @@ def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_work
         check=True,
     ).stdout.strip()
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha_diff",
         isolated_workspace["vault_root"],

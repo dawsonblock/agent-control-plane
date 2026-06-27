@@ -60,7 +60,7 @@ _EXPECTED_EVENTS = [
 ]
 
 
-def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
+async def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
     """Full ACP run against a controlled repo — all invariants hold."""
     repo = disposable_repo
     runs = isolated_workspace["runs_root"]
@@ -76,7 +76,7 @@ def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
         vault_root=vault,
         runs_root=runs,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "dogfood"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "dogfood"}})
 
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)
@@ -139,7 +139,7 @@ def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
     assert result["status"] == TaskStatus.PASSED
 
 
-def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
+async def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
     """Failing test → FAILED, but all evidence invariants still hold."""
     repo = disposable_repo
     runs = isolated_workspace["runs_root"]
@@ -161,7 +161,7 @@ def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
         vault_root=vault,
         runs_root=runs,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "dogfood-fail"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "dogfood-fail"}})
 
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)

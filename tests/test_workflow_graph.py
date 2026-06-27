@@ -40,7 +40,7 @@ def _config(
     )
 
 
-def _run_graph(
+async def _run_graph(
     repo_path: Path,
     runs_root: Path,
     vault_root: Path,
@@ -62,7 +62,7 @@ def _run_graph(
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-test"}})
     return result, store
 
 
@@ -85,8 +85,8 @@ def _main_head(repo_path: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
-    result, store = _run_graph(
+async def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -128,13 +128,15 @@ def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, isolated_workspace):
+async def test_graph_failing_test_reaches_failed_but_writes_report(
+    disposable_repo, isolated_workspace
+):
     """The M3 gate: a failed task still writes a report (with repair disabled).
 
     Pinned to max_repair_attempts=0 so this exercises the no-repair path —
     M4's repair behavior has its own dedicated tests.
     """
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -163,12 +165,12 @@ def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, is
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_workspace):
+async def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_workspace):
     """Dirty repo → failed node, no worktree created, main untouched."""
     # Dirty the repo.
     (disposable_repo.path / "README.md").write_text("# dirty\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -190,7 +192,7 @@ def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_worksp
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_workspace):
+async def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_workspace):
     """The graph refactor didn't change what the run produces — same artifact set."""
     from acp.legacy_loop import EvidenceLoop
 
@@ -199,15 +201,19 @@ def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_
     vault = isolated_workspace["vault_root"]
 
     # Graph run.
-    g_result, g_store = _run_graph(repo.path, runs / "graph", vault / "graph")
+    g_result, g_store = await _run_graph(repo.path, runs / "graph", vault / "graph")
     # Legacy run (separate repo branch sequence so they don't collide).
+    # v0.8.0: legacy.run() uses asyncio.run() internally, which can't be
+    # called from within an async test — run it in a thread.
+    import asyncio
+
     legacy = EvidenceLoop(
         config=_config(repo.path),
         user_request="legacy task",
         store=TaskStore(runs_root=runs / "legacy"),
         vault_root=vault / "legacy",
     )
-    l_result = legacy.run()
+    l_result = await asyncio.to_thread(legacy.run)
 
     # Both produced the same artifact set.
     g_arts = {p.name for p in g_store.artifacts_dir(g_result["task_id"]).iterdir() if p.is_file()}

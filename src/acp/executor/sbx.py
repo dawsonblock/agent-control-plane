@@ -29,6 +29,7 @@ See: https://docs.docker.com/ai/sandboxes/get-started/
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import time
@@ -170,7 +171,7 @@ class SbxExecutor:
     # Start the sandbox + run the agent
     # ------------------------------------------------------------------ #
 
-    def start(
+    async def start(
         self,
         *,
         task_id: str,
@@ -220,14 +221,14 @@ class SbxExecutor:
 
         start = time.monotonic()
         try:
-            # v0.7.4: Stream stdout/stderr directly to files instead of
-            # capturing into memory. Uses Popen with stdin pipe to pass
-            # the prompt content, and file handles for stdout/stderr.
+            # v0.8.0: Use asyncio.to_thread to run the blocking subprocess
+            # in a thread pool, keeping the event loop free.
             with (
                 open(stdout_path, "w") as stdout_f,
                 open(stderr_path, "w") as stderr_f,
             ):
-                proc = subprocess.run(
+                proc = await asyncio.to_thread(
+                    subprocess.run,
                     cmd,
                     cwd=str(repo_path),
                     input=prompt_content,
