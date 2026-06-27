@@ -27,14 +27,20 @@ import pytest
 from typer.testing import CliRunner
 
 from acp.cli import app
-from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    EvidenceSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
+from acp.events import EventWriter
 from acp.evidence.durable_store import DurableEventStore
 from acp.evidence.manifest import verify_evidence_manifest
-from acp.events import EventWriter
 from acp.graph.workflow import run_workflow
 from acp.models import Event, EventType
 from acp.store import TaskStore
-
 
 runner = CliRunner()
 
@@ -109,7 +115,10 @@ def test_durable_store_old_schema_migration(tmp_path):
             signature TEXT DEFAULT ''
         )
     """)
-    conn.execute("INSERT INTO events VALUES ('evt_000001', 'task_1', 'task.created', '2024-01-01', '{}', '', 'h1', '')")
+    conn.execute(
+        "INSERT INTO events VALUES ('evt_000001', 'task_1', 'task.created', "
+        "'2024-01-01', '{}', '', 'h1', '')"
+    )
     conn.commit()
     conn.close()
 
@@ -174,7 +183,9 @@ def test_tampered_artifact_breaks_verification(disposable_repo, isolated_workspa
 
     # Tamper with an artifact file.
     artifacts_dir = run_dir / "artifacts"
-    artifact_files = [p for p in artifacts_dir.rglob("*") if p.is_file() and p.name != "final_report.md"]
+    artifact_files = [
+        p for p in artifacts_dir.rglob("*") if p.is_file() and p.name != "final_report.md"
+    ]
     assert artifact_files, "expected at least one artifact file"
     target = artifact_files[0]
     original = target.read_bytes()
@@ -189,6 +200,7 @@ def test_tampered_artifact_breaks_verification(disposable_repo, isolated_workspa
     manifest = json.loads(manifest_path.read_text())
     rel = str(target.relative_to(run_dir))
     import hashlib
+
     h = hashlib.sha256()
     with target.open("rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -255,10 +267,16 @@ def test_transplanted_run_directory_rejected(disposable_repo, isolated_workspace
     run_dir = store.run_dir(task_id)
 
     # Verify passes for the correct task_id.
-    r0 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r0 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r0.exit_code == 0
 
     # Copy to a different task_id directory.
@@ -267,10 +285,16 @@ def test_transplanted_run_directory_rejected(disposable_repo, isolated_workspace
     shutil.copytree(run_dir, fake_run_dir)
 
     # Verify fails — the events have the original task_id, not the fake one.
-    r1 = runner.invoke(app, [
-        "verify", "--task", fake_task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            fake_task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r1.exit_code == 1
     assert "mismatch" in r1.output.lower()
 
@@ -295,10 +319,16 @@ def test_task_json_mismatch_rejected(disposable_repo, isolated_workspace):
     task_json["task_id"] = "task_20260624_XXXX"
     task_json_path.write_text(json.dumps(task_json, indent=2))
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1
     assert "mismatch" in r.output.lower()
 
@@ -334,11 +364,18 @@ def test_report_rerendered_after_approval(disposable_repo, isolated_workspace):
             note_path = p
             break
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code == 0, f"approve failed: {r.output}"
 
     # The manifest hash should have changed (new event in the chain).
@@ -349,8 +386,9 @@ def test_report_rerendered_after_approval(disposable_repo, isolated_workspace):
     report_path = run_dir / "artifacts" / "final_report.md"
     report = report_path.read_text()
     assert hash_after in report, "report should contain the updated manifest hash"
-    assert hash_before not in report or hash_before == hash_after, \
+    assert hash_before not in report or hash_before == hash_after, (
         "report should not contain the stale manifest hash"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -375,10 +413,16 @@ def test_malformed_event_log_clean_error(disposable_repo, isolated_workspace):
     events_path = store.events_path(task_id)
     events_path.write_text(events_path.read_text() + "THIS IS NOT JSON\n")
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1
     assert "malformed" in r.output.lower()
     # No traceback — the output should not contain Python traceback markers.
@@ -404,10 +448,16 @@ def test_malformed_manifest_clean_error(disposable_repo, isolated_workspace):
     manifest_path = run_dir / "evidence_manifest.json"
     manifest_path.write_text("THIS IS NOT JSON\n")
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1
     assert "Traceback" not in r.output
 
@@ -437,18 +487,27 @@ commands:
 review: {{}}
 """)
 
-    r = runner.invoke(app, [
-        "run", "--config", str(config_path),
-        "--task", "test task",
-        "--runs-root", str(custom_runs_root),
-        "--vault", str(tmp_path / "vault"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(config_path),
+            "--task",
+            "test task",
+            "--runs-root",
+            str(custom_runs_root),
+            "--vault",
+            str(tmp_path / "vault"),
+        ],
+    )
     assert r.exit_code == 0, f"run failed: {r.output}"
     assert custom_runs_root.is_dir(), "runs-root directory should be created"
     # The run directory should be under custom_runs_root, not data/runs.
     run_dirs = list(custom_runs_root.iterdir())
-    assert any(d.name.startswith("task_") for d in run_dirs), \
+    assert any(d.name.startswith("task_") for d in run_dirs), (
         "expected a task directory under custom_runs_root"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -619,11 +678,18 @@ def test_verify_fails_if_signed_run_contains_unsigned_lifecycle_event(
     task_id = result["task_id"]
 
     # Verify with public key passes before any tampering.
-    r0 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--public-key", str(pub_key_path),
-    ])
+    r0 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--public-key",
+            str(pub_key_path),
+        ],
+    )
     assert r0.exit_code == 0, f"verify before tampering failed: {r0.output}"
 
     # Tamper: append an unsigned event to the event log.
@@ -646,11 +712,18 @@ def test_verify_fails_if_signed_run_contains_unsigned_lifecycle_event(
         f.write(json.dumps(fake_event) + "\n")
 
     # Verify with public key must fail — the unsigned event breaks signatures.
-    r1 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--public-key", str(pub_key_path),
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--public-key",
+            str(pub_key_path),
+        ],
+    )
     assert r1.exit_code == 1, f"verify should fail with unsigned event: {r1.output}"
 
 
@@ -677,19 +750,31 @@ def test_verify_debug_flag_shows_traceback(disposable_repo, isolated_workspace):
     events_path.write_text("{{{{NOT JSON}}}}\n")
 
     # Without --debug: clean error.
-    r0 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r0 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r0.exit_code == 1
     assert "malformed" in r0.output.lower()
 
     # With --debug: may show traceback (at least doesn't crash differently).
-    r1 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--debug",
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--debug",
+        ],
+    )
     assert r1.exit_code == 1
 
 
@@ -717,11 +802,18 @@ def test_approval_creates_lifecycle_manifest(disposable_repo, isolated_workspace
     assert not lifecycle_path.is_file()
 
     # Approve.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code == 0, f"approve failed: {r.output}"
 
     # Lifecycle manifest should now exist.
@@ -744,18 +836,31 @@ def test_verify_reports_lifecycle_manifest_valid(disposable_repo, isolated_works
     task_id = result["task_id"]
 
     # Approve to create lifecycle manifest.
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code == 0
 
     # Verify should report lifecycle manifest valid.
-    r2 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r2.exit_code == 0
     assert "lifecycle manifest valid" in r2.output
     assert "approved" in r2.output.lower()
@@ -787,6 +892,7 @@ def test_verify_rejects_unknown_manifest_major_version(disposable_repo, isolated
     # Recompute manifest_hash to match.
     manifest.pop("manifest_hash")
     import hashlib
+
     manifest["manifest_hash"] = hashlib.sha256(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -837,8 +943,9 @@ def test_event_ids_are_monotonic_per_task(disposable_repo, isolated_workspace):
     events = _events(store, task_id)
 
     for i, evt in enumerate(events, 1):
-        assert evt.event_id == f"evt_{i:06d}", \
+        assert evt.event_id == f"evt_{i:06d}", (
             f"event {i} has id {evt.event_id}, expected evt_{i:06d}"
+        )
 
 
 def test_event_prev_hash_links_to_previous_hash(disposable_repo, isolated_workspace):
@@ -857,8 +964,9 @@ def test_event_prev_hash_links_to_previous_hash(disposable_repo, isolated_worksp
 
     assert events[0].prev_hash == "GENESIS"
     for i in range(1, len(events)):
-        assert events[i].prev_hash == events[i - 1].hash, \
-            f"event {i} prev_hash doesn't match event {i-1} hash"
+        assert events[i].prev_hash == events[i - 1].hash, (
+            f"event {i} prev_hash doesn't match event {i - 1} hash"
+        )
 
 
 # --------------------------------------------------------------------------- #

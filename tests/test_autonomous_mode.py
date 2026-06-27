@@ -26,7 +26,6 @@ from git import Repo
 from acp.config import AgentSection, RepoConfig, RepoSection, ReviewSection
 from acp.models import EventType, Task, TaskStatus
 
-
 # --------------------------------------------------------------------------- #
 # 1. Config fields
 # --------------------------------------------------------------------------- #
@@ -168,7 +167,7 @@ class TestAutoApproveNode:
             review=review,
         )
 
-    def test_auto_approve_writes_event(self, tmp_path):
+    async def test_auto_approve_writes_event(self, tmp_path):
         """auto_approve_node writes auto.approved when enabled."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -193,21 +192,24 @@ class TestAutoApproveNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # A real run has a full event chain by auto-approve time; establish a
+        # valid chain so the integrity gate passes and the approval proceeds.
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result.get("auto_approved") is True
         assert result.get("status") == TaskStatus.APPROVED
 
         all_events = events.read_all()
-        assert len(all_events) == 1
-        assert all_events[0].type == EventType.AUTO_APPROVED
-        assert all_events[0].payload["approver"] == "ACP-Autonomous-Bot"
+        assert any(e.type == EventType.AUTO_APPROVED for e in all_events)
+        approved = [e for e in all_events if e.type == EventType.AUTO_APPROVED]
+        assert approved[0].payload["approver"] == "ACP-Autonomous-Bot"
 
-    def test_auto_approve_noop_when_disabled(self, tmp_path):
+    async def test_auto_approve_noop_when_disabled(self, tmp_path):
         """auto_approve_node is a no-op when autonomous_mode is False."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_approve_node
@@ -234,10 +236,54 @@ class TestAutoApproveNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result == {}
         assert len(events.read_all()) == 0
+
+    async def test_auto_approve_refused_on_broken_event_chain(
+        self,
+        tmp_path,
+    ):
+        """auto_approve_node refuses when the event chain is empty/broken.
+
+        Integrity gate: a task with no tamper-proof audit trail may not
+        be auto-approved. An empty event chain fails verify_event_chain
+        and the task is downgraded to NEEDS_REVIEW.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
+        from acp.store import TaskStore
+
+        cfg = self._make_config(autonomous_mode=True)
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=tmp_path / "repo",
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test request",
+            status=TaskStatus.PASSED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        # No events written — empty chain fails verify_event_chain.
+
+        ctx = NodeContext(store=store, events=events)
+        state = {"config": cfg, "task": task}
+
+        result = await auto_approve_node(state, ctx)
+
+        assert result.get("auto_approved") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "event chain verification" in result.get("error", "")
 
 
 # --------------------------------------------------------------------------- #
@@ -248,7 +294,7 @@ class TestAutoApproveNode:
 class TestAutoMergeNode:
     """auto_merge_node merges and writes auto.merged event."""
 
-    def test_auto_merge_writes_event(self, tmp_path):
+    async def test_auto_merge_writes_event(self, tmp_path):
         """auto_merge_node writes auto.merged on success."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
@@ -271,7 +317,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -295,6 +343,9 @@ class TestAutoMergeNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # A real run has a full event chain by auto-merge time; establish a
+        # valid chain so the integrity gate passes and the merge proceeds.
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -303,7 +354,7 @@ class TestAutoMergeNode:
             "repo_path": repo_path,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is True
         assert "merge_commit_sha" in result
@@ -311,7 +362,7 @@ class TestAutoMergeNode:
         all_events = events.read_all()
         assert any(e.type == EventType.AUTO_MERGED for e in all_events)
 
-    def test_auto_merge_noop_when_disabled(self, tmp_path):
+    async def test_auto_merge_noop_when_disabled(self, tmp_path):
         """auto_merge_node is a no-op when auto_merge is False."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, auto_merge_node
@@ -341,11 +392,12 @@ class TestAutoMergeNode:
         ctx = NodeContext(store=store, events=events)
         state = {"config": cfg, "task": task}
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
         assert result == {}
 
-    def test_auto_merge_conflict_downgrades_to_needs_review(
-        self, tmp_path,
+    async def test_auto_merge_conflict_downgrades_to_needs_review(
+        self,
+        tmp_path,
     ):
         """auto_merge_node downgrades to NEEDS_REVIEW on conflict."""
         from acp.events import EventWriter
@@ -376,7 +428,9 @@ class TestAutoMergeNode:
 
         cfg = RepoConfig(
             repo=RepoSection(
-                name="test", path=repo_path, default_branch="main",
+                name="test",
+                path=repo_path,
+                default_branch="main",
             ),
             review=ReviewSection(
                 autonomous_mode=True,
@@ -401,6 +455,9 @@ class TestAutoMergeNode:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter("task_001", run_dir)
+        # Establish a valid chain so the integrity gate passes and the
+        # conflict is actually exercised (not short-circuited).
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -409,10 +466,283 @@ class TestAutoMergeNode:
             "repo_path": repo_path,
         }
 
-        result = auto_merge_node(state, ctx)
+        result = await auto_merge_node(state, ctx)
 
         assert result.get("auto_merged") is False
         assert result.get("status") == TaskStatus.NEEDS_REVIEW
+
+    async def test_auto_merge_refused_on_high_risk(self, tmp_path):
+        """auto_merge_node refuses when review risk exceeds auto_merge_max_risk.
+
+        Human firewall: a HIGH-risk change (database, secrets, auth) may
+        not be auto-merged to the default branch — a human must click
+        approved: true first. The refusal writes an auto.merge.refused
+        event and downgrades to NEEDS_REVIEW.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import Recommendation, ReviewResult, RiskLevel
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test",
+                path=repo_path,
+                default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+                auto_merge_max_risk=RiskLevel.MEDIUM,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        review = ReviewResult(
+            risk=RiskLevel.HIGH,
+            recommendation=Recommendation.MERGE,
+            concerns=["high-risk change"],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = await auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "exceeds auto_merge_max_risk" in result.get("error", "")
+
+        # The refusal is recorded in the event log.
+        all_events = events.read_all()
+        refused = [e for e in all_events if e.type == EventType.AUTO_MERGE_REFUSED]
+        assert len(refused) == 1
+        assert refused[0].payload["reason"] == "risk_exceeds_max"
+        assert refused[0].payload["review_risk"] == "high"
+
+        # And no auto.merged event was written.
+        merged = [e for e in all_events if e.type == EventType.AUTO_MERGED]
+        assert len(merged) == 0
+
+        # The merge must NOT have happened — feature.py is not on main.
+        repo = Repo(str(repo_path))
+        repo.git.checkout("main")
+        assert not (repo_path / "feature.py").exists()
+
+    async def test_auto_merge_allowed_when_risk_at_ceiling(self, tmp_path):
+        """auto_merge proceeds when review risk equals auto_merge_max_risk.
+
+        MEDIUM risk with auto_merge_max_risk=MEDIUM is allowed (not
+        strictly above the ceiling). This confirms the boundary.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import Recommendation, ReviewResult, RiskLevel
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test",
+                path=repo_path,
+                default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+                auto_merge_max_risk=RiskLevel.MEDIUM,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        review = ReviewResult(
+            risk=RiskLevel.MEDIUM,
+            recommendation=Recommendation.MERGE,
+            concerns=[],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = await auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is True
+        all_events = events.read_all()
+        assert any(e.type == EventType.AUTO_MERGED for e in all_events)
+
+    async def test_auto_merge_refused_on_broken_event_chain(self, tmp_path):
+        """auto_merge_node refuses when the event chain is tampered/broken.
+
+        Integrity gate: a task with no tamper-proof audit trail may not
+        reach the default branch autonomously. We corrupt the chain by
+        rewriting an event's hash so verify_event_chain fails.
+        """
+        from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_merge_node
+        from acp.models import Recommendation, ReviewResult, RiskLevel
+        from acp.store import TaskStore
+
+        repo_path = tmp_path / "repo"
+        repo = Repo.init(str(repo_path))
+        repo.git.config("user.email", "test@acp.local")
+        repo.git.config("user.name", "ACP Test")
+        (repo_path / "README.md").write_text("# base\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "base")
+        repo.git.branch("-M", "main")
+        repo.git.checkout("-b", "agent/task_001")
+        (repo_path / "feature.py").write_text("print('hi')\n")
+        repo.git.add(".")
+        repo.git.commit("-m", "feature")
+        repo.git.checkout("main")
+
+        cfg = RepoConfig(
+            repo=RepoSection(
+                name="test",
+                path=repo_path,
+                default_branch="main",
+            ),
+            review=ReviewSection(
+                autonomous_mode=True,
+                auto_merge=True,
+            ),
+        )
+        task = Task(
+            task_id="task_001",
+            repo_name="test",
+            repo_path=repo_path,
+            base_branch="main",
+            task_branch="agent/task_001",
+            worktree_path=tmp_path / "worktree",
+            user_request="test",
+            status=TaskStatus.APPROVED,
+        )
+
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        store = TaskStore(runs_root=runs_root)
+        run_dir = store.run_dir("task_001")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store.save(task)
+        events = EventWriter("task_001", run_dir)
+        events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
+
+        # Corrupt the event log: rewrite the hash so the chain breaks.
+        log_path = run_dir / "events.jsonl"
+        lines = log_path.read_text().splitlines()
+        import json as _json
+
+        first = _json.loads(lines[0])
+        first["hash"] = "0" * 64  # bogus hash
+        log_path.write_text(_json.dumps(first) + "\n")
+
+        review = ReviewResult(
+            risk=RiskLevel.LOW,
+            recommendation=Recommendation.MERGE,
+            concerns=[],
+            hard_block=False,
+        )
+
+        ctx = NodeContext(store=store, events=events)
+        state = {
+            "config": cfg,
+            "task": task,
+            "repo_path": repo_path,
+            "review_result": review,
+        }
+
+        result = await auto_merge_node(state, ctx)
+
+        assert result.get("auto_merged") is False
+        assert result.get("status") == TaskStatus.NEEDS_REVIEW
+        assert "event chain verification failed" in result.get("error", "")
+
+        all_events = events.read_all()
+        refused = [e for e in all_events if e.type == EventType.AUTO_MERGE_REFUSED]
+        # The refusal event is appended after the corrupted line.
+        assert any(r.payload["reason"] == "event_chain_broken" for r in refused)
+        merged = [e for e in all_events if e.type == EventType.AUTO_MERGED]
+        assert len(merged) == 0
+
+        # The merge must NOT have happened.
+        repo = Repo(str(repo_path))
+        repo.git.checkout("main")
+        assert not (repo_path / "feature.py").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -729,10 +1059,12 @@ class TestTestsMissingPrompt:
         assert "Write unit tests" in content
         assert "Test generation attempt" in content
 
-    def test_tests_missing_event_written(self, tmp_path):
+    async def test_tests_missing_event_written(self, tmp_path):
         """repair_plan_node writes TEST_GENERATION_ATTEMPTED when tests_missing."""
         from acp.config import (
-            AgentSection, RepoConfig, RepoSection,
+            AgentSection,
+            RepoConfig,
+            RepoSection,
         )
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, repair_plan_node
@@ -784,7 +1116,7 @@ class TestTestsMissingPrompt:
             "review_result": review,
         }
 
-        repair_plan_node(state, ctx)
+        await repair_plan_node(state, ctx)
 
         all_events = events.read_all()
         types = [e.type for e in all_events]
@@ -804,10 +1136,10 @@ class TestAutoEventEvidenceClassification:
         """auto.approved after evidence.finalized doesn't break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
+            _sha256_file,
             build_evidence_manifest,
             compute_artifact_content_hash,
             verify_evidence_manifest,
-            _sha256_file,
         )
 
         run_dir = tmp_path / "run"
@@ -818,30 +1150,43 @@ class TestAutoEventEvidenceClassification:
 
         events = EventWriter("task_001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
-        events.write(EventType.SANDBOX_CONFIGURED, {
-            "sandbox_name": "acp-test",
-            "executor": {
-                "network_policy": "locked_down",
-                "clone_mode": True,
+        events.write(
+            EventType.SANDBOX_CONFIGURED,
+            {
+                "sandbox_name": "acp-test",
+                "executor": {
+                    "network_policy": "locked_down",
+                    "clone_mode": True,
+                },
             },
-        })
+        )
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {
-            "artifact_content_hash": real_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_FINALIZED,
+            {
+                "artifact_content_hash": real_hash,
+            },
+        )
         report_hash = _sha256_file(
             artifacts_dir / "final_report.md",
         )
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {
-            "report_hash": report_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_REPORT_BOUND,
+            {
+                "report_hash": report_hash,
+            },
+        )
         # auto.approved AFTER finalization.
-        events.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
+        events.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
 
         manifest = build_evidence_manifest(
-            run_dir=run_dir, events_writer=events,
+            run_dir=run_dir,
+            events_writer=events,
         )
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -853,10 +1198,10 @@ class TestAutoEventEvidenceClassification:
         """auto.merged after evidence.finalized doesn't break verify."""
         from acp.events import EventWriter
         from acp.evidence.manifest import (
+            _sha256_file,
             build_evidence_manifest,
             compute_artifact_content_hash,
             verify_evidence_manifest,
-            _sha256_file,
         )
 
         run_dir = tmp_path / "run"
@@ -867,32 +1212,48 @@ class TestAutoEventEvidenceClassification:
 
         events = EventWriter("task_001", run_dir)
         events.write(EventType.TASK_CREATED, {"task_id": "task_001"})
-        events.write(EventType.SANDBOX_CONFIGURED, {
-            "sandbox_name": "acp-test",
-            "executor": {
-                "network_policy": "locked_down",
-                "clone_mode": True,
+        events.write(
+            EventType.SANDBOX_CONFIGURED,
+            {
+                "sandbox_name": "acp-test",
+                "executor": {
+                    "network_policy": "locked_down",
+                    "clone_mode": True,
+                },
             },
-        })
+        )
         real_hash = compute_artifact_content_hash(run_dir)
-        events.write(EventType.EVIDENCE_FINALIZED, {
-            "artifact_content_hash": real_hash,
-        })
+        events.write(
+            EventType.EVIDENCE_FINALIZED,
+            {
+                "artifact_content_hash": real_hash,
+            },
+        )
         report_hash = _sha256_file(
             artifacts_dir / "final_report.md",
         )
-        events.write(EventType.EVIDENCE_REPORT_BOUND, {
-            "report_hash": report_hash,
-        })
-        events.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
-        events.write(EventType.AUTO_MERGED, {
-            "merge_commit_sha": "abc123",
-        })
+        events.write(
+            EventType.EVIDENCE_REPORT_BOUND,
+            {
+                "report_hash": report_hash,
+            },
+        )
+        events.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
+        events.write(
+            EventType.AUTO_MERGED,
+            {
+                "merge_commit_sha": "abc123",
+            },
+        )
 
         manifest = build_evidence_manifest(
-            run_dir=run_dir, events_writer=events,
+            run_dir=run_dir,
+            events_writer=events,
         )
         manifest_path = run_dir / "evidence_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -952,7 +1313,10 @@ class TestVaultNoteAutoApproved:
         from acp.events import EventWriter
         from acp.gitops.diff import DiffCapture
         from acp.models import (
-            Recommendation, ReviewResult, RiskLevel, Task,
+            Recommendation,
+            ReviewResult,
+            RiskLevel,
+            Task,
         )
         from acp.vault.obsidian_writer import rerender_vault_note
 
@@ -986,9 +1350,12 @@ class TestVaultNoteAutoApproved:
         run_dir.mkdir()
         events_writer = EventWriter("task_001", run_dir)
         events_writer.write(EventType.TASK_CREATED, {})
-        events_writer.write(EventType.AUTO_APPROVED, {
-            "approver": "ACP-Autonomous-Bot",
-        })
+        events_writer.write(
+            EventType.AUTO_APPROVED,
+            {
+                "approver": "ACP-Autonomous-Bot",
+            },
+        )
         all_events = events_writer.read_all()
 
         vault_root = tmp_path / "vault"

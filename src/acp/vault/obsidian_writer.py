@@ -19,13 +19,14 @@ synchronized in-place vault note edits with the event log.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from acp.gitops.diff import DiffCapture
-from acp.models import EventType, MemoryStatus, ReviewResult, Task
+from acp.models import Event, EventType, MemoryStatus, ReviewResult, Task
 from acp.vault.frontmatter import (
     build_frontmatter,
     parse_frontmatter,
@@ -58,8 +59,15 @@ def write_vault_note(
         raise ValueError(f"task_id contains path separators — refusing to write: {task.task_id}")
     note_path = tasks_dir / f"{task.task_id}.md"
 
-    if note_path.exists():
+    # v0.7.4: Read the existing note directly instead of TOCTOU-vulnerable
+    # exists() + read_text() pattern. If the file is deleted between the
+    # check and the read, we treat it as a new note (no existing content).
+    try:
         existing = note_path.read_text()
+    except FileNotFoundError:
+        existing = None
+
+    if existing is not None:
         try:
             frontmatter, _ = parse_frontmatter(existing)
         except ValueError:
@@ -67,12 +75,10 @@ def write_vault_note(
                 f"refusing to overwrite note with malformed frontmatter: {note_path}"
             )
         if frontmatter.approved:
-            raise PermissionError(
-                f"refusing to overwrite an approved note: {note_path}"
-            )
+            raise PermissionError(f"refusing to overwrite an approved note: {note_path}")
 
-    frontmatter = build_frontmatter(task=task, review=review, diff=diff, today=today)
-    note = f"{frontmatter}\n\n{report_body.lstrip()}\n"
+    fm_block = build_frontmatter(task=task, review=review, diff=diff, today=today)
+    note = f"{fm_block}\n\n{report_body.lstrip()}\n"
     note_path.write_text(note)
     return note_path
 
@@ -84,7 +90,7 @@ def rerender_vault_note(
     task: Task,
     review: ReviewResult,
     diff: DiffCapture,
-    events: list,
+    events: list[Event],
     vault_root: Path,
     today: datetime | None = None,
 ) -> Path:
@@ -121,34 +127,40 @@ def rerender_vault_note(
         if event.type == EventType.HUMAN_APPROVED:
             approved = True
             memory_status = MemoryStatus.ACTIVE.value
-            audit_trail.append({
-                "action": "approved",
-                "actor": event.payload.get("approver", "unknown"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "approved",
+                    "actor": event.payload.get("approver", "unknown"),
+                    "timestamp": event.timestamp,
+                }
+            )
         elif event.type == EventType.AUTO_APPROVED:
             # v0.6.0: Autonomous mode approval — equivalent to human approval
             # for frontmatter purposes. The approver is "ACP-Autonomous-Bot".
             approved = True
             memory_status = MemoryStatus.ACTIVE.value
-            audit_trail.append({
-                "action": "auto_approved",
-                "actor": event.payload.get("approver", "ACP-Autonomous-Bot"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "auto_approved",
+                    "actor": event.payload.get("approver", "ACP-Autonomous-Bot"),
+                    "timestamp": event.timestamp,
+                }
+            )
         elif event.type == EventType.HUMAN_REJECTED:
             memory_status = MemoryStatus.ARCHIVED.value
-            audit_trail.append({
-                "action": "rejected",
-                "actor": event.payload.get("rejecter", "unknown"),
-                "timestamp": event.timestamp,
-            })
+            audit_trail.append(
+                {
+                    "action": "rejected",
+                    "actor": event.payload.get("rejecter", "unknown"),
+                    "timestamp": event.timestamp,
+                }
+            )
 
     # Build the frontmatter data directly (not via build_frontmatter, which
     # always sets approved=false). We need the event-log-derived values.
-    created = (today or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    created = (today or datetime.now(UTC)).strftime("%Y-%m-%d")
     sources = ["diff.patch", "diff_stat.txt", "review.json", "commands.json"]
-    data = {
+    data: dict[str, Any] = {
         "type": "task_report",
         "task_id": task.task_id,
         "repo": task.repo_name,

@@ -2,11 +2,14 @@
 
 Tests that known credential patterns are detected and legitimate content
 (placeholder values, code comments with SHAs) is not falsely flagged.
+
+v0.7.0: Also tests detect_hard_block_secrets — the fast pre-TruffleHog
+scan that emits review.secret_hard_block events.
 """
 
 from __future__ import annotations
 
-from acp.review.secret_scanner import scan_patch
+from acp.review.secret_scanner import detect_hard_block_secrets, scan_patch
 
 
 def test_aws_access_key_detected() -> None:
@@ -92,10 +95,14 @@ def test_deleted_lines_not_scanned() -> None:
     """Only added lines (starting with +) are scanned, not context or deletions."""
     # Construct at runtime to avoid GitHub secret scanning false positive.
     aws_parts = ["AKIA", "IOSFODNN7EXAMPLE"]
-    patch = "-" + "".join(aws_parts) + """
+    patch = (
+        "-"
+        + "".join(aws_parts)
+        + """
  context line
 +some normal code
 """
+    )
     findings = scan_patch(patch)
     assert len(findings) == 0
 
@@ -109,3 +116,82 @@ def test_high_entropy_assignment_captured() -> None:
     patch = '+DB_PASSWORD="a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"\n'
     findings = scan_patch(patch)
     assert len(findings) > 0
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.0: detect_hard_block_secrets — pre-TruffleHog hard-block scan
+# --------------------------------------------------------------------------- #
+
+
+def test_hard_block_detects_aws_key() -> None:
+    """Known provider patterns are hard-blocked."""
+    parts = ["AKIA", "IOSFODNN7EXAMPLE"]
+    patch = "+export AWS_ACCESS_KEY_ID=" + "".join(parts) + "\n"
+    hard_blocks = detect_hard_block_secrets(patch)
+    kinds = {f.kind for f in hard_blocks}
+    assert "aws_access_key" in kinds
+
+
+def test_hard_block_detects_private_key() -> None:
+    """Private key blocks are hard-blocked."""
+    patch = "+-----BEGIN RSA PRIVATE KEY-----\n"
+    hard_blocks = detect_hard_block_secrets(patch)
+    kinds = {f.kind for f in hard_blocks}
+    assert "private_key_block" in kinds
+
+
+def test_hard_block_detects_github_pat() -> None:
+    """GitHub PATs are hard-blocked."""
+    parts = ["ghp", "_abcdef12345678901234567890123456789012"]
+    patch = "+GITHUB_TOKEN=" + "".join(parts) + "\n"
+    hard_blocks = detect_hard_block_secrets(patch)
+    kinds = {f.kind for f in hard_blocks}
+    assert "github_pat" in kinds
+
+
+def test_hard_block_detects_jwt() -> None:
+    """JWTs are hard-blocked."""
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNqP3kE4kUJ6Tq3yQw"
+    patch = f"+Bearer {jwt}\n"
+    hard_blocks = detect_hard_block_secrets(patch)
+    kinds = {f.kind for f in hard_blocks}
+    assert "jwt" in kinds
+
+
+def test_hard_block_detects_high_entropy() -> None:
+    """Very high-entropy assignments (>= 4.0 bits/char) are hard-blocked."""
+    # 40-char random-looking string — entropy will be well above 4.0.
+    patch = '+API_KEY="x9k2m7q3p8n5w1j6r4t0z2v8b6c4d9f2h5l7g3s1"\n'
+    hard_blocks = detect_hard_block_secrets(patch)
+    high_ent = [f for f in hard_blocks if f.kind == "high_entropy_assignment"]
+    assert len(high_ent) > 0
+
+
+def test_hard_block_ignores_low_entropy() -> None:
+    """Low-entropy assignments are not hard-blocked (they're advisory only)."""
+    # 20-char value but with low entropy (repeated chars).
+    patch = '+NAME="aaaaaaaaaaaaaaaaaaaa"\n'
+    hard_blocks = detect_hard_block_secrets(patch)
+    assert len(hard_blocks) == 0
+
+
+def test_hard_block_ignores_placeholders() -> None:
+    """Placeholder values are not hard-blocked."""
+    patch = '+API_KEY="YOUR_API_KEY_HERE_PLACEHOLDER"\n'
+    hard_blocks = detect_hard_block_secrets(patch)
+    assert len(hard_blocks) == 0
+
+
+def test_hard_block_empty_patch() -> None:
+    """Empty patch produces no hard blocks."""
+    assert detect_hard_block_secrets("") == []
+
+
+def test_hard_block_multiple_findings() -> None:
+    """Multiple secrets in one patch are all returned."""
+    parts = ["AKIA", "IOSFODNN7EXAMPLE"]
+    patch = "+export AWS_KEY=" + "".join(parts) + "\n+-----BEGIN RSA PRIVATE KEY-----\n"
+    hard_blocks = detect_hard_block_secrets(patch)
+    kinds = {f.kind for f in hard_blocks}
+    assert "aws_access_key" in kinds
+    assert "private_key_block" in kinds

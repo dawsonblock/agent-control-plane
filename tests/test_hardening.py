@@ -23,13 +23,19 @@ import pytest
 from typer.testing import CliRunner
 
 from acp.cli import app
-from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    EvidenceSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
 from acp.events import EventWriter, verify_event_chain, verify_event_signatures
 from acp.evidence.manifest import build_evidence_manifest, verify_evidence_manifest
 from acp.graph.workflow import run_workflow
 from acp.models import EventType, Task, TaskStatus
 from acp.store import TaskStore
-
 
 runner = CliRunner()
 
@@ -57,6 +63,7 @@ def test_verify_event_chain_empty_list_fails():
 def test_verify_event_signatures_empty_list_fails():
     """An empty event log should not pass signature verification."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     key = Ed25519PrivateKey.generate()
     pub = key.public_key().public_bytes_raw()
     assert verify_event_signatures([], pub) is False
@@ -145,6 +152,7 @@ def test_set_signing_key_rejects_wrong_length(tmp_path):
 def test_set_signing_key_accepts_valid_length(tmp_path):
     """set_signing_key accepts a 32-byte key."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     key = Ed25519PrivateKey.generate().private_bytes_raw()
     w = EventWriter("task_20260624_0001", tmp_path)
     w.set_signing_key(key)  # should not raise
@@ -158,7 +166,7 @@ def test_set_signing_key_accepts_valid_length(tmp_path):
 def test_write_vault_note_rejects_path_traversal_in_task_id(tmp_path):
     """A task_id with path separators is rejected — no path traversal."""
     from acp.gitops.diff import DiffCapture
-    from acp.models import Recommendation, RiskLevel, ReviewResult
+    from acp.models import Recommendation, ReviewResult, RiskLevel
     from acp.vault.obsidian_writer import write_vault_note
 
     task = Task(
@@ -235,11 +243,18 @@ def test_events_command_rejects_invalid_type_filter(disposable_repo, isolated_wo
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "events", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--type", "bogus.event_type",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--type",
+            "bogus.event_type",
+        ],
+    )
     assert r.exit_code == 1
     assert "unknown event type" in r.output
     assert "bogus.event_type" in r.output
@@ -257,11 +272,18 @@ def test_events_command_valid_type_filter_works(disposable_repo, isolated_worksp
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "events", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--type", "task.created",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--type",
+            "task.created",
+        ],
+    )
     assert r.exit_code == 0
     assert "task.created" in r.output
     assert "task.completed" not in r.output
@@ -307,27 +329,36 @@ def test_list_command_warns_on_malformed_task_json(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_workspace):
+async def test_agent_returning_none_raises_runtime_error(disposable_repo, isolated_workspace):
     """If agent.run() returns None, the graph raises RuntimeError, not AttributeError."""
     os.environ["ACP_TEST"] = "1"
     cfg = _config(disposable_repo.path)
 
     # Build a custom agent factory that returns an agent whose run() returns None.
     from acp.agents.base import AgentProtocol
+
     class NoneAgent(AgentProtocol):
         name = "none-agent"
-        def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds):
+
+        async def run(self, *, prompt_path, worktree_path, artifact_dir, timeout_seconds):
             return None
 
     from acp.graph.workflow import build_workflow
+
     runs_root = isolated_workspace["runs_root"]
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events, agent_factory=lambda cfg: NoneAgent())
 
     from acp.graph.state import initial_state
-    result = wf.invoke(
-        initial_state(config=cfg, user_request="test", vault_root=isolated_workspace["vault_root"], runs_root=runs_root),
+
+    result = await wf.ainvoke(
+        initial_state(
+            config=cfg,
+            user_request="test",
+            vault_root=isolated_workspace["vault_root"],
+            runs_root=runs_root,
+        ),
         config={"configurable": {"thread_id": "test"}},
     )
     # The graph should catch the error and route to failed_node.

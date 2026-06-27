@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from acp.evidence.durable_task_store import DurableTaskStore
 from acp.models import Task, TaskStatus
 
@@ -207,6 +206,7 @@ def test_recover_orphaned_tasks(tmp_path: Path):
 
     # task.json should also show FAILED.
     from acp.store import TaskStore
+
     store = TaskStore(runs_root=runs)
     json_task = store.load("task_20260624_0001")
     assert json_task.status == TaskStatus.FAILED
@@ -234,6 +234,48 @@ def test_recover_orphaned_tasks_with_callback(tmp_path: Path):
     )
     assert recovered == ["task_20260624_0001"]
     assert callback_called == ["task_20260624_0001"]
+    db.close()
+
+
+def test_durable_task_store_mission_context_roundtrip(tmp_path: Path):
+    """v0.9.0 (Step 7): mission context columns persist across save/load/query."""
+    db = DurableTaskStore(tmp_path / "tasks.db")
+    db.init()
+    task = _make_task("task_20260624_0001")
+    task.mission_id = "mission_20260624_0001"
+    task.mission_goal = "Migrate to React 19"
+    task.mission_description = "Incremental migration of the legacy view layer."
+    task.mission_step_index = 3
+    db.save(task)
+
+    # load() round-trips all four fields.
+    loaded = db.load("task_20260624_0001")
+    assert loaded is not None
+    assert loaded.mission_id == "mission_20260624_0001"
+    assert loaded.mission_goal == "Migrate to React 19"
+    assert loaded.mission_description == "Incremental migration of the legacy view layer."
+    assert loaded.mission_step_index == 3
+
+    # query() also round-trips them.
+    queried = db.query(status=TaskStatus.PASSED)
+    assert len(queried) == 1
+    assert queried[0].mission_id == "mission_20260624_0001"
+    assert queried[0].mission_goal == "Migrate to React 19"
+    assert queried[0].mission_step_index == 3
+    db.close()
+
+
+def test_durable_task_store_mission_context_defaults_for_legacy_rows(tmp_path: Path):
+    """A task saved without mission context loads with empty/0 defaults."""
+    db = DurableTaskStore(tmp_path / "tasks.db")
+    db.init()
+    db.save(_make_task("task_20260624_0002"))
+    loaded = db.load("task_20260624_0002")
+    assert loaded is not None
+    assert loaded.mission_id == ""
+    assert loaded.mission_goal == ""
+    assert loaded.mission_description == ""
+    assert loaded.mission_step_index == 0
     db.close()
 
 

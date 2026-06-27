@@ -15,7 +15,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,13 +24,11 @@ from typer.testing import CliRunner
 
 from acp.cli import app
 from acp.events import EventWriter, verify_event_chain
-from acp.models import EventType, Task, TaskStatus
+from acp.gitops.diff import DiffCapture
+from acp.models import EventType, Recommendation, ReviewResult, RiskLevel, Task, TaskStatus
 from acp.store import TaskStore
 from acp.vault.approval import approve_vault_note, can_approve, reject_vault_note
 from acp.vault.frontmatter import parse_frontmatter
-from acp.gitops.diff import DiffCapture
-from acp.models import Recommendation, ReviewResult, RiskLevel
-
 
 runner = CliRunner()
 
@@ -65,9 +63,12 @@ def _make_diff() -> DiffCapture:
     return DiffCapture(patch="", stat="", changed_files=["a.py"], insertions=1, deletions=0)
 
 
-def _write_vault_note(vault_root: Path, task: Task, review: ReviewResult, diff: DiffCapture) -> Path:
+def _write_vault_note(
+    vault_root: Path, task: Task, review: ReviewResult, diff: DiffCapture
+) -> Path:
     """Write a vault note with frontmatter + body."""
     from acp.vault.obsidian_writer import write_vault_note
+
     return write_vault_note(
         report_body="# Task report\n\nTest body.",
         task=task,
@@ -77,8 +78,12 @@ def _write_vault_note(vault_root: Path, task: Task, review: ReviewResult, diff: 
     )
 
 
-def _setup_run(runs_root: Path, vault_root: Path, task_id: str = "task_20260624_0001",
-               status: TaskStatus = TaskStatus.PASSED) -> tuple[Task, Path]:
+def _setup_run(
+    runs_root: Path,
+    vault_root: Path,
+    task_id: str = "task_20260624_0001",
+    status: TaskStatus = TaskStatus.PASSED,
+) -> tuple[Task, Path]:
     """Set up a run directory with task.json + vault note."""
     store = TaskStore(runs_root=runs_root)
     task = _make_task(task_id, status)
@@ -114,7 +119,7 @@ def test_approve_vault_note_adds_audit_trail(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(tmp_path / "runs", vault_root)
 
-    approve_vault_note(note_path, approver="alice", now=datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc))
+    approve_vault_note(note_path, approver="alice", now=datetime(2026, 6, 24, 12, 0, tzinfo=UTC))
 
     content = note_path.read_text()
     stripped = content.split("---")[1]
@@ -218,12 +223,20 @@ def test_cli_approve_passed_task(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(runs_root, vault_root)
 
-    r = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-        "--approver", "alice@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+            "--approver",
+            "alice@example.com",
+        ],
+    )
     assert r.exit_code == 0, f"approve failed: {r.output}"
     assert "approved by alice@example.com" in r.output
     assert "human.approved" in r.output
@@ -254,11 +267,18 @@ def test_cli_approve_failed_task_rejected(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(runs_root, vault_root, status=TaskStatus.FAILED)
 
-    r = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r.exit_code == 1
     assert "only 'passed' or 'needs_review'" in r.output
 
@@ -269,40 +289,68 @@ def test_cli_approve_already_approved(tmp_path: Path):
     task, note_path = _setup_run(runs_root, vault_root)
 
     # First approval succeeds.
-    r1 = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r1.exit_code == 0
 
     # Second approval fails — caught by the task status check (already APPROVED).
-    r2 = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r2.exit_code == 1
     assert "only 'passed' or 'needs_review'" in r2.output
 
 
 def test_cli_approve_nonexistent_task(tmp_path: Path):
-    r = runner.invoke(app, [
-        "approve", "--task", "task_20260624_9999",
-        "--runs-root", str(tmp_path / "runs"),
-        "--vault-root", str(tmp_path / "vault"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            "task_20260624_9999",
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--vault-root",
+            str(tmp_path / "vault"),
+        ],
+    )
     assert r.exit_code == 1
     assert "not found" in r.output
 
 
 def test_cli_approve_invalid_task_id_rejected(tmp_path: Path):
     """Invalid (path-shaped) task ids are rejected before any filesystem access."""
-    r = runner.invoke(app, [
-        "approve", "--task", "../etc/passwd",
-        "--runs-root", str(tmp_path / "runs"),
-        "--vault-root", str(tmp_path / "vault"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            "../etc/passwd",
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--vault-root",
+            str(tmp_path / "vault"),
+        ],
+    )
     assert r.exit_code == 1
     assert "invalid task id" in r.output
 
@@ -317,13 +365,22 @@ def test_cli_reject_task(tmp_path: Path):
     vault_root = tmp_path / "vault"
     task, note_path = _setup_run(runs_root, vault_root)
 
-    r = runner.invoke(app, [
-        "reject", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-        "--rejecter", "bob@example.com",
-        "--reason", "too risky",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+            "--rejecter",
+            "bob@example.com",
+            "--reason",
+            "too risky",
+        ],
+    )
     assert r.exit_code == 0, f"reject failed: {r.output}"
     assert "rejected by bob@example.com" in r.output
     assert "human.rejected" in r.output
@@ -348,19 +405,33 @@ def test_cli_reject_after_approve_fails(tmp_path: Path):
     task, note_path = _setup_run(runs_root, vault_root)
 
     # Approve first.
-    r1 = runner.invoke(app, [
-        "approve", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r1.exit_code == 0
 
     # Reject should fail.
-    r2 = runner.invoke(app, [
-        "reject", "--task", task.task_id,
-        "--runs-root", str(runs_root),
-        "--vault-root", str(vault_root),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task.task_id,
+            "--runs-root",
+            str(runs_root),
+            "--vault-root",
+            str(vault_root),
+        ],
+    )
     assert r2.exit_code == 1
     assert "already approved" in r2.output
 

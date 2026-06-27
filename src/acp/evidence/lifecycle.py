@@ -17,12 +17,15 @@ Two public functions:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from acp.events import EventWriter
 from acp.models import EventType
 from acp.store import TaskStore
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -54,7 +57,7 @@ def rerender_vault_note_from_state(
     """
     try:
         from acp.gitops.diff import DiffCapture
-        from acp.models import ReviewResult
+        from acp.models import Recommendation, ReviewResult, RiskLevel
         from acp.vault.obsidian_writer import rerender_vault_note
 
         # Read the current report.
@@ -67,12 +70,16 @@ def rerender_vault_note_from_state(
 
         # Read the review result if it exists.
         review_path = run_dir / "artifacts" / "review.json"
-        review = ReviewResult(risk="low", recommendation="merge")
+        review = ReviewResult(risk=RiskLevel.LOW, recommendation=Recommendation.MERGE)
         if review_path.is_file():
             try:
                 review = ReviewResult.model_validate_json(review_path.read_text())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to parse review.json for vault note re-render: %s — "
+                    "using default review (low risk, merge)",
+                    exc,
+                )
 
         # Build a minimal diff capture for frontmatter stats.
         diff = DiffCapture(
@@ -85,6 +92,7 @@ def rerender_vault_note_from_state(
         diff_stat_path = run_dir / "artifacts" / "diff_stat.txt"
         if diff_stat_path.is_file():
             from acp.gitops.diff import _parse_stat
+
             try:
                 changed, ins, dels = _parse_stat(diff_stat_path.read_text())
                 diff = DiffCapture(
@@ -94,8 +102,11 @@ def rerender_vault_note_from_state(
                     insertions=ins,
                     deletions=dels,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to parse diff stat for vault note re-render: %s — using empty diff",
+                    exc,
+                )
 
         rerender_vault_note(
             note_path=note_path,
@@ -124,7 +135,7 @@ def record_lifecycle_event(
     task_id: str,
     run_dir: Path,
     event_type: EventType,
-    payload: dict,
+    payload: dict[str, Any],
 ) -> str | None:
     """Append a post-run lifecycle event with full transactional integrity.
 
@@ -165,11 +176,10 @@ def record_lifecycle_event(
 
     if signing_key_path is not None:
         try:
-            key_bytes = signing_key_path.read_bytes()
+            key_bytes = Path(signing_key_path).read_bytes()
         except OSError as exc:
             raise EvidenceConfigError(
-                f"run was signed but signing key is not readable: "
-                f"{signing_key_path} ({exc})"
+                f"run was signed but signing key is not readable: {signing_key_path} ({exc})"
             ) from exc
         if len(key_bytes) != 32:
             raise EvidenceConfigError(
@@ -193,9 +203,7 @@ def record_lifecycle_event(
     event_checkpoint = events.checkpoint()
     report_backup = report_path.read_bytes() if report_path.is_file() else None
     lifecycle_manifest_backup = (
-        lifecycle_manifest_path.read_bytes()
-        if lifecycle_manifest_path.is_file()
-        else None
+        lifecycle_manifest_path.read_bytes() if lifecycle_manifest_path.is_file() else None
     )
 
     durable_store_path = ev_cfg["durable_store"]
@@ -213,6 +221,7 @@ def record_lifecycle_event(
         # Open the durable store connection once and begin a transaction.
         if durable_store_path is not None:
             from acp.evidence.durable_store import DurableEventStore
+
             durable_db = DurableEventStore(durable_store_path)
             durable_db.init()
             if durable_mode == "required":
@@ -220,75 +229,127 @@ def record_lifecycle_event(
                 durable_db.begin_transaction()
                 durable_tx_active = True
 
-        # 1. Write the lifecycle event to events.jsonl.
-        evt = events.write(event_type, payload)
+        # v0.7.4: In durable_mode="required", write to SQLite FIRST, then
+        # to JSONL. The previous order (JSONL → SQLite) required a
+        # file truncation rollback (f.truncate) if the SQLite write failed,
+        # which is not crash-safe — a power failure during the rollback
+        # corrupts events.jsonl. By committing the SQLite transaction
+        # first, we ensure the durable store is the authoritative write;
+        # the JSONL append is then a best-effort mirror that can be
+        # rebuilt from SQLite via rebuild_from_jsonl if it fails.
+        #
+        # In non-required mode, the order doesn't matter (both are
+        # best-effort), so we keep the original JSONL-first order for
+        # backwards compatibility.
 
-        # 2. Write the lifecycle event to the durable store.
-        if durable_db is not None:
+        if durable_tx_active:
+            # --- Required mode: SQLite first, then JSONL ------------------- #
+            assert durable_db is not None  # for mypy: durable_tx_active implies durable_db
+            # 1a. Build the event object (without writing to JSONL yet).
+            evt = events.build_event(event_type, payload)
+
+            # 1b. Write to the durable store (within the explicit transaction).
+            durable_db.append(evt)  # within the transaction
+
+            # 1c. Now append to JSONL (the SQLite write succeeded).
+            events.append_event(evt)
+
+            # 3. Re-render the report (this overwrites final_report.md).
             try:
-                if durable_tx_active:
-                    durable_db.append(evt)  # within the explicit transaction
-                else:
+                from acp.reports.writer import rerender_report_from_run
+
+                rerender_report_from_run(run_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "report re-render failed during lifecycle event: "
+                    "%s — final_report.md may be stale",
+                    exc,
+                )
+
+            # 4. Build the report_bound event (without writing to JSONL yet).
+            report_hash = compute_report_hash(run_dir)
+            report_bound_evt = None
+            if report_hash is not None:
+                report_bound_evt = events.build_event(
+                    EventType.EVIDENCE_REPORT_BOUND,
+                    {
+                        "task_id": task_id,
+                        "report_hash": report_hash,
+                        "lifecycle_event": event_type.value,
+                        "event_chain_head_before_report_bound": events.last_hash,
+                    },
+                )
+                # Write to durable store first.
+                durable_db.append(report_bound_evt)
+                # Then append to JSONL.
+                events.append_event(report_bound_evt)
+
+            # 6. Commit the durable transaction (both events at once).
+            durable_db.commit()
+            durable_tx_active = False
+
+        else:
+            # --- Non-required mode: JSONL first (backwards compatible) ----- #
+            # 1. Write the lifecycle event to events.jsonl.
+            evt = events.write(event_type, payload)
+
+            # 2. Write the lifecycle event to the durable store.
+            if durable_db is not None:
+                try:
                     durable_db.append(evt)
                     durable_db.commit()
-            except Exception as exc:
-                if durable_mode == "required":
-                    raise  # triggers full rollback below
-                durable_warning = f"durable store write failed: {exc}"
+                except Exception as exc:
+                    durable_warning = f"durable store write failed: {exc}"
 
-        # 3. Re-render the report (this overwrites final_report.md).
-        try:
-            from acp.reports.writer import rerender_report_from_run
-            rerender_report_from_run(run_dir)
-        except Exception:  # noqa: BLE001
-            pass  # report re-render is best-effort
-
-        # 4. Write the evidence.report_bound event to events.jsonl.
-        report_hash = compute_report_hash(run_dir)
-        report_bound_evt = None
-        if report_hash is not None:
-            report_bound_evt = events.write(
-                EventType.EVIDENCE_REPORT_BOUND,
-                {
-                    "task_id": task_id,
-                    "report_hash": report_hash,
-                    "lifecycle_event": event_type.value,
-                    "event_chain_head_before_report_bound": events.last_hash,
-                },
-            )
-
-        # 5. Write the report_bound event to the durable store.
-        if report_bound_evt is not None and durable_db is not None:
+            # 3. Re-render the report (this overwrites final_report.md).
             try:
-                if durable_tx_active:
-                    durable_db.append(report_bound_evt)
-                else:
+                from acp.reports.writer import rerender_report_from_run
+
+                rerender_report_from_run(run_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "report re-render failed during lifecycle event: "
+                    "%s — final_report.md may be stale",
+                    exc,
+                )
+
+            # 4. Write the evidence.report_bound event to events.jsonl.
+            report_hash = compute_report_hash(run_dir)
+            report_bound_evt = None
+            if report_hash is not None:
+                report_bound_evt = events.write(
+                    EventType.EVIDENCE_REPORT_BOUND,
+                    {
+                        "task_id": task_id,
+                        "report_hash": report_hash,
+                        "lifecycle_event": event_type.value,
+                        "event_chain_head_before_report_bound": events.last_hash,
+                    },
+                )
+
+            # 5. Write the report_bound event to the durable store.
+            if report_bound_evt is not None and durable_db is not None:
+                try:
                     durable_db.append(report_bound_evt)
                     durable_db.commit()
-            except Exception as exc:
-                if durable_mode == "required":
-                    raise  # triggers full rollback below
-                durable_warning = f"durable store write failed: {exc}"
-
-        # 6. Commit the durable transaction (both events at once).
-        if durable_tx_active:
-            try:
-                durable_db.commit()
-                durable_tx_active = False
-            except Exception as exc:
-                if durable_mode == "required":
-                    raise  # triggers full rollback
-                durable_warning = f"durable store commit failed: {exc}"
+                except Exception as exc:
+                    durable_warning = f"durable store write failed: {exc}"
 
         # 7. Write the lifecycle manifest (best-effort).
         try:
-            write_lifecycle_manifest(
-                run_dir=run_dir, events_writer=events, report_hash=report_hash
+            write_lifecycle_manifest(run_dir=run_dir, events_writer=events, report_hash=report_hash)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lifecycle manifest write failed: %s — evidence manifest may be stale",
+                exc,
             )
-        except Exception:  # noqa: BLE001
-            pass
 
-    except Exception:
+    except Exception as rollback_exc:
+        # v0.7.4: Log the exception that triggered the rollback at ERROR
+        # level. Previously this was a bare `except Exception:` that
+        # silently swallowed the root cause, making it impossible to
+        # debug why lifecycle transactions were failing.
+        logger.error("lifecycle transaction failed, rolling back: %s", rollback_exc)
         # --- Full rollback: restore ALL evidence files --------------------- #
         # 1. Restore events.jsonl (truncation + hash chain restore).
         events.rollback(event_checkpoint)
@@ -309,15 +370,15 @@ def record_lifecycle_event(
         if durable_tx_active and durable_db is not None:
             try:
                 durable_db.rollback_transaction()
-            except Exception:  # noqa: BLE001
-                pass  # best-effort; connection close will also undo
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("durable store rollback failed: %s", exc)
 
         # 5. Close the durable connection.
         if durable_db is not None:
             try:
                 durable_db.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("durable store close failed: %s", exc)
 
         if durable_mode == "required":
             raise ACPError(
@@ -331,7 +392,7 @@ def record_lifecycle_event(
     if durable_db is not None:
         try:
             durable_db.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("durable store close failed after success: %s", exc)
 
     return durable_warning

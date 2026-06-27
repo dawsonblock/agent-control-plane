@@ -19,7 +19,6 @@ from acp.models import RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
 from acp.skills.loader import load_skills
 
-
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -50,7 +49,7 @@ def get_skill_prompt_instructions(
     if skill is None:
         return ""
 
-    return skill.get("prompt_instructions", "")
+    return str(skill.get("prompt_instructions", ""))
 
 
 def apply_skill_review_gates(
@@ -109,8 +108,7 @@ def apply_skill_review_gates(
                 to_level = RiskLevel.MEDIUM
             engine.add(
                 RiskCategory.DATABASE,
-                f"Skill risk elevator: {description} "
-                f"(matched '{pattern}' → {to_level.value})",
+                f"Skill risk elevator: {description} (matched '{pattern}' → {to_level.value})",
                 level=to_level,
             )
 
@@ -152,7 +150,4 @@ def get_active_skill(
 def _any_match(file_paths: list[str], pattern: str) -> bool:
     """Check if any file path matches a glob pattern (case-insensitive)."""
     pattern_lower = pattern.lower()
-    return any(
-        fnmatch.fnmatch(fp, pattern_lower) or pattern_lower in fp
-        for fp in file_paths
-    )
+    return any(fnmatch.fnmatch(fp, pattern_lower) or pattern_lower in fp for fp in file_paths)

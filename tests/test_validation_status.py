@@ -5,7 +5,7 @@ Covers:
   - reviewer summary wording: "no validation commands ran" vs "validation passed"
     vs "validation failed" (never "tests pass" for the no-validation case)
   - repair routing triggers only on actual failed non-skipped commands, not on
-    the no-validation case that ``all_passed([])`` used to mask as a pass
+    the no-validation case that the old empty-list-as-pass pattern masked
 """
 
 from __future__ import annotations
@@ -20,12 +20,10 @@ from acp.models import CommandResult, EventType, TaskStatus
 from acp.review.diff_reviewer import review_diff
 from acp.store import TaskStore
 from acp.testing.runner import (
-    all_passed,
     validation_passed,
     validation_ran,
     validation_status,
 )
-
 
 # --------------------------------------------------------------------------- #
 # CommandResult builder
@@ -102,13 +100,6 @@ def test_validation_status_three_states() -> None:
     assert validation_status([_cmd(0, skipped=True), _cmd(1)]) == "failed"
 
 
-def test_all_passed_still_true_for_empty_for_back_compat() -> None:
-    # all_passed([]) is still True (mathematically vacuous); the new helpers
-    # exist so callers don't *interpret* that as "validation passed".
-    assert all_passed([]) is True
-    assert all_passed([_cmd(0, skipped=True)]) is True
-
-
 # --------------------------------------------------------------------------- #
 # Reviewer summary wording
 # --------------------------------------------------------------------------- #
@@ -156,7 +147,7 @@ def test_summary_validation_failed(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_attempts=2):
+async def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_attempts=2):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     from acp.graph.workflow import build_workflow
@@ -176,7 +167,7 @@ def _run_graph(repo_path, runs_root, vault_root, *, test_cmd="", max_repair_atte
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "no-val"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "no-val"}})
     return result, store
 
 
@@ -185,14 +176,15 @@ def _event_types(store, task_id):
     return [json.loads(l)["type"] for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspace):
+async def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspace):
     """All commands skipped + max_repair_attempts=2 → no repair attempts.
 
-    Previously ``all_passed([])`` returned True so repair was skipped, but for
-    the wrong reason. Now routing checks for actual failures explicitly, so
+    Previously the empty-list-as-pass pattern returned True so repair was
+    skipped, but for the wrong reason. Now routing checks for actual failures
+    explicitly, so
     no-validation flows straight to capture_diff → review → NEEDS_REVIEW.
     """
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -207,9 +199,8 @@ def test_no_validation_does_not_trigger_repair(disposable_repo, isolated_workspa
 
     events = _event_types(store, result["task_id"])
     repair_events = [
-        e for e in events
+        e
+        for e in events
         if e in (EventType.REPAIR_ATTEMPTED.value, EventType.REPAIR_EXHAUSTED.value)
     ]
-    assert repair_events == [], (
-        f"no validation ran — repair must not trigger, got {repair_events}"
-    )
+    assert repair_events == [], f"no validation ran — repair must not trigger, got {repair_events}"

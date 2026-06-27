@@ -29,6 +29,8 @@ Check categories:
 
 from __future__ import annotations
 
+import logging
+import re
 from pathlib import Path
 
 from acp.config import RepoConfig
@@ -36,43 +38,96 @@ from acp.gitops.diff import DiffCapture
 from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel
 from acp.review.risk import RiskCategory, RiskEngine
 from acp.review.secret_scanner import scan_diff
-from acp.testing.runner import all_passed, validation_ran, validation_status
+from acp.testing.runner import validation_passed, validation_ran, validation_status
+
+logger = logging.getLogger(__name__)
 
 # --- path heuristics (lowercase substring matches) ------------------------- #
 
 _AUTH_PATTERNS = (
-    "auth", "session", "login", "password", "secret", "token",
-    "jwt", "oauth", "saml", "rbac", "crypto",
+    "auth",
+    "session",
+    "login",
+    "password",
+    "secret",
+    "token",
+    "jwt",
+    "oauth",
+    "saml",
+    "rbac",
+    "crypto",
 )
 _DB_PATTERNS = (
-    "migration", "migrations/", "schema", "db/", "database/",
-    "alembic", "flyway", "prisma/", "schema.prisma",
+    "migration",
+    "migrations/",
+    "schema",
+    "db/",
+    "database/",
+    "alembic",
+    "flyway",
+    "prisma/",
+    "schema.prisma",
 )
 _MANIFEST_PATTERNS = (
-    "package.json", "requirements.txt", "pyproject.toml",
-    "go.mod", "cargo.toml", "gemfile", "composer.json",
-    "pom.xml", "build.gradle",
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "go.mod",
+    "cargo.toml",
+    "gemfile",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
 )
 _LOCKFILE_PATTERNS = (
-    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-    "poetry.lock", "uv.lock", "go.sum", "cargo.lock",
-    "gemfile.lock", "composer.lock", "build.gradle.kts",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "go.sum",
+    "cargo.lock",
+    "gemfile.lock",
+    "composer.lock",
+    "build.gradle.kts",
 )
 _NETWORK_PATTERNS = (
-    "fetch(", "httpclient", "http.client", "requests", "axios",
-    "urllib", "socket", "websocket", "grpc", "rpc/client",
-    "net/http", "/client.go",
+    "fetch(",
+    "httpclient",
+    "http.client",
+    "requests",
+    "axios",
+    "urllib",
+    "socket",
+    "websocket",
+    "grpc",
+    "rpc/client",
+    "net/http",
+    "/client.go",
 )
 _PERMISSION_PATTERNS = (
-    "sudoers", "chmod", "chown", "permissions", "policy.json",
-    "iam/", "rbac.yaml", "capability", "acl",
+    "sudoers",
+    "chmod",
+    "chown",
+    "permissions",
+    "policy.json",
+    "iam/",
+    "rbac.yaml",
+    "capability",
+    "acl",
 )
 # Files whose presence in the diff is itself a hard block (secrets at rest).
 _ENV_FILE_PATTERNS = (".env", ".env.", "secrets.yaml", "secrets.yml", "credentials.json")
 # Tests/docs don't count as "behavior" for the tests-missing check.
 _TEST_PATTERNS = (
-    "test_", "_test.", ".test.", ".spec.", "/tests/", "/test/",
-    "conftest.py", "__tests__/",
+    "test_",
+    "_test.",
+    ".test.",
+    ".spec.",
+    "/tests/",
+    "/test/",
+    "conftest.py",
+    "__tests__/",
 )
 _BEHAVIOR_EXCLUDES = _TEST_PATTERNS + ("readme", "changelog", "license", ".md", "docs/")
 
@@ -96,15 +151,28 @@ def review_diff(
     """
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     review = _evaluate(diff, command_results, repo_config, worktree_path=worktree_path)
-    (artifacts_dir / "review.json").write_text(
-        review.model_dump_json(indent=2)
-    )
+    (artifacts_dir / "review.json").write_text(review.model_dump_json(indent=2))
     return review
 
 
 # --------------------------------------------------------------------------- #
 # Internals
 # --------------------------------------------------------------------------- #
+
+
+def _compile_custom_regexes(
+    configs: list[dict[str, str]],
+) -> list[tuple[str, re.Pattern[str]]] | None:
+    """Compile custom secret regex configs into (name, pattern) pairs.
+
+    Each config entry has ``name`` and ``pattern`` keys. The name is
+    prefixed with ``custom:`` to distinguish from built-in patterns.
+    Returns None if the list is empty (so the scanner skips the extra
+    loop entirely).
+    """
+    if not configs:
+        return None
+    return [(f"custom:{entry['name']}", re.compile(entry["pattern"])) for entry in configs]
 
 
 def _evaluate(
@@ -116,19 +184,42 @@ def _evaluate(
 ) -> ReviewResult:
     engine = RiskEngine()
     paths_lower = [p.lower() for p in diff.changed_files]
-    tests_pass = all_passed(command_results)
+    # tests_pass should be True when no validation ran (the NO_VALIDATION
+    # signal handles that case with MEDIUM risk). It should only be False
+    # when validation actually ran and a command failed.
+    tests_pass = validation_passed(command_results) if validation_ran(command_results) else True
 
     # --- secret scanning (HARD BLOCK) ------------------------------------- #
     # v0.5.14: Use TruffleHog for verified detection when available.
+    # v0.7.0 (Phase 3.2): Pass custom user-defined regexes from config.
+    # v0.7.3 (Phase 2.4): Surface TruffleHog degradation in review notes.
     if cfg.review.block_secret_leaks:
         use_th = getattr(cfg.review, "use_trufflehog", True)
-        findings = scan_diff(diff.patch, worktree_path=worktree_path, use_trufflehog=use_th)
+        custom_regexes = _compile_custom_regexes(cfg.review.custom_secret_regexes)
+        # v0.8.1 (Phase 2.2): Pass custom regex metadata (including
+        # verify_endpoint) for HTTP-based secret verification.
+        custom_meta = cfg.review.custom_secret_regexes if cfg.review.custom_secret_regexes else None
+        findings, scan_info = scan_diff(
+            diff.patch,
+            worktree_path=worktree_path,
+            use_trufflehog=use_th,
+            custom_regexes=custom_regexes,
+            custom_regex_meta=custom_meta,
+        )
+        if scan_info.get("degraded") == "true":
+            engine.add(
+                RiskCategory.SECRET,
+                "TruffleHog was configured but not installed — "
+                "secret scan used regex-only fallback. "
+                "Install TruffleHog for verified detection.",
+                level=RiskLevel.LOW,
+                hard_block=False,
+            )
         if findings:
             kinds = sorted({f.kind for f in findings})
             engine.add(
                 RiskCategory.SECRET,
-                f"Secret-like content detected in diff: {kinds}. "
-                f"Review and rotate if real.",
+                f"Secret-like content detected in diff: {kinds}. Review and rotate if real.",
                 level=RiskLevel.HIGH,
                 hard_block=True,
             )
@@ -162,13 +253,14 @@ def _evaluate(
     if diff.insertions > cfg.review.max_added_lines:
         engine.add(
             RiskCategory.QUANTITY,
-            f"Added {diff.insertions} lines; "
-            f"max_added_lines={cfg.review.max_added_lines}",
+            f"Added {diff.insertions} lines; max_added_lines={cfg.review.max_added_lines}",
             level=RiskLevel.HIGH,
         )
 
     # --- large / generated single file ------------------------------------ #
-    large = [p for p in diff.changed_files if _file_insertions(diff.patch, p) >= _LARGE_FILE_INSERTIONS]
+    large = [
+        p for p in diff.changed_files if _file_insertions(diff.patch, p) >= _LARGE_FILE_INSERTIONS
+    ]
     if large:
         engine.add(
             RiskCategory.LARGE_FILE,
@@ -276,8 +368,8 @@ def _evaluate(
             )
             if skill:
                 apply_skill_review_gates(engine, skill, diff.changed_files)
-        except Exception:  # noqa: BLE001
-            pass  # Skills not available — don't block the review
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skills not available — don't block the review: %s", exc)
 
     risk = engine.level
     recommendation = engine.recommend(
@@ -326,7 +418,3 @@ def _summary(
         f"({diff.insertions}+, {diff.deletions}-), {validation_clause}. "
         f"Risk: {risk.value}. Recommendation: {rec.value}.{block_clause}"
     )
-
-
-# Back-compat re-export (older code imported `evaluate`).
-evaluate = _evaluate

@@ -22,6 +22,7 @@ from acp.agents.agent_file import (
     AgentFile,
     load_agent_file,
     verify_agent_hash,
+    verify_environment_hash,
 )
 from acp.errors import AgentConfigError
 
@@ -62,9 +63,7 @@ class AgentRegistry:
                 # can decide whether to refuse execution.
                 self.agents[agent.name] = agent
             except Exception as exc:  # noqa: BLE001
-                self._load_errors.append(
-                    f"Failed to load {path.name}: {exc}"
-                )
+                self._load_errors.append(f"Failed to load {path.name}: {exc}")
 
     @property
     def load_errors(self) -> list[str]:
@@ -118,6 +117,15 @@ class AgentRegistry:
             raise KeyError(f"agent not registered: {name}")
         return self.verify(agent)
 
+    def verify_environment(self, agent: AgentFile, project_dir: Path) -> bool:
+        """Verify an agent's dependency lockfile hash (v0.7.2 hermetic isolation).
+
+        Raises:
+            FileNotFoundError: If the lockfile doesn't exist.
+            AgentConfigError: If the hash doesn't match.
+        """
+        return verify_environment_hash(agent, project_dir)
+
     def register(self, agent: AgentFile) -> None:
         """Manually register an agent (bypassing file loading).
 
@@ -129,9 +137,7 @@ class AgentRegistry:
                 registered.
         """
         if agent.name in self.agents:
-            raise AgentConfigError(
-                f"Agent '{agent.name}' is already registered"
-            )
+            raise AgentConfigError(f"Agent '{agent.name}' is already registered")
         self.agents[agent.name] = agent
 
     def __len__(self) -> int:

@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-control-plane"
-version = "0.6.6"
+version = "0.8.0"
 description = "Mac-first local control plane for coding agents: isolate, run, capture, review, report."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Dawson Block" }]
 keywords = ["agents", "control-plane", "langgraph", "evidence", "obsidian"]
 
@@ -42,11 +42,16 @@ graph = [
 # documented validation path (`uv sync --extra dev && bash scripts/validate.sh`)
 # works exactly as written — the signing tests are part of the gate.
 crypto = [
-    "cryptography>=43,<46",
+    "cryptography>=43,<50",
 ]
 dev = [
     "pytest>=8.2,<9",
-    "cryptography>=43,<46",
+    "pytest-asyncio>=0.24,<1",
+    "pytest-cov>=4.1,<7",
+    "cryptography>=43,<50",
+    "ruff>=0.6,<1",
+    "mypy>=1.11,<2",
+    "types-PyYAML>=6.0,<7",
 ]
 # v0.6.0 (M6): Local Haystack RAG context retrieval.
 # Optional — install with: uv sync --extra rag
@@ -72,6 +77,24 @@ api = [
     "fastapi>=0.100,<1",
     "uvicorn[standard]>=0.20,<1",
 ]
+# v0.7.4: Durable LangGraph checkpointing via SQLite.
+# Optional — install with: uv sync --extra checkpoint
+# When configured, workflow state persists across process restarts,
+# enabling crash recovery for long-running agent tasks.
+checkpoint = [
+    "langgraph-checkpoint-sqlite>=2.0,<3",
+]
+# v0.7.4: Post-quantum event signatures (ML-DSA, FIPS 204).
+# Optional — install with: uv sync --extra mldsa
+# Requires OpenSSL 3.5+, AWS-LC, or BoringSSL. When installed, operators
+# can configure evidence.signature_algorithm to mldsa44/mldsa65/mldsa87
+# for quantum-resistant event-log authenticity proofs.
+mldsa = [
+    "cryptography>=49,<50",
+]
+# Note: crypto and dev extras use cryptography>=43,<50 so they are compatible
+# with the mldsa extra (which requires >=49). When both are installed, the
+# newer version wins. ML-DSA APIs are only available with >=49 + OpenSSL 3.5+.
 
 [project.scripts]
 acp = "acp.cli:app"
@@ -83,3 +106,73 @@ packages = ["src/acp"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra -q"
+asyncio_mode = "auto"
+
+# --------------------------------------------------------------------------- #
+# Ruff — linter + formatter (replaces flake8 --select=F).
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# F  = pyflakes (undefined names, unused imports, redefinitions)
+# E  = pycodestyle errors
+# W  = pycodestyle warnings
+# I  = isort (import sorting)
+# UP = pyupgrade (modernize syntax for py312)
+select = ["F", "E", "W", "I", "UP"]
+# E501  = line-too-long — now enforced (line-length = 100 above).
+# UP042 = replace-str-enum — changes class hierarchy (str, Enum → StrEnum);
+#         behavioral edge cases, defer until audited.
+# BLE001 is used intentionally throughout for broad exception handlers that
+# are documented as best-effort. We manage those with inline `# noqa: BLE001`
+# comments rather than enabling the rule globally.
+ignore = ["UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["acp"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use short variable names in fixtures.
+"tests/**" = ["E741"]
+
+# --------------------------------------------------------------------------- #
+# Mypy — static type checking.
+# Strict mode is enforced. All functions must have type annotations, no
+# implicit Any returns, and missing import stubs are errors (install
+# types-PyYAML via the `dev` extra).
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = false
+# LangGraph state uses Any intentionally (opaque to the framework).
+[[tool.mypy.overrides]]
+module = "acp.graph.state"
+disable_error_code = ["attr-defined"]
+# Optional extras — not installed in every environment (e.g. CI without
+# --extra rag --extra memory). These modules are imported lazily inside
+# try/except ImportError guards, so missing stubs are expected.
+[[tool.mypy.overrides]]
+module = ["graphiti_core.*", "haystack.*", "sentence_transformers.*", "gitdb.*"]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------- #
+# Coverage — measure test coverage of src/acp.
+# --------------------------------------------------------------------------- #
+[tool.coverage.run]
+source = ["src/acp"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

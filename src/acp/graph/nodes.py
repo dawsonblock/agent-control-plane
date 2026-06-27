@@ -20,15 +20,17 @@ services).
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from acp.agents.base import AgentProtocol, write_prompt, write_repair_prompt
 from acp.agents.registry import build_agent as _default_build_agent
 from acp.config import RepoConfig
 from acp.events import EventWriter
-from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.evidence.manifest import (
     build_evidence_manifest,
     compute_artifact_content_hash,
@@ -38,16 +40,19 @@ from acp.evidence.manifest import (
     write_evidence_config,
     write_evidence_manifest,
 )
+from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.gitops.diff import DiffCapture, capture_diff, capture_diff_from_remote
 from acp.gitops.worktrees import create_worktree, create_worktree_from_ref, is_clean
-from acp.models import EventType, TaskStatus
+from acp.models import EventType, ReviewResult, RiskLevel, TaskStatus
 from acp.reports.writer import write_failure_report, write_report
 from acp.review.diff_reviewer import review_diff
-from acp.review.gates import evaluate_final_gates, GateOutcome
+from acp.review.gates import GateOutcome, evaluate_final_gates
 from acp.store import TaskStore
 from acp.testing.parsers import extract_failures
 from acp.testing.runner import run_commands, validation_status
 from acp.vault.obsidian_writer import write_vault_note
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,11 +62,17 @@ class NodeContext:
     ``agent_factory`` is injectable so tests can substitute a controllable
     agent (e.g. one that fixes the failure on a repair attempt). Defaults to
     the registry's ``build_agent``.
+
+    ``durable_event_store`` (v0.9.0 Step 1) is the optional SQLite event
+    store. When set, ``create_task`` attempts to rebuild ``events.jsonl``
+    from SQLite on startup if the JSONL is missing or empty — the crash
+    recovery path for SQLite-primary mode.
     """
 
     store: TaskStore
     events: EventWriter
     agent_factory: Callable[[RepoConfig], AgentProtocol] = _default_build_agent
+    durable_event_store: Any = None  # DurableEventStore | None
 
 
 # --------------------------------------------------------------------------- #
@@ -70,7 +81,7 @@ class NodeContext:
 # --------------------------------------------------------------------------- #
 
 
-def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
+async def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
     """Write the evidence manifest, bind it to the signed event log, re-render.
 
     Called by terminal nodes AFTER the terminal event is written. The sequence:
@@ -148,6 +159,27 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
             finalize_payload["task_json_hash"] = task_json_hash
         if evidence_config_hash is not None:
             finalize_payload["evidence_config_hash"] = evidence_config_hash
+
+        # v0.7.0 (M14): Cross-task artifact sharing. When this task is
+        # part of a mission and has a parent task (the preceding step),
+        # bind the parent's diff.patch hash into evidence.finalized.
+        # This proves Task B was generated with knowledge of Task A's
+        # output, even before Task A is merged to main.
+        parent_task_id = state.get("parent_task_id", "")
+        if parent_task_id:
+            from acp.missions.store import compute_parent_artifact_hash
+
+            parent_hash = compute_parent_artifact_hash(
+                runs_root=state.get("runs_root", ctx.store.root),
+                parent_task_id=parent_task_id,
+            )
+            if parent_hash is not None:
+                finalize_payload["parent_task_id"] = parent_task_id
+                finalize_payload["parent_artifact_hash"] = parent_hash
+                mission_id = state.get("mission_id", "")
+                if mission_id:
+                    finalize_payload["mission_id"] = mission_id
+
         ctx.events.write(EventType.EVIDENCE_FINALIZED, finalize_payload)
 
         # 5. Rewrite the manifest so its chain head includes evidence.finalized.
@@ -219,7 +251,7 @@ def _finalize_evidence(state: dict[str, Any], ctx: NodeContext) -> str | None:
         return None
 
 
-def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     repo_path = cfg.repo.path
     preallocated = state.get("preallocated_task_id")
@@ -230,13 +262,51 @@ def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # The EventWriter was constructed with a placeholder id; point it at the
     # real run dir now that we know the task id.
     ctx.events.relocate(task_id, ctx.store.run_dir(task_id))
+
     task = ctx.store.create(
         task_id=task_id,
         repo_name=cfg.repo.name,
         repo_path=repo_path,
         base_branch=cfg.repo.default_branch,
         user_request=state["user_request"],
+        recursion_depth=state.get("recursion_depth", 0),
+        # v0.9.0 (Step 7): Persist mission context on the durable Task so
+        # memory extraction (Graphiti episode text) and ``acp memory promote``
+        # are mission-aware without re-loading the Mission.
+        mission_id=state.get("mission_id", ""),
+        mission_goal=state.get("mission_goal", ""),
+        mission_description=state.get("mission_description", ""),
+        mission_step_index=state.get("mission_step_index", 0),
     )
+
+    # v0.9.0 (Step 1): Startup rebuild-from-SQLite. If the JSONL log is
+    # missing or empty (crash before first write, or corrupt file), but the
+    # durable SQLite store has events for this task, rebuild the JSONL from
+    # SQLite. This is the crash-recovery path for SQLite-primary mode:
+    # SQLite is authoritative, JSONL is a mirror. Must run AFTER
+    # store.create() (which creates the run_dir) and BEFORE the first
+    # events.write() so the new event appends to the rebuilt chain.
+    if ctx.durable_event_store is not None and ctx.events.count == 0:
+        try:
+            sqlite_count = ctx.durable_event_store.get_event_count(task_id)
+            if sqlite_count > 0:
+                rebuilt = ctx.durable_event_store.rebuild_jsonl_from_store(task_id, ctx.events.path)
+                if rebuilt > 0:
+                    # Re-relocate to pick up the rebuilt JSONL (recompute
+                    # count + prev_hash from the rebuilt file).
+                    ctx.events.relocate(task_id, ctx.store.run_dir(task_id))
+                    logger.info(
+                        "rebuilt events.jsonl from SQLite for task %s (%d events)",
+                        task_id,
+                        rebuilt,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "startup rebuild-from-SQLite failed for task %s: %s — continuing with empty JSONL",
+                task_id,
+                exc,
+            )
+
     ctx.events.write(EventType.TASK_CREATED, {"request": state["user_request"]})
     return {
         "task_id": task_id,
@@ -247,7 +317,7 @@ def create_task(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     }
 
 
-def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     repo_path = state["repo_path"]
     # For docker_sbx with clone mode, the host repo is mounted read-only.
@@ -271,7 +341,7 @@ def check_repo(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {}
 
 
-def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
 
@@ -299,6 +369,7 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
 
         # Record the base commit sha (current HEAD of the base branch).
         from git import Repo
+
         repo = Repo(str(state["repo_path"]))
         base_sha = repo.heads[cfg.repo.default_branch].commit.hexsha
         task.base_commit_sha = base_sha
@@ -353,12 +424,16 @@ def create_worktree_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, A
     ctx.store.save(task)
     ctx.events.write(
         EventType.WORKTREE_CREATED,
-        {"branch": task.task_branch, "worktree_path": str(worktree_path), "base_commit_sha": task.base_commit_sha},
+        {
+            "branch": task.task_branch,
+            "worktree_path": str(worktree_path),
+            "base_commit_sha": task.base_commit_sha,
+        },
     )
     return {"worktree_path": worktree_path}
 
 
-def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """M6: Build context bundle via Haystack RAG, fallback to M1 prompt-only.
 
     When the ``rag`` optional dependency group is installed
@@ -381,15 +456,23 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     context_bundle_path = None
     haystack_active = False
     retrieved_count = 0
+    rag_stats: dict[str, int] | None = None
 
     try:
         from acp.context.context_builder import ContextBuilder
+        from acp.context.haystack_indexer import repo_index_path
+
+        # v0.7.2: Use persistent RAG index for incremental indexing.
+        # The index is stored per-repo under data/context_index/.
+        persist_path = repo_index_path(state["repo_path"])
 
         # 1. Instantiate the RAG engine
         builder = ContextBuilder(
             repo_path=state["repo_path"],
             vault_root=state["vault_root"],
             context_config=cfg.context,
+            reranking_config=getattr(cfg, "reranking", None),
+            persist_path=persist_path,
         )
 
         # 2. Build the markdown context bundle
@@ -404,6 +487,8 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
         haystack_active = True
         # Count the retrieved chunks for the event payload
         retrieved_count = bundle_content.count("## [")
+        # v0.7.2: Record incremental indexing stats for evidence.
+        rag_stats = builder.index_stats
 
     except ImportError:
         # The `rag` extra isn't installed. Gracefully fall back to no-context.
@@ -419,17 +504,16 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     )
 
     # 5. Record the transition in the cryptographic event log
-    ctx.events.write(
-        EventType.CONTEXT_BUILT,
-        {
-            "prompt_path": str(prompt_path),
-            "haystack": haystack_active,
-            "retrieved_documents": retrieved_count,
-            "context_bundle_path": (
-                str(context_bundle_path) if context_bundle_path else None
-            ),
-        },
-    )
+    context_built_payload: dict[str, Any] = {
+        "prompt_path": str(prompt_path),
+        "haystack": haystack_active,
+        "retrieved_documents": retrieved_count,
+        "context_bundle_path": (str(context_bundle_path) if context_bundle_path else None),
+    }
+    # v0.7.2: Include RAG cache stats when available.
+    if haystack_active and rag_stats:
+        context_built_payload["rag_stats"] = rag_stats
+    ctx.events.write(EventType.CONTEXT_BUILT, context_built_payload)
 
     return {
         "prompt_path": prompt_path,
@@ -437,13 +521,88 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     }
 
 
-def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+def _parse_and_emit_subtasks(
+    state: dict[str, Any],
+    ctx: NodeContext,
+    agent_result: Any,
+) -> None:
+    """v0.7.0 (Phase 3.2): Parse agent stdout for sub-task spawn requests.
+
+    If the agent emitted any ``ACP_SPAWN_SUBTASK:`` lines, parse them and
+    emit ``task.subtask_spawned`` events in the signed event log. This
+    is a no-op when the agent didn't request any sub-tasks.
+    """
+    try:
+        stdout_path = getattr(agent_result, "stdout_path", None)
+        if stdout_path is None or not Path(stdout_path).is_file():
+            return
+        stdout = Path(stdout_path).read_text(encoding="utf-8", errors="replace")
+        if "ACP_SPAWN_SUBTASK" not in stdout:
+            return  # fast path — no spawn requests
+        from acp.subtask import emit_subtask_events, parse_subtask_requests
+
+        cfg = state["config"]
+        max_subtasks = getattr(cfg.agent, "max_subtasks", 5)
+        # v0.7.4: Pass recursion_depth to prevent agent fork bombs.
+        recursion_depth = state.get("recursion_depth", 0)
+        result = parse_subtask_requests(
+            stdout,
+            parent_task_id=state["task_id"],
+            max_subtasks=max_subtasks,
+            recursion_depth=recursion_depth,
+        )
+        if result.requests:
+            emit_subtask_events(result.requests, ctx.events)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sub-task parsing failed (best-effort, run continues): %s", exc)
+
+
+async def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
 
+    # v0.7.5: Security warning when running in worktree mode with shell enabled.
+    # Worktree mode provides no OS-level isolation — a malicious agent with
+    # allow_shell=True can execute arbitrary commands on the host. Warn loudly
+    # so operators know the risk. Consider using docker_sbx, gvisor, or venv.
+    # v0.8.0 (Phase 4.1): Hard refuse when worktree+shell without explicit opt-in.
+    # v0.7.6: The default backend is now "venv", but when executor.agent is not
+    # set (shell/custom agents), the run falls back to the direct agent path —
+    # same host exposure as worktree. Apply the same security checks in that case.
+    _uses_direct_agent_path = cfg.executor.backend == "worktree" or (
+        cfg.executor.backend == "venv" and not cfg.executor.agent
+    )
+    if _uses_direct_agent_path:
+        if getattr(cfg.agent, "allow_shell", False):
+            if not getattr(cfg.executor, "danger_allow_host_shell", False):
+                raise RuntimeError(
+                    "SECURITY REFUSAL: agent runs directly on the host with "
+                    "agent.allow_shell=True but without explicit opt-in. This "
+                    "configuration gives the agent arbitrary host command "
+                    "execution (RCE). To override, set "
+                    "executor.danger_allow_host_shell: true in the repo config. "
+                    "Consider using docker_sbx, gvisor, or venv (with "
+                    "executor.agent set) for OS-level isolation."
+                )
+            logger.warning(
+                "SECURITY RISK: agent runs directly on the host with "
+                "agent.allow_shell=True — agent can execute arbitrary host "
+                "commands (RCE). Operator explicitly opted in via "
+                "danger_allow_host_shell. Consider using docker_sbx, gvisor, "
+                "or venv (with executor.agent set) for OS-level isolation."
+            )
+        else:
+            logger.info(
+                "agent runs directly on the host (backend='%s') — no OS-level "
+                "sandboxing. Agent has filesystem and network access to the host. "
+                "Use docker_sbx, gvisor, or venv (with executor.agent set) for "
+                "production workloads.",
+                cfg.executor.backend,
+            )
+
     # --- docker_sbx backend: run agent inside sandbox, then fetch remote -- #
     if cfg.executor.backend == "docker_sbx":
-        executor = SbxExecutor(cfg.executor)
+        executor: Any = SbxExecutor(cfg.executor)
         task.status = TaskStatus.EXECUTING
         ctx.store.save(task)
         ctx.events.write(
@@ -454,7 +613,7 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         # v0.5.15: sandbox.started is written ONLY after sbx actually launches.
         # If executor.start() fails, we write sandbox.failed instead.
         try:
-            agent_result = executor.start(
+            agent_result = await executor.start(
                 task_id=state["task_id"],
                 prompt_path=state["prompt_path"],
                 repo_path=state["repo_path"],
@@ -472,7 +631,11 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             )
             ctx.events.write(
                 EventType.AGENT_FINISHED,
-                {"agent": f"sbx:{cfg.executor.agent}", "exit_code": -1, "summary": f"sbx failed: {exc}"},
+                {
+                    "agent": f"sbx:{cfg.executor.agent}",
+                    "exit_code": -1,
+                    "summary": f"sbx failed: {exc}",
+                },
             )
             task.status = TaskStatus.FAILED
             ctx.store.save(task)
@@ -500,6 +663,8 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
                 "summary": agent_result.summary,
             },
         )
+        # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+        _parse_and_emit_subtasks(state, ctx, agent_result)
         # After the agent finishes, fetch the sandbox remote and create a
         # temporary worktree from it so the existing test runner and diff
         # capture operate on the agent's actual changes.
@@ -515,32 +680,434 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             ctx.events.write(
                 EventType.NODE_FAILED,
-                {"node": "run_agent", "reason": "sandbox remote fetch/worktree failed", "detail": str(exc)},
+                {
+                    "node": "run_agent",
+                    "reason": "sandbox remote fetch/worktree failed",
+                    "detail": str(exc),
+                },
             )
         return {
             "agent_result": agent_result,
             "worktree_path": sandbox_wt_path if sandbox_wt_path.exists() else state["repo_path"],
         }
 
-    # --- worktree backend (default): current behavior --------------------- #
+    # --- openhands backend: run OpenHands in headless mode ----------------- #
+    if cfg.executor.backend == "openhands":
+        from acp.executor.openhands import OpenHandsExecutor
+
+        executor = OpenHandsExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"openhands:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+            },
+        )
+
+        try:
+            agent_result = await executor.start(
+                task_id=state["task_id"],
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            executor.cleanup()
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "run_agent",
+                    "reason": "openhands failed to start",
+                    "detail": str(exc),
+                },
+            )
+            ctx.events.write(
+                EventType.AGENT_FINISHED,
+                {
+                    "agent": f"openhands:{cfg.executor.agent}",
+                    "exit_code": -1,
+                    "summary": f"openhands failed: {exc}",
+                },
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # OpenHands works directly in the worktree — no remote to fetch.
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
+    # --- gvisor backend: run agent in gVisor-sandboxed container ---------- #
+    # gVisor mounts the worktree as a volume, so diff capture works the
+    # same as the worktree backend — no remote fetch needed.
+    if cfg.executor.backend == "gvisor":
+        from acp.executor.gvisor import GvisorExecutor
+
+        executor = GvisorExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"gvisor:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "sandbox": True,
+                "runtime": "runsc",
+            },
+        )
+        try:
+            agent_result = await executor.start(
+                task_id=task.task_id,
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "message": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # gVisor mounts the worktree as a volume — changes are already there.
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
+    # --- firecracker backend: Firecracker microVM hardware isolation ------ #
+    if cfg.executor.backend == "firecracker":
+        from acp.executor.firecracker import FirecrackerExecutor
+
+        executor = FirecrackerExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"firecracker:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "sandbox": True,
+                "runtime": "firecracker",
+            },
+        )
+        try:
+            agent_result = await executor.start(
+                task_id=task.task_id,
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "message": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {"status": TaskStatus.FAILED, "error": str(exc)}
+
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+
+        # NOTE: Do NOT call executor.cleanup() here — the rootfs copy must
+        # survive so capture_diff_node can extract the workspace from it.
+        # _cleanup_sandbox (which runs at the end of the workflow) handles
+        # stop/remove using the firecracker_cleanup_paths stored below.
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+            "sandbox_name": executor._vm_id,
+            "firecracker_cleanup_paths": {
+                "socket_path": executor._socket_path,
+                "rootfs_copy_path": executor._rootfs_copy_path,
+            },
+        }
+
+    # --- venv backend: hermetic Python isolation via uv run --isolated ---- #
+    # v0.7.6: Only enter the venv executor path when executor.agent is set
+    # (Python agents). When backend="venv" but executor.agent is empty (shell/
+    # custom agents), fall through to the direct agent_factory path below —
+    # venv isolation only applies to Python agents with a declared command.
+    if cfg.executor.backend == "venv" and cfg.executor.agent:
+        from acp.executor.venv_executor import VenvExecutor
+
+        executor = VenvExecutor(cfg.executor)
+
+        # v0.7.2: Verify environment hash before hermetic execution.
+        # This is the security gate that prevents supply-chain attacks
+        # via hijacked dependency lockfiles.
+        try:
+            from acp.agents.agent_file import verify_environment_hash
+            from acp.agents.registry import get_agent_file
+            from acp.errors import AgentConfigError
+
+            agent_file = get_agent_file(cfg)
+            if agent_file:
+                verify_environment_hash(agent_file, state["repo_path"])
+        except (FileNotFoundError, AgentConfigError) as exc:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "run_agent",
+                    "reason": "environment hash verification failed",
+                    "detail": str(exc),
+                },
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.FAILED,
+                "error": "environment hash verification failed",
+            }
+
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"venv:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "environment": executor.get_environment_info(),
+            },
+        )
+        agent_result = await executor.start(
+            task_id=state["task_id"],
+            prompt_path=state["prompt_path"],
+            repo_path=state["worktree_path"],
+            artifact_dir=state["artifacts_dir"],
+            timeout_seconds=cfg.agent.timeout_seconds,
+        )
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
+    # --- seatbelt backend: macOS sandbox-exec OS-level sandbox ----------- #
+    # v0.9.0 (Step 4): Runs the agent inside a macOS seatbelt sandbox.
+    # Provides kernel-enforced filesystem and network restrictions without
+    # a container runtime. macOS-only.
+    if cfg.executor.backend == "seatbelt":
+        from acp.executor.seatbelt import SeatbeltExecutor, SeatbeltNotAvailableError
+
+        executor = SeatbeltExecutor(cfg.executor)
+
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"seatbelt:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "environment": executor.get_environment_info(),
+            },
+        )
+        try:
+            agent_result = await executor.start(
+                task_id=state["task_id"],
+                prompt_path=state["prompt_path"],
+                repo_path=state["worktree_path"],
+                artifact_dir=state["artifacts_dir"],
+                timeout_seconds=cfg.agent.timeout_seconds,
+            )
+        except SeatbeltNotAvailableError as exc:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {"node": "run_agent", "reason": "seatbelt not available", "detail": str(exc)},
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.FAILED,
+                "error": str(exc),
+            }
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
+    # --- direct agent path: worktree backend, or venv fallback (no executor.agent) #
     agent = ctx.agent_factory(cfg)
+    # v0.7.3: Pass the event writer to agents that support mid-stream
+    # analysis (CLIAgent). The sentinel uses it to write stream.aborted
+    # events during execution. Set via duck-typing to avoid changing the
+    # AgentProtocol interface.
+    if hasattr(agent, "event_writer"):
+        agent.event_writer = ctx.events
+    if hasattr(agent, "task_id"):
+        agent.task_id = state["task_id"]
     task.status = TaskStatus.EXECUTING
     ctx.store.save(task)
-    ctx.events.write(
-        EventType.AGENT_STARTED,
-        {"agent": agent.name, "timeout_seconds": cfg.agent.timeout_seconds},
-    )
-    agent_result = agent.run(
-        prompt_path=state["prompt_path"],
-        worktree_path=state["worktree_path"],
-        artifact_dir=state["artifacts_dir"],
-        timeout_seconds=cfg.agent.timeout_seconds,
-    )
+
+    # v0.7.2: Record environment context in agent.started event for
+    # hermetic isolation evidence. When the agent has an EnvironmentSpec
+    # (from the AgentFile registry), include the locked environment state
+    # in the event payload so the evidence trail proves the agent executed
+    # in the exact, untampered dependency tree.
+    agent_started_payload: dict[str, Any] = {
+        "agent": agent.name,
+        "timeout_seconds": cfg.agent.timeout_seconds,
+    }
+    # Look up the agent's environment spec from the registry (if configured).
+    try:
+        from acp.agents.registry import get_agent_file
+
+        agent_file = get_agent_file(cfg)
+        if agent_file and agent_file.environment and agent_file.environment.is_isolated:
+            agent_started_payload["environment"] = {
+                "manager": agent_file.environment.manager,
+                "lockfile": agent_file.environment.lockfile,
+                "dependencies_hash": agent_file.environment.dependencies_hash,
+                "python_version": agent_file.environment.python_version,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("environment info collection failed (best-effort): %s", exc)
+
+    ctx.events.write(EventType.AGENT_STARTED, agent_started_payload)
+
+    # v0.8.0 (Phase 1.2): Start the MITM egress proxy when enabled. The proxy
+    # intercepts all agent HTTP/HTTPS traffic, logs it to the EgressLogger,
+    # and blocks domains not in the allowlist. Env vars (HTTP_PROXY etc.) are
+    # injected into os.environ so the agent's subprocess inherits them.
+    egress_proxy: Any = None
+    old_env: dict[str, str] = {}
+    if cfg.proxy.enabled:
+        from acp.egress_proxy import EgressProxyDaemon
+
+        egress_proxy = EgressProxyDaemon(
+            port=cfg.proxy.proxy_port,
+            allowed_domains=cfg.proxy.allowed_domains,
+        )
+        try:
+            egress_proxy.start()
+            proxy_env = egress_proxy.get_proxy_env_vars()
+            old_env = {k: os.environ.get(k, "") for k in proxy_env}
+            os.environ.update(proxy_env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("egress proxy failed to start (continuing without): %s", exc)
+            egress_proxy = None
+
+    try:
+        agent_result = await agent.run(
+            prompt_path=state["prompt_path"],
+            worktree_path=state["worktree_path"],
+            artifact_dir=state["artifacts_dir"],
+            timeout_seconds=cfg.agent.timeout_seconds,
+        )
+    finally:
+        # Restore env vars and stop the proxy.
+        if egress_proxy is not None:
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                if k in old_env:
+                    os.environ[k] = old_env[k]
+                else:
+                    os.environ.pop(k, None)
+            egress_proxy.stop()
+            # Write the egress log artifact.
+            try:
+                egress_proxy.egress_logger.write_artifact(
+                    state["artifacts_dir"],
+                    allowed_domains=cfg.proxy.allowed_domains,
+                    log_filename=cfg.proxy.log_artifact,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("egress artifact write failed (best-effort): %s", exc)
     if agent_result is None:
         raise RuntimeError(
             f"agent '{agent.name}' returned None instead of an AgentResult — "
             f"this is a bug in the agent implementation"
         )
+
+    # v0.7.3: If the StreamSentinel killed the agent mid-execution, short-
+    # circuit to FAILED. Running tests and review on a partial diff from a
+    # killed agent is pointless and potentially dangerous (the agent may
+    # have written a secret to a file before the sentinel caught it in
+    # stdout). The stream.aborted event was already written by the sentinel;
+    # here we write agent.finished and return FAILED state. The terminal
+    # task.failed event is written by failed_node (the ONLY node that writes
+    # it) — the error field carries the abort reason to failed_node.
+    if getattr(agent_result, "aborted_by_sentinel", False):
+        abort_reason = getattr(agent_result, "sentinel_abort_reason", "")
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+                "aborted_by_sentinel": True,
+                "sentinel_abort_reason": abort_reason,
+            },
+        )
+        task.status = TaskStatus.FAILED
+        ctx.store.save(task)
+        return {
+            "agent_result": agent_result,
+            "status": TaskStatus.FAILED,
+            "error": f"Agent killed by StreamSentinel: {abort_reason}",
+        }
+
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {
@@ -549,10 +1116,14 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "summary": agent_result.summary,
         },
     )
+
+    # v0.7.0 (Phase 3.2): Parse sub-task spawn requests from agent stdout.
+    _parse_and_emit_subtasks(state, ctx, agent_result)
+
     return {"agent_result": agent_result}
 
 
-def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.TESTING
     ctx.store.save(state["task"])
@@ -570,6 +1141,7 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # but the cap blocked it." This is distinct from repair.attempted (which
     # is written for every attempt, including the last one).
     from acp.testing.runner import validation_passed, validation_ran
+
     attempts = int(state.get("repair_attempts", 0))
     max_attempts = cfg.agent.max_repair_attempts
     has_failures = validation_ran(command_results) and not validation_passed(command_results)
@@ -583,10 +1155,33 @@ def run_tests_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             },
         )
 
+    # v0.7.1: Circuit breaker — if the agent has produced the same failure
+    # signature N times in a row, emit an explicit event so the review
+    # gate can differentiate "normal review request" from "hallucinating
+    # agent loop aborted." This is distinct from REPAIR_EXHAUSTED (cap
+    # reached) — the breaker fires when attempts remain but the agent is
+    # stuck in a loop.
+    if has_failures and attempts > 0:
+        breaker = getattr(cfg.agent, "repair_repeat_breaker", 0)
+        if breaker > 0 and attempts >= breaker:
+            fingerprints = state.get("repair_fingerprints", [])
+            if len(fingerprints) >= breaker:
+                recent = fingerprints[-breaker:]
+                if len(set(recent)) == 1:
+                    ctx.events.write(
+                        EventType.AUTO_REPAIR_LOOP_ABORTED,
+                        {
+                            "attempt": attempts,
+                            "breaker_threshold": breaker,
+                            "fingerprint": recent[-1],
+                            "reason": "circuit breaker: same failure signature repeated",
+                        },
+                    )
+
     return {"command_results": command_results}
 
 
-def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
     base_sha = task.base_commit_sha or cfg.repo.default_branch
@@ -611,7 +1206,11 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         except Exception as exc:  # noqa: BLE001
             ctx.events.write(
                 EventType.NODE_FAILED,
-                {"node": "capture_diff", "reason": "sandbox remote diff failed", "detail": str(exc)},
+                {
+                    "node": "capture_diff",
+                    "reason": "sandbox remote diff failed",
+                    "detail": str(exc),
+                },
             )
             return {"status": TaskStatus.FAILED, "error": str(exc)}
         ctx.events.write(
@@ -626,8 +1225,53 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         )
         return {"diff": diff}
 
+    # --- firecracker backend: extract workspace from rootfs, then diff --- #
+    if cfg.executor.backend == "firecracker":
+        from acp.executor.firecracker import FirecrackerExecutor
+
+        fc_paths = state.get("firecracker_cleanup_paths", {})
+        executor = FirecrackerExecutor(cfg.executor)
+        executor._socket_path = fc_paths.get("socket_path", "")
+        executor._rootfs_copy_path = fc_paths.get("rootfs_copy_path", "")
+
+        extracted_wt = state["artifacts_dir"] / "fc_workspace"
+        if not executor.extract_workspace_from_rootfs(extracted_wt):
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "capture_diff",
+                    "reason": "failed to extract workspace from rootfs",
+                },
+            )
+            return {
+                "status": TaskStatus.FAILED,
+                "error": "failed to extract workspace from rootfs",
+            }
+        # The workspace was tarred with arcname="workspace", so the repo
+        # content is at extracted_wt / "workspace".
+        ws_path = extracted_wt / "workspace"
+        if not ws_path.exists():
+            ws_path = extracted_wt
+        diff = capture_diff(
+            worktree_path=ws_path,
+            base_branch=cfg.repo.default_branch,
+            artifacts_dir=state["artifacts_dir"],
+            base_commit_sha=base_sha or None,
+        )
+        ctx.events.write(
+            EventType.DIFF_CAPTURED,
+            {
+                "files": len(diff.changed_files),
+                "insertions": diff.insertions,
+                "deletions": diff.deletions,
+                "binary_files": diff.binary_files,
+                "source": "firecracker_rootfs",
+            },
+        )
+        return {"diff": diff}
+
     # --- worktree backend (default): current behavior --------------------- #
-    diff: DiffCapture = capture_diff(
+    diff = capture_diff(
         worktree_path=state["worktree_path"],
         base_branch=cfg.repo.default_branch,
         artifacts_dir=state["artifacts_dir"],
@@ -645,10 +1289,68 @@ def capture_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     return {"diff": diff}
 
 
-def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     state["task"].status = TaskStatus.REVIEWING
     ctx.store.save(state["task"])
+
+    # v0.7.0 (Phase 1.3): Fast pre-TruffleHog hard-block scan. If a
+    # known secret pattern or very high-entropy string is detected,
+    # emit review.secret_hard_block BEFORE the full review runs. This
+    # provides an early, cryptographically-bound signal that the diff
+    # contains a likely secret — even before TruffleHog verifies it.
+    if cfg.review.block_secret_leaks:
+        from acp.review.secret_scanner import detect_hard_block_secrets
+
+        hard_blocks = detect_hard_block_secrets(state["diff"].patch)
+        if hard_blocks:
+            ctx.events.write(
+                EventType.REVIEW_SECRET_HARD_BLOCK,
+                {
+                    "finding_count": len(hard_blocks),
+                    "kinds": sorted({f.kind for f in hard_blocks}),
+                    "line_numbers": [f.line_no for f in hard_blocks],
+                },
+            )
+
+    # v0.7.0 (Phase 2.2): Egress proxy violation check. If the proxy
+    # was enabled and detected access to domains not in the allowlist,
+    # add review concerns so the human reviewer is alerted. The review
+    # gate handles risk escalation based on the concerns — we don't
+    # fail the node here.
+    #
+    # When proxy.enabled is True but no egress artifact was written
+    # (e.g., the MITM proxy wasn't actually started, or the agent made
+    # no network requests), we write an empty artifact so the review
+    # gate knows the proxy was configured but observed no traffic.
+    egress_violation_domains: list[str] = []
+    if cfg.proxy.enabled:
+        from acp.egress import (
+            EgressLogger,
+            analyze_egress_log,
+            has_egress_violations,
+        )
+
+        artifacts_dir = state["artifacts_dir"]
+        egress_artifact_path = artifacts_dir / cfg.proxy.log_artifact
+        if not egress_artifact_path.is_file():
+            # No egress artifact was written (MITM proxy not started or
+            # no traffic). Write an empty artifact so the review gate
+            # can distinguish "proxy enabled but no traffic" from
+            # "proxy not configured".
+            EgressLogger().write_artifact(
+                artifacts_dir,
+                allowed_domains=cfg.proxy.allowed_domains,
+                log_filename=cfg.proxy.log_artifact,
+            )
+        if has_egress_violations(artifacts_dir, cfg.proxy.log_artifact):
+            violations = analyze_egress_log(
+                egress_artifact_path,
+                cfg.proxy.allowed_domains,
+            )
+            if violations:
+                egress_violation_domains = [v.domain for v in violations]
+
     review = review_diff(
         diff=state["diff"],
         command_results=state["command_results"],
@@ -662,6 +1364,12 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     if hasattr(diff, "binary_files") and diff.binary_files:
         for bf in diff.binary_files:
             review.concerns.append(f"binary file changed: {bf}")
+    # v0.7.0 (Phase 2.2): Add egress violations as review concerns.
+    if egress_violation_domains:
+        for domain in egress_violation_domains:
+            review.concerns.append(
+                f"egress violation: agent accessed unauthorized domain '{domain}'"
+            )
     ctx.events.write(
         EventType.REVIEW_COMPLETED,
         {
@@ -673,12 +1381,17 @@ def review_diff_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     return {"review_result": review}
 
 
-def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     task = state["task"]
-    review = state.get("review_result")
+    review: ReviewResult = state["review_result"]
     agent_result = state.get("agent_result")
     command_results = state.get("command_results", [])
-    diff = state.get("diff", DiffCapture(patch="", stat="", changed_files=[], insertions=0, deletions=0, binary_files=[]))
+    diff = state.get(
+        "diff",
+        DiffCapture(
+            patch="", stat="", changed_files=[], insertions=0, deletions=0, binary_files=[]
+        ),
+    )
 
     # Evaluate gates directly — GateResult is now the single truth object.
     gate_result = evaluate_final_gates(
@@ -688,8 +1401,10 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
         changed_files=diff.changed_files,
     )
     task.status = (
-        TaskStatus.PASSED if gate_result.outcome == GateOutcome.PASSED
-        else TaskStatus.NEEDS_REVIEW if gate_result.outcome == GateOutcome.NEEDS_REVIEW
+        TaskStatus.PASSED
+        if gate_result.outcome == GateOutcome.PASSED
+        else TaskStatus.NEEDS_REVIEW
+        if gate_result.outcome == GateOutcome.NEEDS_REVIEW
         else TaskStatus.FAILED
     )
     ctx.store.save(task)
@@ -770,22 +1485,36 @@ def write_report_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
     }
 
 
-def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
+async def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
     """Stop or remove the sandbox after a run (docker_sbx backend only).
 
     Best-effort: writes a ``sandbox.stopped`` event on success, a
     ``node.failed`` event on failure. Never raises.
     """
     cfg = state.get("config")
-    if cfg is None or cfg.executor.backend != "docker_sbx":
+    if cfg is None or cfg.executor.backend not in ("docker_sbx", "gvisor", "firecracker"):
         return
     sandbox_name = state.get("sandbox_name", "")
     if not sandbox_name:
         return
     try:
-        executor = SbxExecutor(cfg.executor)
-        executor._sandbox_name = sandbox_name
-        executor._sandbox_remote = state.get("sandbox_remote", "")
+        if cfg.executor.backend == "gvisor":
+            from acp.executor.gvisor import GvisorExecutor
+
+            executor: Any = GvisorExecutor(cfg.executor)
+            executor._container_name = sandbox_name
+        elif cfg.executor.backend == "firecracker":
+            from acp.executor.firecracker import FirecrackerExecutor
+
+            executor = FirecrackerExecutor(cfg.executor)
+            executor._vm_id = sandbox_name
+            fc_paths = state.get("firecracker_cleanup_paths", {})
+            executor._socket_path = fc_paths.get("socket_path", "")
+            executor._rootfs_copy_path = fc_paths.get("rootfs_copy_path", "")
+        else:
+            executor = SbxExecutor(cfg.executor)
+            executor._sandbox_name = sandbox_name
+            executor._sandbox_remote = state.get("sandbox_remote", "")
         executor.cleanup()
         ctx.events.write(
             EventType.SANDBOX_STOPPED,
@@ -795,13 +1524,18 @@ def _cleanup_sandbox(state: dict[str, Any], ctx: NodeContext) -> None:
             },
         )
     except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sandbox cleanup failed (sandbox=%s): %s — orphaned sandbox may remain",
+            sandbox_name,
+            exc,
+        )
         ctx.events.write(
             EventType.NODE_FAILED,
             {"node": "sandbox_cleanup", "message": str(exc)},
         )
 
 
-def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal success node. Writes task.completed with gate-derived validation fields."""
     task = state["task"]
     gate_result = state.get("gate_result")
@@ -810,17 +1544,21 @@ def done_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         {
             "status": task.status.value,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
-            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
+            "recommendation": state["review_result"].recommendation.value
+            if state.get("review_result")
+            else "unknown",
         },
     )
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
     return {"status": task.status, "manifest_hash": manifest_hash}
 
 
-def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal failure node — the ONLY node that writes ``TASK_FAILED``.
 
     If ``write_report_node`` already wrote the report (normal graph path),
@@ -890,7 +1628,9 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "status": task.status.value,
             "error": error,
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
         },
     )
@@ -900,12 +1640,17 @@ def failed_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # the early-failure report with the final event timeline + manifest hash.
     if report_path is not None:
         state["report_path"] = report_path
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
-    return {"status": TaskStatus.FAILED, "report_path": report_path, "vault_note_path": vault_note_path, "manifest_hash": manifest_hash}
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
+    return {
+        "status": TaskStatus.FAILED,
+        "report_path": report_path,
+        "vault_note_path": vault_note_path,
+        "manifest_hash": manifest_hash,
+    }
 
 
-def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Terminal node for tasks that completed but need human review.
 
     ``write_report_node`` already wrote the report; this node only writes
@@ -921,13 +1666,17 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
             "status": task.status.value,
             "report_path": str(state.get("report_path", "")),
             "validation_commands_ran": gate_result.validation_commands_ran if gate_result else 0,
-            "validation_commands_failed": gate_result.validation_commands_failed if gate_result else 0,
+            "validation_commands_failed": gate_result.validation_commands_failed
+            if gate_result
+            else 0,
             "validation_status": validation_status(state.get("command_results", [])),
-            "recommendation": state["review_result"].recommendation.value if state.get("review_result") else "unknown",
+            "recommendation": state["review_result"].recommendation.value
+            if state.get("review_result")
+            else "unknown",
         },
     )
-    manifest_hash = _finalize_evidence(state, ctx)
-    _cleanup_sandbox(state, ctx)
+    manifest_hash = await _finalize_evidence(state, ctx)
+    await _cleanup_sandbox(state, ctx)
     return {
         "status": TaskStatus.NEEDS_REVIEW,
         "report_path": state.get("report_path"),
@@ -946,8 +1695,9 @@ def needs_review_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]
 # --------------------------------------------------------------------------- #
 
 
-def auto_approve_node(
-    state: dict[str, Any], ctx: NodeContext,
+async def auto_approve_node(
+    state: dict[str, Any],
+    ctx: NodeContext,
 ) -> dict[str, Any]:
     """Bypass human review by programmatically approving the task.
 
@@ -963,6 +1713,52 @@ def auto_approve_node(
         return {}
 
     task = state["task"]
+
+    # Integrity gate: verify the hash-chained event log before
+    # auto-approving. A broken or tampered audit trail must not be
+    # auto-approved — downgrade to NEEDS_REVIEW so a human inspects.
+    try:
+        from acp.events import verify_event_chain
+
+        events = ctx.events.read_all()
+        if not verify_event_chain(events):
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "auto_approve",
+                    "message": (
+                        "event chain verification failed (tampered or incomplete audit trail)"
+                    ),
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_approved": False,
+                "error": (
+                    "auto_approve refused: event chain verification "
+                    "failed — human approval required"
+                ),
+            }
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {
+                "node": "auto_approve",
+                "exception_type": type(exc).__name__,
+                "message": f"event chain verification error: {exc}",
+            },
+        )
+        task.status = TaskStatus.NEEDS_REVIEW
+        task.touch()
+        ctx.store.save(task)
+        return {
+            "status": TaskStatus.NEEDS_REVIEW,
+            "auto_approved": False,
+            "error": f"auto_approve: event chain verification error: {exc}",
+        }
 
     ctx.events.write(
         EventType.AUTO_APPROVED,
@@ -996,11 +1792,12 @@ def auto_approve_node(
                 content = Path(vault_note_path).read_text(encoding="utf-8")
                 fm, _ = parse_frontmatter(content)
                 if should_promote_to_graphiti(task, fm, Path(vault_note_path)):
-                    result = ingest_task_to_graphiti(
+                    result = await ingest_task_to_graphiti(
                         task=task,
                         frontmatter=fm,
                         vault_note_path=Path(vault_note_path),
                         graphiti_group_id=cfg.memory.graphiti_group_id,
+                        memory_config=cfg.memory,
                     )
                     ctx.events.write(
                         EventType.MEMORY_PROMOTED,
@@ -1015,14 +1812,33 @@ def auto_approve_node(
                     memory_promoted = True
         except ImportError:
             pass  # memory extra not installed — skip silently
-        except Exception:  # noqa: BLE001
-            pass  # FalkorDB not running or LLM error — don't block approval
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Auto-promotion to Graphiti failed for task %s: %s "
+                "— approval still stands, promote manually later.",
+                task.task_id,
+                exc,
+            )
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "auto_approve",
+                    "sub_node": "memory_promotion",
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
 
-    return {"status": TaskStatus.APPROVED, "auto_approved": True, "memory_promoted": memory_promoted}
+    return {
+        "status": TaskStatus.APPROVED,
+        "auto_approved": True,
+        "memory_promoted": memory_promoted,
+    }
 
 
-def auto_merge_node(
-    state: dict[str, Any], ctx: NodeContext,
+async def auto_merge_node(
+    state: dict[str, Any],
+    ctx: NodeContext,
 ) -> dict[str, Any]:
     """Merge the task branch into the default branch.
 
@@ -1031,9 +1847,24 @@ def auto_merge_node(
     here after auto_approve). Writes an ``auto.merged`` event with the
     merge commit SHA.
 
-    If the merge fails (conflicts, diverged base), the task is downgraded
-    to ``NEEDS_REVIEW`` so a human can resolve it manually. The merge
-    failure is recorded in the event log.
+    Two hard gates refuse the merge and downgrade to ``NEEDS_REVIEW`` so
+    a human must click approved: true before the change reaches the
+    default branch (the "human firewall" for autonomous mode):
+
+      1. **Risk gate**: if the review risk exceeds
+         ``config.review.auto_merge_max_risk`` (default MEDIUM), the
+         merge is refused. HIGH-risk changes (database, secrets, auth)
+         always require a human — the swarm may not push them to main
+         on its own.
+      2. **Integrity gate**: the hash-chained event log is verified
+         with :func:`verify_event_chain` before merging. A broken or
+         tampered audit trail refuses the merge — a task with no
+         tamper-proof evidence trail is not allowed to reach the
+         default branch autonomously.
+
+    If the merge itself fails (conflicts, diverged base), the task is
+    likewise downgraded to ``NEEDS_REVIEW``. Every refusal writes an
+    ``auto.merge.refused`` event recording the reason.
     """
     cfg = state.get("config")
     if cfg is None or not cfg.review.auto_merge:
@@ -1043,6 +1874,85 @@ def auto_merge_node(
     repo_path = state.get("repo_path")
     if repo_path is None:
         return {}
+
+    # --- Hard gate 1: risk-level human firewall ----------------------- #
+    review = state.get("review_result")
+    if review is not None:
+        max_risk = cfg.review.auto_merge_max_risk
+        if _risk_exceeds(review.risk, max_risk):
+            # v0.7.1: Log which specific risk factors breached the ceiling
+            # so operators can see exactly what triggered the refusal.
+            risk_factors = []
+            if review.hard_block:
+                risk_factors.append("hard_block")
+            if review.concerns:
+                risk_factors.extend(review.concerns)
+            ctx.events.write(
+                EventType.AUTO_MERGE_REFUSED,
+                {
+                    "reason": "risk_exceeds_max",
+                    "review_risk": review.risk.value,
+                    "auto_merge_max_risk": max_risk.value,
+                    "task_branch": task.task_branch,
+                    "base_branch": cfg.repo.default_branch,
+                    "risk_factors": risk_factors,
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_merged": False,
+                "error": (
+                    f"auto_merge refused: review risk '{review.risk.value}' "
+                    f"exceeds auto_merge_max_risk '{max_risk.value}' — "
+                    "human approval required"
+                ),
+            }
+
+    # --- Hard gate 2: event-chain integrity --------------------------- #
+    try:
+        from acp.events import verify_event_chain
+
+        events = ctx.events.read_all()
+        if not verify_event_chain(events):
+            ctx.events.write(
+                EventType.AUTO_MERGE_REFUSED,
+                {
+                    "reason": "event_chain_broken",
+                    "task_branch": task.task_branch,
+                    "base_branch": cfg.repo.default_branch,
+                },
+            )
+            task.status = TaskStatus.NEEDS_REVIEW
+            task.touch()
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.NEEDS_REVIEW,
+                "auto_merged": False,
+                "error": (
+                    "auto_merge refused: event chain verification failed "
+                    "(tampered or incomplete audit trail) — human approval required"
+                ),
+            }
+    except Exception as exc:  # noqa: BLE001
+        ctx.events.write(
+            EventType.NODE_FAILED,
+            {
+                "node": "auto_merge",
+                "exception_type": type(exc).__name__,
+                "message": f"event chain verification error: {exc}",
+            },
+        )
+        task.status = TaskStatus.NEEDS_REVIEW
+        task.touch()
+        ctx.store.save(task)
+        return {
+            "status": TaskStatus.NEEDS_REVIEW,
+            "auto_merged": False,
+            "error": f"auto_merge: event chain verification error: {exc}",
+        }
 
     try:
         from acp.gitops.merge import merge_to_base
@@ -1083,6 +1993,17 @@ def auto_merge_node(
         }
 
 
+def _risk_exceeds(actual: RiskLevel, ceiling: RiskLevel) -> bool:
+    """Return True if ``actual`` is riskier than ``ceiling``.
+
+    Order: LOW < MEDIUM < HIGH. ``actual`` exceeds ``ceiling`` when it
+    sits strictly above the ceiling — a HIGH-risk task exceeds a MEDIUM
+    ceiling, but a MEDIUM-risk task does not.
+    """
+    order = [RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH]
+    return order.index(actual) > order.index(ceiling)
+
+
 # --------------------------------------------------------------------------- #
 # M4 repair loop nodes.
 #
@@ -1095,7 +2016,7 @@ def auto_merge_node(
 # --------------------------------------------------------------------------- #
 
 
-def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Build a repair prompt from the most recent command failures.
 
     Increments ``repair_attempts`` and records a history entry. Every repair
@@ -1173,11 +2094,13 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         )
 
     history = list(state.get("repair_history", []))
-    history.append({
-        "attempt": attempts,
-        "prompt_path": str(prompt_path),
-        "tests_missing": tests_missing,
-    })
+    history.append(
+        {
+            "attempt": attempts,
+            "prompt_path": str(prompt_path),
+            "tests_missing": tests_missing,
+        }
+    )
 
     # v0.6.0: Compute a fingerprint of the current failure signature.
     # The circuit breaker in _route_after_tests uses this to detect when
@@ -1185,12 +2108,9 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     # the failing command names + exit codes (not stdout/stderr, which
     # may vary slightly even for the same root cause).
     import hashlib
-    fp_input = "|".join(
-        f"{f['command']}:{f['exit_code']}" for f in failures
-    )
-    fingerprint = hashlib.sha256(
-        fp_input.encode()
-    ).hexdigest()[:16] if fp_input else "no_failures"
+
+    fp_input = "|".join(f"{f['command']}:{f['exit_code']}" for f in failures)
+    fingerprint = hashlib.sha256(fp_input.encode()).hexdigest()[:16] if fp_input else "no_failures"
     fingerprints = list(state.get("repair_fingerprints", []))
     fingerprints.append(fingerprint)
 
@@ -1202,7 +2122,7 @@ def repair_plan_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     }
 
 
-def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+async def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     """Run the configured agent against the repair prompt.
 
     Reuses the same agent registry + run contract as the initial ``run_agent``
@@ -1210,9 +2130,20 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
     ``agent_stdout.txt`` / ``agent_stderr.txt`` (overwritten per attempt; the
     distinct ``repair_prompt_<n>.txt`` artifacts preserve the per-attempt
     evidence trail).
+
+    v0.7.3: Like ``run_agent_node``, this node passes the event writer and
+    task ID to agents that support mid-stream analysis (CLIAgent). If the
+    StreamSentinel kills the repair agent mid-execution, the node short-
+    circuits to FAILED — re-running tests on a partial repair diff from a
+    killed agent is pointless.
     """
     cfg = state["config"]
     agent = ctx.agent_factory(cfg)
+    # v0.7.3: Pass the event writer to agents that support mid-stream analysis.
+    if hasattr(agent, "event_writer"):
+        agent.event_writer = ctx.events
+    if hasattr(agent, "task_id"):
+        agent.task_id = state["task_id"]
     ctx.events.write(
         EventType.AGENT_STARTED,
         {
@@ -1222,7 +2153,7 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
             "timeout_seconds": cfg.agent.timeout_seconds,
         },
     )
-    agent_result = agent.run(
+    agent_result = await agent.run(
         prompt_path=state["prompt_path"],
         worktree_path=state["worktree_path"],
         artifact_dir=state["artifacts_dir"],
@@ -1233,6 +2164,32 @@ def run_repair_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, 
             f"agent '{agent.name}' returned None instead of an AgentResult — "
             f"this is a bug in the agent implementation"
         )
+
+    # v0.7.3: If the StreamSentinel killed the repair agent, short-circuit.
+    # The terminal task.failed event is written by failed_node.
+    if getattr(agent_result, "aborted_by_sentinel", False):
+        abort_reason = getattr(agent_result, "sentinel_abort_reason", "")
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "phase": "repair",
+                "attempt": state.get("repair_attempts", 1),
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+                "aborted_by_sentinel": True,
+                "sentinel_abort_reason": abort_reason,
+            },
+        )
+        task = state["task"]
+        task.status = TaskStatus.FAILED
+        ctx.store.save(task)
+        return {
+            "agent_result": agent_result,
+            "status": TaskStatus.FAILED,
+            "error": f"Repair agent killed by StreamSentinel: {abort_reason}",
+        }
+
     ctx.events.write(
         EventType.AGENT_FINISHED,
         {

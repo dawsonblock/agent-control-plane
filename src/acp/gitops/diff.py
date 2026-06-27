@@ -42,7 +42,7 @@ class DiffCapture:
     deletions: int
     binary_files: list[str] = None  # type: ignore[assignment]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.binary_files is None:
             self.binary_files = []
 
@@ -86,9 +86,7 @@ def capture_diff(
         try:
             base_commit = repo.commit(base_commit_sha)
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"base commit sha not resolvable: {base_commit_sha}"
-            ) from exc
+            raise ValueError(f"base commit sha not resolvable: {base_commit_sha}") from exc
     else:
         try:
             base_commit = repo.commit(base_branch)
@@ -177,8 +175,7 @@ def capture_diff_from_remote(
         remote_commit = repo.commit(remote_ref)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(
-            f"sandbox remote ref not resolvable: {remote_ref}. "
-            f"Did you fetch the remote first?"
+            f"sandbox remote ref not resolvable: {remote_ref}. Did you fetch the remote first?"
         ) from exc
 
     # Diff base..remote — the complete delta the agent produced.

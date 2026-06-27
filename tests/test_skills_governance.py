@@ -15,19 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from acp.skills.loader import (
-    load_skill,
-    load_skills,
-    validate_skill,
-)
+from acp.models import RiskLevel as ModelRiskLevel
+from acp.review.risk import RiskEngine, RiskLevel
 from acp.skills.enforcement import (
     apply_skill_review_gates,
     get_active_skill,
     get_skill_prompt_instructions,
 )
-from acp.review.risk import RiskEngine, RiskLevel
-from acp.models import RiskLevel as ModelRiskLevel
-
+from acp.skills.loader import (
+    load_skill,
+    load_skills,
+    validate_skill,
+)
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -59,6 +58,7 @@ def _write_skill_yaml(
 ) -> Path:
     """Write a skill as a .yaml file."""
     import yaml
+
     skills_dir.mkdir(parents=True, exist_ok=True)
     path = skills_dir / f"{name}.yaml"
     path.write_text(yaml.safe_dump(skill, sort_keys=False))
@@ -98,6 +98,7 @@ class TestLoadSkills:
         (skills_dir / "bad.yaml").write_text("- just\n- a\n- list\n")
         # Should raise SkillLoadError
         from acp.errors import SkillLoadError
+
         with pytest.raises(SkillLoadError):
             load_skills(skills_dir)
 
@@ -111,7 +112,7 @@ class TestLoadSkills:
             "rules:\n"
             "  - Always backup\n"
             "hard_blocks: []\n"
-            "prompt_instructions: \"Create backups first\"\n"
+            'prompt_instructions: "Create backups first"\n'
             "---\n\n"
             "# RefactorDB Skill\n\nDetailed docs here.\n"
         )
@@ -199,13 +200,17 @@ class TestApplySkillReviewGates:
 
     def test_hard_block_triggers_when_requires_missing(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "hard_blocks": [{
-                "description": "Block drop without backup",
-                "file_pattern": "*drop*",
-                "requires_file": "*backup*",
-            }],
-        })
+        skill = _make_skill(
+            review_gates={
+                "hard_blocks": [
+                    {
+                        "description": "Block drop without backup",
+                        "file_pattern": "*drop*",
+                        "requires_file": "*backup*",
+                    }
+                ],
+            }
+        )
         # Diff has a "drop" file but no "backup" file
         apply_skill_review_gates(engine, skill, ["migrations/drop_column.sql"])
 
@@ -214,30 +219,42 @@ class TestApplySkillReviewGates:
 
     def test_hard_block_does_not_trigger_when_requires_present(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "hard_blocks": [{
-                "description": "Block drop without backup",
-                "file_pattern": "*drop*",
-                "requires_file": "*backup*",
-            }],
-        })
+        skill = _make_skill(
+            review_gates={
+                "hard_blocks": [
+                    {
+                        "description": "Block drop without backup",
+                        "file_pattern": "*drop*",
+                        "requires_file": "*backup*",
+                    }
+                ],
+            }
+        )
         # Diff has both "drop" and "backup" files
-        apply_skill_review_gates(engine, skill, [
-            "migrations/drop_column.sql",
-            "backups/backup_001.sql",
-        ])
+        apply_skill_review_gates(
+            engine,
+            skill,
+            [
+                "migrations/drop_column.sql",
+                "backups/backup_001.sql",
+            ],
+        )
 
         assert engine.hard_block is False
 
     def test_hard_block_does_not_trigger_when_pattern_absent(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "hard_blocks": [{
-                "description": "Block drop without backup",
-                "file_pattern": "*drop*",
-                "requires_file": "*backup*",
-            }],
-        })
+        skill = _make_skill(
+            review_gates={
+                "hard_blocks": [
+                    {
+                        "description": "Block drop without backup",
+                        "file_pattern": "*drop*",
+                        "requires_file": "*backup*",
+                    }
+                ],
+            }
+        )
         # Diff has no "drop" file at all
         apply_skill_review_gates(engine, skill, ["src/utils.py"])
 
@@ -245,35 +262,45 @@ class TestApplySkillReviewGates:
 
     def test_risk_elevator_elevates_to_high(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "risk_elevators": [{
-                "description": "Elevate SQL to high",
-                "file_pattern": "*.sql",
-                "to_level": "high",
-            }],
-        })
+        skill = _make_skill(
+            review_gates={
+                "risk_elevators": [
+                    {
+                        "description": "Elevate SQL to high",
+                        "file_pattern": "*.sql",
+                        "to_level": "high",
+                    }
+                ],
+            }
+        )
         apply_skill_review_gates(engine, skill, ["query.sql"])
 
         assert engine.level == RiskLevel.HIGH
 
     def test_risk_elevator_elevates_to_medium(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "risk_elevators": [{
-                "description": "Elevate config to medium",
-                "file_pattern": "*.config",
-                "to_level": "medium",
-            }],
-        })
+        skill = _make_skill(
+            review_gates={
+                "risk_elevators": [
+                    {
+                        "description": "Elevate config to medium",
+                        "file_pattern": "*.config",
+                        "to_level": "medium",
+                    }
+                ],
+            }
+        )
         apply_skill_review_gates(engine, skill, ["app.config"])
 
         assert engine.level == RiskLevel.MEDIUM
 
     def test_required_file_missing_adds_signal(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "required_files": ["*migration*"],
-        })
+        skill = _make_skill(
+            review_gates={
+                "required_files": ["*migration*"],
+            }
+        )
         # Diff has no migration file
         apply_skill_review_gates(engine, skill, ["src/utils.py"])
 
@@ -281,9 +308,11 @@ class TestApplySkillReviewGates:
 
     def test_required_file_present_no_signal(self):
         engine = RiskEngine()
-        skill = _make_skill(review_gates={
-            "required_files": ["*migration*"],
-        })
+        skill = _make_skill(
+            review_gates={
+                "required_files": ["*migration*"],
+            }
+        )
         apply_skill_review_gates(engine, skill, ["migrations/001_add.py"])
 
         assert not any("required file missing" in c.lower() for c in engine.concerns)
@@ -301,10 +330,14 @@ class TestGetSkillPromptInstructions:
 
     def test_returns_instructions_when_skill_exists(self, tmp_path):
         skills_dir = tmp_path / "skills"
-        _write_skill_yaml(skills_dir, "TestSkill", _make_skill(
+        _write_skill_yaml(
+            skills_dir,
             "TestSkill",
-            prompt_instructions="Always create backups.\nNever delete without migration.",
-        ))
+            _make_skill(
+                "TestSkill",
+                prompt_instructions="Always create backups.\nNever delete without migration.",
+            ),
+        )
 
         instructions = get_skill_prompt_instructions("TestSkill", skills_dir)
         assert "Always create backups" in instructions
@@ -357,10 +390,14 @@ class TestPromptInjection:
         from acp.config import RepoConfig, RepoSection, SkillsSection
 
         skills_dir = tmp_path / "skills"
-        _write_skill_yaml(skills_dir, "RefactorDB", _make_skill(
+        _write_skill_yaml(
+            skills_dir,
             "RefactorDB",
-            prompt_instructions="Always create a backup file before schema changes.",
-        ))
+            _make_skill(
+                "RefactorDB",
+                prompt_instructions="Always create a backup file before schema changes.",
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -405,10 +442,14 @@ class TestPromptInjection:
         from acp.config import RepoConfig, RepoSection, SkillsSection
 
         skills_dir = tmp_path / "skills"
-        _write_skill_yaml(skills_dir, "EmptySkill", _make_skill(
+        _write_skill_yaml(
+            skills_dir,
             "EmptySkill",
-            prompt_instructions="",
-        ))
+            _make_skill(
+                "EmptySkill",
+                prompt_instructions="",
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -443,16 +484,22 @@ class TestReviewGateIntegration:
         from acp.review.diff_reviewer import review_diff
 
         skills_dir = tmp_path / "skills"
-        _write_skill_yaml(skills_dir, "DBSkill", _make_skill(
+        _write_skill_yaml(
+            skills_dir,
             "DBSkill",
-            review_gates={
-                "hard_blocks": [{
-                    "description": "Block drop without backup",
-                    "file_pattern": "*drop*",
-                    "requires_file": "*backup*",
-                }],
-            },
-        ))
+            _make_skill(
+                "DBSkill",
+                review_gates={
+                    "hard_blocks": [
+                        {
+                            "description": "Block drop without backup",
+                            "file_pattern": "*drop*",
+                            "requires_file": "*backup*",
+                        }
+                    ],
+                },
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -487,16 +534,22 @@ class TestReviewGateIntegration:
         from acp.review.diff_reviewer import review_diff
 
         skills_dir = tmp_path / "skills"
-        _write_skill_yaml(skills_dir, "SQLSkill", _make_skill(
+        _write_skill_yaml(
+            skills_dir,
             "SQLSkill",
-            review_gates={
-                "risk_elevators": [{
-                    "description": "Elevate SQL to high",
-                    "file_pattern": "*.sql",
-                    "to_level": "high",
-                }],
-            },
-        ))
+            _make_skill(
+                "SQLSkill",
+                review_gates={
+                    "risk_elevators": [
+                        {
+                            "description": "Elevate SQL to high",
+                            "file_pattern": "*.sql",
+                            "to_level": "high",
+                        }
+                    ],
+                },
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -563,12 +616,14 @@ class TestSkillsConfig:
 
     def test_default_skills_section(self):
         from acp.config import SkillsSection
+
         s = SkillsSection()
         assert s.skills_dir is None
         assert s.active_skill == ""
 
     def test_skills_section_with_values(self, tmp_path):
         from acp.config import SkillsSection
+
         s = SkillsSection(
             skills_dir=tmp_path / "skills",
             active_skill="RefactorDB",
@@ -578,6 +633,7 @@ class TestSkillsConfig:
 
     def test_repo_config_with_skills(self, tmp_path):
         from acp.config import RepoConfig, RepoSection, SkillsSection
+
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
             skills=SkillsSection(
@@ -590,6 +646,7 @@ class TestSkillsConfig:
 
     def test_repo_config_without_skills_defaults(self, tmp_path):
         from acp.config import RepoConfig, RepoSection
+
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
         )

@@ -1,0 +1,154 @@
+# Desktop App Release — build, sign, and publish Tauri desktop app (v0.8.0, Phase 4.2).
+#
+# This workflow builds the Tauri desktop app for macOS (.dmg) and Windows (.msi),
+# signs the binaries, and publishes them as a GitHub release. The updater
+# plugin uses the signed binaries + latest.json manifest for auto-updates.
+#
+# Required secrets:
+#   APPLE_CERTIFICATE_P12     — macOS Developer ID Application certificate (base64)
+#   APPLE_CERTIFICATE_PASSWORD — password for the certificate
+#   APPLE_ID                  — Apple ID email for notarization
+#   APPLE_PASSWORD            — app-specific password for notarization
+#   APPLE_TEAM_ID             — Apple Developer Team ID
+#   TAURI_SIGNING_PRIVATE_KEY — Tauri updater signing key (from `tauri signer generate`)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — password for the signing key
+#   WINDOWS_CERTIFICATE        — Windows code signing certificate (base64)
+#   WINDOWS_CERTIFICATE_PASSWORD — password for the certificate
+
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0"
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Import macOS certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo $APPLE_CERTIFICATE_P12 | base64 --decode > certificate.p12
+          security create-keychain -p build build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k build build.keychain
+
+      - name: Build and sign macOS app
+        working-directory: desktop
+        env:
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: ${APPLE_TEAM_ID}"
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo tauri build --target universal-apple-darwin
+          cargo tauri build --target universal-apple-darwin --bundles dmg
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0"
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Import Windows certificate
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          [System.IO.File]::WriteAllBytes("certificate.pfx", [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $certPassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          Import-PfxCertificate -FilePath certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $certPassword
+
+      - name: Build and sign Windows app
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo tauri build --bundles msi
+          cargo tauri build --bundles nsis
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/src-tauri/target/release/bundle/msi/*.msi.tar.gz
+
+  publish-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/macos-artifacts/*.dmg
+            artifacts/macos-artifacts/*.app.tar.gz
+            artifacts/windows-artifacts/*.msi
+            artifacts/windows-artifacts/*-setup.exe
+            artifacts/windows-artifacts/*.msi.tar.gz

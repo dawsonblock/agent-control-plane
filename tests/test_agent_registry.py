@@ -26,7 +26,6 @@ from acp.agents.agent_file import (
 from acp.agents.agent_registry import AgentRegistry, load_registry
 from acp.errors import AgentConfigError
 
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -236,16 +235,22 @@ class TestHashVerification:
     def test_verify_agent_hash_no_binary(self):
         """No binary_path → verification skipped (returns True)."""
         agent = AgentFile(
-            name="test", version="1", role="coder",
-            command_template="c", sha256="abc",
+            name="test",
+            version="1",
+            role="coder",
+            command_template="c",
+            sha256="abc",
         )
         assert verify_agent_hash(agent) is True
 
     def test_verify_agent_hash_no_hash(self):
         """No sha256 → verification skipped."""
         agent = AgentFile(
-            name="test", version="1", role="coder",
-            command_template="c", binary_path=Path("/bin/ls"),
+            name="test",
+            version="1",
+            role="coder",
+            command_template="c",
+            binary_path=Path("/bin/ls"),
         )
         assert verify_agent_hash(agent) is True
 
@@ -255,8 +260,12 @@ class TestHashVerification:
         h = compute_file_hash(binary)
 
         agent = AgentFile(
-            name="test", version="1", role="coder",
-            command_template="c", sha256=h, binary_path=binary,
+            name="test",
+            version="1",
+            role="coder",
+            command_template="c",
+            sha256=h,
+            binary_path=binary,
         )
         assert verify_agent_hash(agent) is True
 
@@ -265,7 +274,9 @@ class TestHashVerification:
         binary.write_bytes(b"agent binary content")
 
         agent = AgentFile(
-            name="test", version="1", role="coder",
+            name="test",
+            version="1",
+            role="coder",
             command_template="c",
             sha256="0" * 64,  # wrong hash
             binary_path=binary,
@@ -275,7 +286,9 @@ class TestHashVerification:
 
     def test_verify_agent_hash_binary_not_found(self, tmp_path):
         agent = AgentFile(
-            name="test", version="1", role="coder",
+            name="test",
+            version="1",
+            role="coder",
             command_template="c",
             sha256="abc",
             binary_path=tmp_path / "nonexistent",
@@ -364,9 +377,15 @@ class TestAgentRegistry:
         h = compute_file_hash(binary)
 
         agents_dir = tmp_path / "agents"
-        _write_agent_yaml(agents_dir, "verified", _make_agent_data(
-            "verified", sha256=h, binary_path=str(binary),
-        ))
+        _write_agent_yaml(
+            agents_dir,
+            "verified",
+            _make_agent_data(
+                "verified",
+                sha256=h,
+                binary_path=str(binary),
+            ),
+        )
 
         registry = AgentRegistry(agents_dir)
         assert registry.verify_by_name("verified") is True
@@ -393,8 +412,8 @@ class TestBuildAgentIntegration:
     def test_build_agent_shell_no_registry(self, tmp_path):
         """Shell agent works without a registry."""
         from acp.agents.registry import build_agent
-        from acp.config import RepoConfig, RepoSection
         from acp.agents.shell_agent import ShellAgent
+        from acp.config import RepoConfig, RepoSection
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -405,8 +424,8 @@ class TestBuildAgentIntegration:
     def test_build_agent_with_registry_agent_not_found(self, tmp_path):
         """Agent not in registry — allowed (could be built-in)."""
         from acp.agents.registry import build_agent
-        from acp.config import RepoConfig, RepoSection
         from acp.agents.shell_agent import ShellAgent
+        from acp.config import RepoConfig, RepoSection
 
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
@@ -428,9 +447,15 @@ class TestBuildAgentIntegration:
         binary.write_bytes(b"real binary content")
 
         agents_dir = tmp_path / "agents"
-        _write_agent_yaml(agents_dir, "shell", _make_agent_data(
-            "shell", sha256="0" * 64, binary_path=str(binary),
-        ))
+        _write_agent_yaml(
+            agents_dir,
+            "shell",
+            _make_agent_data(
+                "shell",
+                sha256="0" * 64,
+                binary_path=str(binary),
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -443,17 +468,23 @@ class TestBuildAgentIntegration:
     def test_build_agent_hash_match_allowed(self, tmp_path):
         """Hash match — agent is allowed to run."""
         from acp.agents.registry import build_agent
-        from acp.config import RepoConfig, RepoSection
         from acp.agents.shell_agent import ShellAgent
+        from acp.config import RepoConfig, RepoSection
 
         binary = tmp_path / "agent_bin"
         binary.write_bytes(b"binary content")
         h = compute_file_hash(binary)
 
         agents_dir = tmp_path / "agents"
-        _write_agent_yaml(agents_dir, "shell", _make_agent_data(
-            "shell", sha256=h, binary_path=str(binary),
-        ))
+        _write_agent_yaml(
+            agents_dir,
+            "shell",
+            _make_agent_data(
+                "shell",
+                sha256=h,
+                binary_path=str(binary),
+            ),
+        )
 
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
@@ -474,17 +505,20 @@ class TestAgentConfig:
 
     def test_default_no_agents_dir(self):
         from acp.config import AgentSection
+
         a = AgentSection()
         assert a.agents_dir is None
 
     def test_agents_dir_set(self, tmp_path):
         from acp.config import AgentSection
+
         a = AgentSection(agents_dir=tmp_path / "agents")
         assert a.agents_dir is not None
         assert a.agents_dir.is_absolute()
 
     def test_repo_config_with_agents_dir(self, tmp_path):
         from acp.config import AgentSection, RepoConfig, RepoSection
+
         cfg = RepoConfig(
             repo=RepoSection(name="test", path=tmp_path, default_branch="main"),
             agent=AgentSection(agents_dir=tmp_path / "agents"),

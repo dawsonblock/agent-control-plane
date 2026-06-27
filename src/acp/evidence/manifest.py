@@ -31,22 +31,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from acp.events import EventWriter, verify_event_chain
 
+logger = logging.getLogger(__name__)
+
 EVIDENCE_CONFIG_FILENAME = "evidence_config.json"
 
 # Default ignore rules — generated/heavy paths that should never be hashed
 # as evidence. These are not ACP-created artifacts; they're build/dependency
 # junk that would waste compute and inflate manifests.
-DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset({
-    "__pycache__", ".pytest_cache", ".venv", "node_modules",
-    ".git", "dist", "build", "coverage", ".mypy_cache", ".ruff_cache",
-    "*.pyc", "*.pyo", "*.egg-info",
-})
+DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
+    {
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "coverage",
+        ".mypy_cache",
+        ".ruff_cache",
+        "*.pyc",
+        "*.pyo",
+        "*.egg-info",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +71,7 @@ class DigestRecord:
     If a file's size and mtime_ns haven't changed, the cached sha256 is
     reused. This avoids re-hashing unchanged files on every verify.
     """
+
     path: str
     size: int
     mtime_ns: int
@@ -88,11 +104,18 @@ class DigestCache:
             # Can't stat — fall through to direct hash (will likely fail too).
             return _sha256_file(path)
         cached = self._records.get(key)
-        if cached is not None and cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+        if (
+            cached is not None
+            and cached.size == stat.st_size
+            and cached.mtime_ns == stat.st_mtime_ns
+        ):
             return cached.sha256
         result = _sha256_file(path)
         self._records[key] = DigestRecord(
-            path=key, size=stat.st_size, mtime_ns=stat.st_mtime_ns, sha256=result,
+            path=key,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            sha256=result,
         )
         return result
 
@@ -158,6 +181,7 @@ def _should_ignore_path(path: Path, relative_to: Path) -> bool:
     and glob patterns (e.g. ``*.pyc``).
     """
     import fnmatch
+
     parts = path.parts
     for pattern in DEFAULT_IGNORE_PATTERNS:
         # Check if any path component matches the pattern.
@@ -176,12 +200,18 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
     artifacts to the signed event log: if any artifact is tampered with, this
     hash changes, and the signed event's payload no longer matches.
 
-    Files matching DEFAULT_IGNORE_PATTERNS (``__pycache__``, ``*.pyc``, etc.)
-    are excluded — they are generated junk, not evidence.
+    v0.7.4: Files matching DEFAULT_IGNORE_PATTERNS (``__pycache__``,
+    ``*.pyc``, etc.) are now INCLUDED in the hash as a separate
+    ``generated_artifacts`` block. This closes the evidence evasion loophole
+    where a malicious agent could smuggle code into ``__pycache__/`` without
+    it appearing in the evidence trail. The generated artifacts are tracked
+    in the manifest so ``acp verify --deep`` catches tampering, but they're
+    kept in a separate section so they don't clutter the human-facing diff.
     """
     run_dir = Path(run_dir)
     artifacts_dir = run_dir / "artifacts"
     artifact_hashes: dict[str, str] = {}
+    generated_hashes: dict[str, str] = {}
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.rglob("*")):
             if path.is_file():
@@ -189,9 +219,14 @@ def compute_artifact_content_hash(run_dir: Path) -> str:
                 if rel == "artifacts/final_report.md":
                     continue
                 if _should_ignore_path(path, run_dir):
-                    continue
-                artifact_hashes[rel] = _sha256_file(path)
-    content = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
+                    generated_hashes[rel] = _sha256_file(path)
+                else:
+                    artifact_hashes[rel] = _sha256_file(path)
+    content = json.dumps(
+        {"artifacts": artifact_hashes, "generated": generated_hashes},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(content.encode()).hexdigest()
 
 
@@ -221,9 +256,15 @@ def compute_task_json_hash(run_dir: Path) -> str | None:
     # Keep only immutable identity fields — exclude status + updated_at
     # which are lifecycle-mutable.
     immutable_fields = (
-        "task_id", "repo_name", "repo_path", "base_branch",
-        "base_commit_sha", "task_branch", "worktree_path",
-        "user_request", "created_at",
+        "task_id",
+        "repo_name",
+        "repo_path",
+        "base_branch",
+        "base_commit_sha",
+        "task_branch",
+        "worktree_path",
+        "user_request",
+        "created_at",
     )
     immutable = {k: data[k] for k in immutable_fields if k in data}
     return hashlib.sha256(
@@ -312,6 +353,7 @@ def build_evidence_manifest(
     artifacts_dir = run_dir / "artifacts"
 
     artifact_hashes: dict[str, str] = {}
+    generated_hashes: dict[str, str] = {}
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.rglob("*")):
             if path.is_file():
@@ -322,14 +364,18 @@ def build_evidence_manifest(
                 # *source* artifacts; the report references the manifest hash.
                 if rel == "artifacts/final_report.md":
                     continue
-                # v0.5.15: Apply the same ignore rules as
-                # compute_artifact_content_hash. Ignored/generated files
-                # (e.g. __pycache__, *.pyc) must not appear in the manifest
-                # at all, so fast and deep verification agree on what counts
-                # as evidence.
+                # v0.7.4: Files matching DEFAULT_IGNORE_PATTERNS are tracked
+                # in a separate ``generated_artifacts`` section instead of
+                # being silently excluded. This closes the evidence evasion
+                # loophole where a malicious agent could write a backdoor
+                # into __pycache__/ and have it bypass both the diff and the
+                # evidence manifest. The generated artifacts are hashed and
+                # verified, but kept separate from the human-facing artifacts
+                # so they don't clutter the review.
                 if _should_ignore_path(path, run_dir):
-                    continue
-                artifact_hashes[rel] = _sha256_file(path)
+                    generated_hashes[rel] = _sha256_file(path)
+                else:
+                    artifact_hashes[rel] = _sha256_file(path)
 
     events = events_writer.read_all()
     chain_valid = verify_event_chain(events)
@@ -340,13 +386,18 @@ def build_evidence_manifest(
     # This keeps the run manifest immutable while post-run events are
     # verified separately.
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
         # v0.6.0: Autonomous mode lifecycle events.
-        "auto.approved", "auto.merged",
+        "auto.approved",
+        "auto.merged",
     }
     sandbox_types = {
-        "sandbox.configured", "sandbox.started",
-        "sandbox.failed", "sandbox.stopped",
+        "sandbox.configured",
+        "sandbox.started",
+        "sandbox.failed",
+        "sandbox.stopped",
     }
     post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
     run_phase_events = [e for e in events if e.type.value not in post_run_types]
@@ -360,6 +411,11 @@ def build_evidence_manifest(
         "event_chain_head": chain_head,
         "event_chain_valid": chain_valid,
         "artifacts": artifact_hashes,
+        # v0.7.4: Generated/ignored files (e.g. __pycache__, *.pyc) tracked
+        # as evidence to close the evasion loophole. These are hashed and
+        # verified during `acp verify --deep` but kept separate from the
+        # human-facing artifacts section.
+        "generated_artifacts": generated_hashes,
     }
     # The manifest hash covers everything except itself.
     manifest_content = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -415,8 +471,11 @@ def build_lifecycle_manifest(
     run_dir = Path(run_dir)
     all_events = events_writer.read_all()
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     lifecycle_events = [e for e in all_events if e.type.value in lifecycle_types]
 
@@ -496,9 +555,13 @@ def verify_lifecycle_manifest(run_dir: Path) -> bool:
     if not events_path.is_file():
         return False
     from acp.models import Event
+
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     actual_lifecycle: list[Event] = []
     for line in events_path.read_text().splitlines():
@@ -601,6 +664,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # Peek at the event log to determine if evidence.finalized exists.
     # (We'll parse it fully below, but we need this flag now.)
     from acp.models import Event as _PeekEvent
+
     events_path_peek = run_dir / "events.jsonl"
     has_finalized_peek = False
     if events_path_peek.is_file():
@@ -612,8 +676,8 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
                 if peek_evt.type.value == "evidence.finalized":
                     has_finalized_peek = True
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("failed to peek finalized event: %s", exc)
 
     # Fast mode can skip individual hash recompute only when evidence.finalized
     # exists (its artifact_content_hash covers all artifacts). Otherwise,
@@ -629,19 +693,28 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
             if actual != expected_hash:
                 return False
 
+        # v0.7.4: Also verify generated artifacts (e.g. __pycache__, *.pyc).
+        # These were previously excluded from verification, creating an
+        # evidence evasion loophole. Now they're tracked in the manifest
+        # and verified during deep checks.
+        for rel, expected_hash in manifest.get("generated_artifacts", {}).items():
+            path = run_dir / rel
+            if not path.is_file():
+                return False
+            actual = cache.digest(path) if cache else _sha256_file(path)
+            if actual != expected_hash:
+                return False
+
         # Check for extra files not in the manifest (final_report.md is excluded
         # — it's a projection, not source evidence).
-        # v0.5.15: Apply the same ignore rules as build_evidence_manifest
-        # and compute_artifact_content_hash. Ignored/generated files (e.g.
-        # __pycache__, *.pyc) must not trigger a deep verification failure.
+        # v0.7.4: All files must be accounted for — either in "artifacts" or
+        # "generated_artifacts". No file should be untracked.
         if artifacts_dir.is_dir():
-            on_disk = {
-                str(p.relative_to(run_dir))
-                for p in artifacts_dir.rglob("*")
-                if p.is_file() and not _should_ignore_path(p, run_dir)
-            }
+            on_disk = {str(p.relative_to(run_dir)) for p in artifacts_dir.rglob("*") if p.is_file()}
             on_disk.discard("artifacts/final_report.md")
-            manifest_files = set(manifest.get("artifacts", {}).keys())
+            manifest_files = set(manifest.get("artifacts", {}).keys()) | set(
+                manifest.get("generated_artifacts", {}).keys()
+            )
             if on_disk != manifest_files:
                 return False
     else:
@@ -660,6 +733,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     if not events_path.is_file():
         return False
     from acp.models import Event, EventType
+
     events: list[Event] = []
     for line in events_path.read_text().splitlines():
         if not line.strip():
@@ -675,8 +749,11 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
 
     # Detect lifecycle + post-run events.
     lifecycle_types = {
-        "human.approved", "human.rejected", "memory.promoted",
-        "auto.approved", "auto.merged",
+        "human.approved",
+        "human.rejected",
+        "memory.promoted",
+        "auto.approved",
+        "auto.merged",
     }
     # v0.5.15: Sandbox events are executor lifecycle events, not run-phase
     # events. They happen after evidence.finalized (cleanup) or before the
@@ -684,8 +761,10 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # only run-phase events up to evidence.finalized. Sandbox cleanup events
     # (sandbox.stopped, sandbox.failed) must not break the run manifest.
     sandbox_types = {
-        "sandbox.configured", "sandbox.started",
-        "sandbox.failed", "sandbox.stopped",
+        "sandbox.configured",
+        "sandbox.started",
+        "sandbox.failed",
+        "sandbox.stopped",
     }
     post_run_types = lifecycle_types | {"evidence.report_bound"} | sandbox_types
 
@@ -745,9 +824,7 @@ def verify_evidence_manifest(run_dir: Path, *, deep: bool = False) -> bool:
     # of the signed event log. We verify that the recorded network_policy
     # and clone_mode match what was declared — an attacker who downgrades
     # the network policy after the run breaks this signed binding.
-    sandbox_configured_events = [
-        e for e in events if e.type == EventType.SANDBOX_CONFIGURED
-    ]
+    sandbox_configured_events = [e for e in events if e.type == EventType.SANDBOX_CONFIGURED]
     if sandbox_configured_events:
         configured = sandbox_configured_events[-1]
         executor_meta = configured.payload.get("executor", {})
@@ -866,11 +943,11 @@ def read_evidence_config(run_dir: Path) -> dict[str, Path | None | str]:
     try:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(
-            f"evidence_config.json is malformed: {path} ({exc})"
-        ) from exc
+        raise ValueError(f"evidence_config.json is malformed: {path} ({exc})") from exc
     return {
-        "signing_key_path": Path(data["signing_key_path"]) if data.get("signing_key_path") else None,
+        "signing_key_path": Path(data["signing_key_path"])
+        if data.get("signing_key_path")
+        else None,
         "durable_store": Path(data["durable_store"]) if data.get("durable_store") else None,
         "public_key_path": Path(data["public_key_path"]) if data.get("public_key_path") else None,
         "durable_mode": data.get("durable_mode"),

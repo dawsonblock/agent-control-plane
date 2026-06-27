@@ -8,6 +8,8 @@ of this file with lifecycle frontmatter prepended.
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,8 @@ from acp.gitops.diff import DiffCapture
 from acp.models import AgentResult, CommandResult, Event, ReviewResult, Task
 from acp.reports.templates import render_failure_report, render_report
 from acp.review.gates import GateResult
+
+logger = logging.getLogger(__name__)
 
 
 def write_report(
@@ -75,9 +79,7 @@ def write_failure_report(
     binding is verifiable.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    body = render_failure_report(
-        task=task, error=error, events=events, manifest_hash=manifest_hash
-    )
+    body = render_failure_report(task=task, error=error, events=events, manifest_hash=manifest_hash)
     report_path = artifact_dir / "final_report.md"
     report_path.write_text(body)
     return report_path
@@ -94,7 +96,6 @@ def rerender_report_from_run(run_dir: Path) -> Path | None:
     Returns the report path, or ``None`` if the run directory doesn't have
     the necessary files (e.g. early-failure runs without a full report).
     """
-    import json
 
     from acp.models import Event, Task
 
@@ -109,8 +110,8 @@ def rerender_report_from_run(run_dir: Path) -> Path | None:
     if manifest_path.is_file():
         try:
             manifest_hash = json.loads(manifest_path.read_text()).get("manifest_hash")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("failed to read manifest hash: %s", exc)
 
     # Read the updated event log.
     events_path = run_dir / "events.jsonl"
@@ -120,8 +121,8 @@ def rerender_report_from_run(run_dir: Path) -> Path | None:
             if line.strip():
                 try:
                     events.append(Event.model_validate_json(line))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("skipping malformed event line in report: %s", exc)
 
     # Read task.json for the task object.
     task_json_path = run_dir / "task.json"

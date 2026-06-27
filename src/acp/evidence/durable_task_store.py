@@ -40,17 +40,20 @@ Schema:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from acp.models import Task, TaskStatus
 
+logger = logging.getLogger(__name__)
+
 
 def _now_iso() -> str:
     """Current UTC time in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class DurableTaskStore:
@@ -66,7 +69,14 @@ class DurableTaskStore:
         self._conn: sqlite3.Connection | None = None
 
     def init(self) -> None:
-        """Initialize the database schema. Idempotent."""
+        """Initialize the database schema. Idempotent.
+
+        Uses the forward-rolling migration engine (``acp.evidence.migrations``)
+        to apply schema updates via a per-store ``schema_versions`` table.
+        This avoids the O(N) drop-and-rebuild strategy as the database grows.
+        """
+        from acp.evidence.migrations import TASK_STORE_MIGRATIONS, run_migrations
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -74,23 +84,9 @@ class DurableTaskStore:
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id         TEXT PRIMARY KEY,
-                repo_name       TEXT NOT NULL,
-                repo_path       TEXT NOT NULL,
-                base_branch     TEXT NOT NULL,
-                base_commit_sha TEXT DEFAULT '',
-                task_branch     TEXT NOT NULL,
-                worktree_path   TEXT NOT NULL,
-                user_request    TEXT NOT NULL,
-                status          TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            )
-        """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_repo ON tasks(repo_name)")
+
+        # Run forward-rolling migrations via the schema_versions table.
+        run_migrations(self._conn, TASK_STORE_MIGRATIONS, store_name="task_store")
 
     def save(self, task: Task) -> None:
         """Insert or update a task. Idempotent (upsert)."""
@@ -98,8 +94,9 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         self._conn.execute(
             "INSERT INTO tasks (task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            "task_branch, worktree_path, user_request, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(task_id) DO UPDATE SET "
             "repo_name=excluded.repo_name, "
             "repo_path=excluded.repo_path, "
@@ -110,7 +107,11 @@ class DurableTaskStore:
             "user_request=excluded.user_request, "
             "status=excluded.status, "
             "created_at=excluded.created_at, "
-            "updated_at=excluded.updated_at",
+            "updated_at=excluded.updated_at, "
+            "mission_id=excluded.mission_id, "
+            "mission_goal=excluded.mission_goal, "
+            "mission_description=excluded.mission_description, "
+            "mission_step_index=excluded.mission_step_index",
             (
                 task.task_id,
                 task.repo_name,
@@ -123,6 +124,10 @@ class DurableTaskStore:
                 task.status.value,
                 task.created_at,
                 task.updated_at,
+                task.mission_id,
+                task.mission_goal,
+                task.mission_description,
+                task.mission_step_index,
             ),
         )
 
@@ -132,7 +137,8 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         row = self._conn.execute(
             "SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            "task_branch, worktree_path, user_request, status, created_at, updated_at "
+            "task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             "FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
@@ -147,23 +153,40 @@ class DurableTaskStore:
         repo_name: str | None = None,
         limit: int = 1000,
     ) -> list[Task]:
-        """Query tasks by status and/or repo. Returns in creation order."""
+        """Query tasks by status and/or repo. Returns in creation order.
+
+        v0.7.4: Validates the status parameter against the TaskStatus enum
+        to prevent injection of arbitrary status strings. The repo_name
+        parameter is validated to reject SQL metacharacters.
+        """
         if self._conn is None:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
             status_str = status.value if isinstance(status, TaskStatus) else status
+            # v0.7.4: Validate status against known TaskStatus values.
+            valid_statuses = {s.value for s in TaskStatus}
+            if status_str not in valid_statuses:
+                raise ValueError(
+                    f"Invalid status: {status_str!r}. Must be one of: {sorted(valid_statuses)}"
+                )
             clauses.append("status = ?")
             params.append(status_str)
         if repo_name is not None:
+            # v0.7.4: Reject repo_name with SQL-dangerous characters.
+            # The parameterized query prevents injection, but this is
+            # defense-in-depth — a repo_name should never contain these.
+            if any(c in repo_name for c in (";", "'", '"', "--", "/*")):
+                raise ValueError("Invalid repo_name: contains SQL metacharacters")
             clauses.append("repo_name = ?")
             params.append(repo_name)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         rows = self._conn.execute(
             f"SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            f"task_branch, worktree_path, user_request, status, created_at, updated_at "
+            f"task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             f"FROM tasks{where} ORDER BY created_at ASC LIMIT ?",
             params,
         ).fetchall()
@@ -200,8 +223,9 @@ class DurableTaskStore:
                 task = Task.model_validate_json(task_json.read_text())
                 self.save(task)
                 count += 1
-            except Exception:  # noqa: BLE001
-                pass  # skip malformed task.json
+            except Exception as exc:  # noqa: BLE001
+                # v0.7.4: Log the error instead of silently skipping.
+                logger.error("Failed to load task.json during rebuild: %s", exc)
         return count
 
     def close(self) -> None:
@@ -227,7 +251,8 @@ class DurableTaskStore:
         placeholders = ",".join("?" * len(orphaned_statuses))
         rows = self._conn.execute(
             f"SELECT task_id, repo_name, repo_path, base_branch, base_commit_sha, "
-            f"task_branch, worktree_path, user_request, status, created_at, updated_at "
+            f"task_branch, worktree_path, user_request, status, created_at, updated_at, "
+            "mission_id, mission_goal, mission_description, mission_step_index "
             f"FROM tasks WHERE status IN ({placeholders}) ORDER BY created_at ASC",
             orphaned_statuses,
         ).fetchall()
@@ -243,8 +268,8 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
 
         self._conn.execute(
-            "UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?",
-            (TaskStatus.FAILED.value, _now_iso(), task_id),
+            "UPDATE tasks SET status = ?, updated_at = ?, orphan_reason = ? WHERE task_id = ?",
+            (TaskStatus.FAILED.value, _now_iso(), reason, task_id),
         )
 
     def recover_orphaned_tasks(
@@ -276,24 +301,146 @@ class DurableTaskStore:
                 task.touch()
                 store.save(task)
 
-                # Update SQLite.
-                self.save(task)
+                # Update SQLite with orphan_reason.
+                self.mark_orphaned(task.task_id, reason="orphaned by server restart")
 
                 # Clean up worktree if it exists.
                 wt_path = task.worktree_path
                 if wt_path and Path(wt_path).is_dir():
                     try:
-                        remove_worktree(Path(wt_path))
-                    except Exception:  # noqa: BLE001
-                        pass  # best-effort cleanup
+                        remove_worktree(task.repo_path, Path(wt_path))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("worktree cleanup failed for %s: %s", task.task_id, exc)
 
                 recovered.append(task.task_id)
                 if on_recovered is not None:
                     on_recovered(task.task_id)
-            except Exception:  # noqa: BLE001
-                pass  # best-effort — continue recovering other tasks
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to recover orphaned task: %s", exc)
 
         return recovered
+
+    def check_integrity(
+        self,
+        runs_root: Path | str,
+        *,
+        on_breach: Any = None,
+    ) -> list[dict[str, str]]:
+        """Check for status mismatches between task.json and SQLite.
+
+        For every task present in both stores, compares the ``status``
+        field. If they disagree, records a breach entry and calls
+        ``on_breach(task_id, json_status, sqlite_status)`` if provided.
+
+        Returns a list of breach dicts:
+        ``{"task_id": ..., "json_status": ..., "sqlite_status": ...}``
+
+        This is the v0.7.1 integrity check — fail-closed: when breaches
+        are detected, the caller should emit a ``store.integrity_breach``
+        event and refuse to proceed with the affected tasks.
+        """
+        runs_root = Path(runs_root)
+        breaches: list[dict[str, str]] = []
+
+        if self._conn is None:
+            raise RuntimeError("DurableTaskStore not initialized — call .init() first")
+
+        # Get all tasks from SQLite.
+        rows = self._conn.execute(
+            "SELECT task_id, status FROM tasks ORDER BY created_at ASC",
+        ).fetchall()
+
+        for row in rows:
+            task_id = row[0]
+            sqlite_status = row[1]
+
+            # Find the corresponding task.json.
+            task_json_path = runs_root / task_id / "task.json"
+            if not task_json_path.is_file():
+                # task.json missing but SQLite has it — that's a breach.
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": "(missing)",
+                        "sqlite_status": sqlite_status,
+                    }
+                )
+                logger.warning(
+                    "integrity breach: task %s — task.json missing, SQLite status=%s",
+                    task_id,
+                    sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, "(missing)", sqlite_status)
+                continue
+
+            try:
+                task = Task.model_validate_json(task_json_path.read_text())
+                json_status = task.status.value
+            except Exception as exc:  # noqa: BLE001
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": f"(parse error: {exc})",
+                        "sqlite_status": sqlite_status,
+                    }
+                )
+                logger.warning(
+                    "integrity breach: task %s — task.json parse error: %s, SQLite status=%s",
+                    task_id,
+                    exc,
+                    sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, "(parse error)", sqlite_status)
+                continue
+
+            if json_status != sqlite_status:
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": json_status,
+                        "sqlite_status": sqlite_status,
+                    }
+                )
+                logger.warning(
+                    "integrity breach: task %s — task.json status=%s, SQLite status=%s",
+                    task_id,
+                    json_status,
+                    sqlite_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, json_status, sqlite_status)
+
+        # Reverse check: task.json files with no corresponding SQLite entry.
+        sqlite_ids = {row[0] for row in rows}
+        if runs_root.is_dir():
+            for task_json in sorted(runs_root.rglob("task.json")):
+                task_id = task_json.parent.name
+                if task_id in sqlite_ids:
+                    continue
+                try:
+                    task = Task.model_validate_json(task_json.read_text())
+                    json_status = task.status.value
+                except Exception as exc:  # noqa: BLE001
+                    json_status = f"(parse error: {exc})"
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": json_status,
+                        "sqlite_status": "(missing)",
+                    }
+                )
+                logger.warning(
+                    "integrity breach: task %s — in task.json but "
+                    "missing from SQLite, json status=%s",
+                    task_id,
+                    json_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, json_status, "(missing)")
+
+        return breaches
 
     def __enter__(self) -> DurableTaskStore:
         self.init()
@@ -303,8 +450,15 @@ class DurableTaskStore:
         self.close()
 
 
-def _row_to_task(row: tuple) -> Task:
-    """Convert a SQLite row to a Task model."""
+def _row_to_task(row: tuple[Any, ...]) -> Task:
+    """Convert a SQLite row to a Task model.
+
+    The row must include the v0.9.0 mission-context columns
+    (mission_id, mission_goal, mission_description, mission_step_index)
+    appended after updated_at. Rows from a pre-migration database lack
+    those trailing entries; callers always SELECT the full column list so
+    the row width is consistent.
+    """
     return Task(
         task_id=row[0],
         repo_name=row[1],
@@ -317,4 +471,9 @@ def _row_to_task(row: tuple) -> Task:
         status=TaskStatus(row[8]),
         created_at=row[9],
         updated_at=row[10],
+        # v0.9.0 (Step 7): mission context (defaults if absent — back-compat).
+        mission_id=row[11] if len(row) > 11 else "",
+        mission_goal=row[12] if len(row) > 12 else "",
+        mission_description=row[13] if len(row) > 13 else "",
+        mission_step_index=row[14] if len(row) > 14 else 0,
     )

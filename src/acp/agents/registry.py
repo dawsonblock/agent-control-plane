@@ -13,6 +13,7 @@ hash is verified before execution. A hash mismatch raises
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from acp.agents.agent_file import AgentFile
@@ -24,7 +25,7 @@ from acp.config import RepoConfig
 from acp.errors import AgentConfigError
 
 # Known agent kinds, keyed by config string. Lowercased on lookup.
-_AGENTS = {
+_AGENTS: dict[str, Callable[[RepoConfig], AgentProtocol]] = {
     "shell": lambda cfg: ShellAgent(),
     "custom": lambda cfg: CLIAgent(cfg),
 }
@@ -51,8 +52,7 @@ def build_agent(config: RepoConfig) -> AgentProtocol:
     factory = _AGENTS.get(kind)
     if factory is None:
         raise AgentConfigError(
-            f"agent.default='{kind}' is not a known agent. "
-            f"Known: {', '.join(sorted(_AGENTS))}."
+            f"agent.default='{kind}' is not a known agent. Known: {', '.join(sorted(_AGENTS))}."
         )
     return factory(config)
 
@@ -68,6 +68,9 @@ def _verify_agent_from_registry(
     error) — the agent may be a built-in (shell) that doesn't need
     a profile. If the agent IS in the registry but the hash doesn't
     match, this raises ``AgentConfigError`` (refuse to execute).
+
+    v0.7.2: Also verifies the environment lockfile hash when the agent
+    has an :class:`EnvironmentSpec` with ``is_isolated=True``.
     """
     registry = AgentRegistry(agents_dir)
     agent_file = registry.get(kind)
@@ -75,8 +78,14 @@ def _verify_agent_from_registry(
         # Agent not in registry — could be a built-in. Allow but note.
         return
 
-    # Verify the hash. Raises AgentConfigError on mismatch.
+    # Verify the binary hash. Raises AgentConfigError on mismatch.
     registry.verify(agent_file)
+
+    # v0.7.2: Verify the environment lockfile hash if the agent has
+    # an isolated environment spec. This prevents supply-chain attacks
+    # via hijacked Python dependencies.
+    if agent_file.environment and agent_file.environment.is_isolated:
+        registry.verify_environment(agent_file, config.repo.path)
 
 
 def known_agents() -> list[str]:

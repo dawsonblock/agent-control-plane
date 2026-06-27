@@ -19,13 +19,13 @@ import pytest
 from acp.config import ContextSection, RepoConfig, RepoSection
 from acp.models import EventType
 
-
 # --------------------------------------------------------------------------- #
 # Helper: check if haystack is installed
 # --------------------------------------------------------------------------- #
 
 try:
     import haystack  # noqa: F401
+
     HAYSTACK_INSTALLED = True
 except ImportError:
     HAYSTACK_INSTALLED = False
@@ -44,7 +44,7 @@ rag_skip = pytest.mark.skipif(
 class TestImportErrorFallback:
     """build_context_node gracefully falls back when rag isn't installed."""
 
-    def test_context_built_event_has_haystack_false(self, tmp_path):
+    async def test_context_built_event_has_haystack_false(self, tmp_path):
         """When rag isn't installed, context.built event has haystack: False."""
         if HAYSTACK_INSTALLED:
             pytest.skip("rag is installed — fallback path not tested here")
@@ -76,7 +76,7 @@ class TestImportErrorFallback:
             "vault_root": tmp_path / "vault",
         }
 
-        result = build_context_node(state, ctx)
+        result = await build_context_node(state, ctx)
 
         # Prompt should be written
         assert result["prompt_path"].exists()
@@ -89,7 +89,7 @@ class TestImportErrorFallback:
         assert ctx_event.payload["retrieved_documents"] == 0
         assert ctx_event.payload["context_bundle_path"] is None
 
-    def test_prompt_written_without_context_bundle(self, tmp_path):
+    async def test_prompt_written_without_context_bundle(self, tmp_path):
         """Agent prompt is written even when rag isn't installed."""
         if HAYSTACK_INSTALLED:
             pytest.skip("rag is installed — fallback path not tested here")
@@ -121,7 +121,7 @@ class TestImportErrorFallback:
             "vault_root": tmp_path / "vault",
         }
 
-        result = build_context_node(state, ctx)
+        result = await build_context_node(state, ctx)
 
         prompt_content = result["prompt_path"].read_text()
         assert "add a feature" in prompt_content
@@ -164,12 +164,16 @@ class TestVaultFiltering:
 
         # Approved note in tasks/
         self._make_vault_note(
-            vault_root, "tasks/approved_task.md", approved=True,
+            vault_root,
+            "tasks/approved_task.md",
+            approved=True,
             content="Approved fix for authentication",
         )
         # Unapproved note in tasks/
         self._make_vault_note(
-            vault_root, "tasks/unapproved_task.md", approved=False,
+            vault_root,
+            "tasks/unapproved_task.md",
+            approved=False,
             content="Unapproved risky change to database",
         )
         # Rule note (not in tasks/ — always included)
@@ -294,7 +298,7 @@ class TestScannerIntegration:
 class TestContextBuiltEvent:
     """context.built event correctly records haystack status and document count."""
 
-    def test_event_payload_fields_exist(self, tmp_path):
+    async def test_event_payload_fields_exist(self, tmp_path):
         """context.built event has all required fields."""
         from acp.events import EventWriter
         from acp.graph.nodes import NodeContext, build_context_node
@@ -323,7 +327,7 @@ class TestContextBuiltEvent:
             "vault_root": tmp_path / "vault",
         }
 
-        build_context_node(state, ctx)
+        await build_context_node(state, ctx)
 
         all_events = events.read_all()
         ctx_event = [e for e in all_events if e.type == EventType.CONTEXT_BUILT][0]
@@ -357,9 +361,7 @@ class TestFullRAGPipeline:
             "    return check_credentials(user, password)\n",
         )
         (repo_path / "utils.py").write_text(
-            "def helper():\n"
-            "    '''A utility function.'''\n"
-            "    return 42\n",
+            "def helper():\n    '''A utility function.'''\n    return 42\n",
         )
 
         vault_root = tmp_path / "vault"
@@ -374,7 +376,8 @@ class TestFullRAGPipeline:
         )
 
         bundle = builder.build_context_bundle(
-            "authentication login password", top_k=5,
+            "authentication login password",
+            top_k=5,
         )
 
         # The bundle should contain the auth.py content
@@ -420,7 +423,8 @@ class TestFullRAGPipeline:
         )
 
         bundle = builder.build_context_bundle(
-            "database migration", top_k=10,
+            "database migration",
+            top_k=10,
         )
 
         # Unapproved task content should NOT appear
@@ -491,3 +495,122 @@ class TestEvidenceBinding:
         # The hash is a hex string
         assert isinstance(artifact_hash, str)
         assert len(artifact_hash) == 64  # SHA256 hex
+
+
+# --------------------------------------------------------------------------- #
+# 7. v0.7.0 (Phase 4.2): Cross-encoder re-ranking
+# --------------------------------------------------------------------------- #
+
+
+class TestReranking:
+    """Test the cross-encoder re-ranking feature."""
+
+    @rag_skip
+    def test_reranking_config_accepted(self, tmp_path):
+        """ContextBuilder accepts a RerankingSection."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(enabled=True),
+        )
+        assert builder.reranking_config is not None
+        assert builder.reranking_config.enabled is True
+
+    @rag_skip
+    def test_reranking_disabled_by_default(self, tmp_path):
+        """ContextBuilder works without a reranking config (disabled by default)."""
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+        )
+        assert builder.reranking_config is None
+
+    @rag_skip
+    def test_reranking_scores_in_bundle(self, tmp_path):
+        """context_bundle.md includes both retrieval and rerank scores."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        (repo_path / "auth.py").write_text(
+            "def login(user, password):\n    # authenticate user with password\n    pass\n"
+        )
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(
+                enabled=True,
+                top_k_before_rerank=10,
+                top_k_after_rerank=3,
+            ),
+        )
+        bundle = builder.build_context_bundle("authenticate user login", top_k=5)
+
+        # The bundle should have score annotations.
+        if "No relevant context" not in bundle:
+            assert "retrieval:" in bundle or "score:" in bundle
+
+    @rag_skip
+    def test_reranking_graceful_degradation_on_missing_model(self, tmp_path):
+        """_rerank returns original docs when the model can't be loaded."""
+        from acp.config import RerankingSection
+        from acp.context.context_builder import ContextBuilder
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        vault_root = tmp_path / "vault"
+        vault_root.mkdir()
+
+        builder = ContextBuilder(
+            repo_path=repo_path,
+            vault_root=vault_root,
+            context_config=ContextSection(include=["*.py"], exclude=[]),
+            reranking_config=RerankingSection(enabled=True),
+        )
+
+        # Call _rerank with a non-existent model — should degrade gracefully.
+        docs = [
+            {"content": "test doc 1", "meta": {"source": "repo"}, "retrieval_score": 0.9},
+            {"content": "test doc 2", "meta": {"source": "repo"}, "retrieval_score": 0.7},
+        ]
+        result = builder._rerank(docs, "test query", top_k=2, model_name="nonexistent/model")
+        # Should return the original docs (truncated to top_k) without raising.
+        assert len(result) <= 2
+
+    def test_reranking_config_validation(self):
+        """RerankingSection validates top_k ranges."""
+        from acp.config import RerankingSection
+
+        # Valid config.
+        cfg = RerankingSection(enabled=True, top_k_before_rerank=20, top_k_after_rerank=5)
+        assert cfg.top_k_before_rerank == 20
+
+        # Invalid: top_k_before_rerank too large.
+        with pytest.raises(ValueError, match="top_k_before_rerank"):
+            RerankingSection(top_k_before_rerank=200)
+
+        # Invalid: top_k_after_rerank zero.
+        with pytest.raises(ValueError, match="top_k_after_rerank"):
+            RerankingSection(top_k_after_rerank=0)

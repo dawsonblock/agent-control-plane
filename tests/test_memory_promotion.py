@@ -12,26 +12,26 @@ Tests the temporal memory feature:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from acp.models import (
-    MemoryStatus,
-    Task,
-    TaskStatus,
-)
 from acp.memory.promotion_rules import (
-    PROMOTION_BLOCKED,
     PRIORITY_HIGH,
     PRIORITY_NORMAL,
     PRIORITY_URGENT,
+    PROMOTION_BLOCKED,
     get_promotion_exclusions,
     get_promotion_metadata,
     get_promotion_priority,
     should_promote_to_graphiti,
 )
-
+from acp.models import (
+    EventType,
+    MemoryStatus,
+    Task,
+    TaskStatus,
+)
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -39,6 +39,7 @@ from acp.memory.promotion_rules import (
 
 try:
     import graphiti_core  # noqa: F401
+
     GRAPHITI_INSTALLED = True
 except ImportError:
     GRAPHITI_INSTALLED = False
@@ -113,6 +114,77 @@ def _write_vault_note(
 
 
 # --------------------------------------------------------------------------- #
+# 0. Episode text construction — mission awareness (v0.9.0 Step 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_build_episode_text_includes_mission_context(tmp_path):
+    """_build_episode_text prepends a Mission Context block when mission_id is set."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()
+    task.mission_id = "mission_20260626_0001"
+    task.mission_goal = "Migrate to React 19"
+    task.mission_description = "Incremental migration of the legacy views."
+    task.mission_step_index = 2
+    fm = Frontmatter(type="task_report", risk="low", recommendation="merge", files_changed=4)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nDid the thing.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    # Mission context block is present and first.
+    assert "Mission Context:" in text
+    assert "Mission ID: mission_20260626_0001" in text
+    assert "Mission Goal: Migrate to React 19" in text
+    assert "Mission Description: Incremental migration of the legacy views." in text
+    assert "Step Index: 2" in text
+    assert text.index("Mission Context:") < text.index("Task:")
+    # Task metadata + report body are still present.
+    assert f"Task: {task.task_id}" in text
+    assert "Report:" in text
+    assert "Did the thing." in text
+
+
+def test_build_episode_text_omits_mission_context_for_isolated_task(tmp_path):
+    """_build_episode_text has no Mission Context block when mission_id is empty."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()  # no mission fields set → all empty/0
+    fm = Frontmatter(type="task_report", risk="low", recommendation="merge", files_changed=1)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nStandalone fix.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    assert "Mission Context:" not in text
+    assert "Mission Goal:" not in text
+    assert f"Task: {task.task_id}" in text
+    assert "Standalone fix." in text
+
+
+def test_build_episode_text_mission_context_without_description(tmp_path):
+    """A mission task with no description omits the description line gracefully."""
+    from acp.memory.graphiti_client import _build_episode_text
+    from acp.vault.frontmatter import Frontmatter
+
+    task = _make_task()
+    task.mission_id = "mission_20260626_0002"
+    task.mission_goal = "Harden the API"
+    task.mission_description = ""  # no description
+    task.mission_step_index = 0
+    fm = Frontmatter(type="task_report", risk="medium", recommendation="review", files_changed=2)
+    note_path = _write_vault_note(tmp_path, task.task_id, body="## Report\nHardened.")
+
+    text = _build_episode_text(task, fm, note_path)
+
+    assert "Mission Context:" in text
+    assert "Mission Goal: Harden the API" in text
+    assert "Mission Description:" not in text
+    assert "Step Index: 0" in text
+
+
+# --------------------------------------------------------------------------- #
 # 1. Promotion rules
 # --------------------------------------------------------------------------- #
 
@@ -123,8 +195,7 @@ class TestShouldPromoteToGraphiti:
     def test_approved_active_not_ingested(self, tmp_path):
         """Eligible: approved + active + not ingested + file exists."""
         task = _make_task()
-        fm = _make_frontmatter(approved=True, memory_status="active",
-                               graphiti_ingested=False)
+        fm = _make_frontmatter(approved=True, memory_status="active", graphiti_ingested=False)
         note_path = tmp_path / "note.md"
         note_path.write_text("---\napproved: true\n---\nbody")
 
@@ -435,8 +506,8 @@ class TestCLIMemoryPromote:
     """acp memory promote --dry-run shows eligible notes."""
 
     def test_dry_run_shows_eligible(self, tmp_path):
-        from acp.store import TaskStore
         from acp.models import Task, TaskStatus
+        from acp.store import TaskStore
 
         # Set up vault with an approved note.
         vault_root = tmp_path / "vault"
@@ -444,8 +515,9 @@ class TestCLIMemoryPromote:
         runs_root.mkdir()
 
         task_id = "task_20260626_0001"
-        _write_vault_note(vault_root, task_id, approved=True,
-                          memory_status="active", graphiti_ingested=False)
+        _write_vault_note(
+            vault_root, task_id, approved=True, memory_status="active", graphiti_ingested=False
+        )
 
         # Create task.json so the CLI can load it.
         store = TaskStore(runs_root=runs_root)
@@ -465,24 +537,28 @@ class TestCLIMemoryPromote:
 
         # Create repo config.
         config_path = tmp_path / "test.repo.yaml"
-        config_path.write_text(
-            f"repo:\n"
-            f"  name: test-repo\n"
-            f"  path: {tmp_path / 'repo'}\n"
-        )
+        config_path.write_text(f"repo:\n  name: test-repo\n  path: {tmp_path / 'repo'}\n")
 
         # Run the CLI command in dry-run mode.
         from typer.testing import CliRunner
+
         from acp.cli import app
 
         runner = CliRunner()
-        result = runner.invoke(app, [
-            "memory", "promote",
-            "--config", str(config_path),
-            "--vault-root", str(vault_root),
-            "--runs-root", str(runs_root),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "promote",
+                "--config",
+                str(config_path),
+                "--vault-root",
+                str(vault_root),
+                "--runs-root",
+                str(runs_root),
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         assert "1 eligible note" in result.output or "1 eligible" in result.output
@@ -491,6 +567,7 @@ class TestCLIMemoryPromote:
 
     def test_dry_run_no_eligible_notes(self, tmp_path):
         from typer.testing import CliRunner
+
         from acp.cli import app
 
         vault_root = tmp_path / "vault"
@@ -498,19 +575,21 @@ class TestCLIMemoryPromote:
         (vault_root / "tasks").mkdir()
 
         config_path = tmp_path / "test.repo.yaml"
-        config_path.write_text(
-            f"repo:\n"
-            f"  name: test-repo\n"
-            f"  path: {tmp_path / 'repo'}\n"
-        )
+        config_path.write_text(f"repo:\n  name: test-repo\n  path: {tmp_path / 'repo'}\n")
 
         runner = CliRunner()
-        result = runner.invoke(app, [
-            "memory", "promote",
-            "--config", str(config_path),
-            "--vault-root", str(vault_root),
-            "--dry-run",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "memory",
+                "promote",
+                "--config",
+                str(config_path),
+                "--vault-root",
+                str(vault_root),
+                "--dry-run",
+            ],
+        )
 
         assert result.exit_code == 0
         assert "No eligible notes" in result.output or "No vault notes" in result.output
@@ -524,10 +603,10 @@ class TestCLIMemoryPromote:
 class TestAutoPromotion:
     """auto_approve_node auto-promotes when promote_reports_by_default=True."""
 
-    def test_auto_promote_when_configured(self, tmp_path):
+    async def test_auto_promote_when_configured(self, tmp_path):
         """When promote_reports_by_default=True, auto_approve promotes to Graphiti."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()
@@ -544,6 +623,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         # Write a vault note.
         vault_note_path = tmp_path / "vault" / "tasks" / f"{task.task_id}.md"
@@ -568,7 +649,7 @@ class TestAutoPromotion:
 
         # Mock the Graphiti ingestion (memory extra may not be installed).
         with patch(
-            "acp.memory.graphiti_client.ingest_task_to_graphiti"
+            "acp.memory.graphiti_client.ingest_task_to_graphiti", new_callable=AsyncMock
         ) as mock_ingest:
             mock_ingest.return_value = {
                 "task_id": task.task_id,
@@ -576,7 +657,7 @@ class TestAutoPromotion:
                 "nodes_created": 3,
                 "edges_created": 2,
             }
-            result = auto_approve_node(state, ctx)
+            result = await auto_approve_node(state, ctx)
 
         assert result["auto_approved"] is True
         assert result["memory_promoted"] is True
@@ -588,10 +669,10 @@ class TestAutoPromotion:
         assert len(promoted_events) == 1
         assert promoted_events[0].payload["auto_promoted"] is True
 
-    def test_no_auto_promote_when_not_configured(self, tmp_path):
+    async def test_no_auto_promote_when_not_configured(self, tmp_path):
         """When promote_reports_by_default=False, no auto-promotion."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()
@@ -607,6 +688,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -614,15 +697,15 @@ class TestAutoPromotion:
             "task": task,
         }
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         assert result["auto_approved"] is True
         assert result["memory_promoted"] is False
 
-    def test_auto_promote_silent_on_import_error(self, tmp_path):
+    async def test_auto_promote_silent_on_import_error(self, tmp_path):
         """When memory extra not installed, auto-promote fails silently."""
-        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.events import EventWriter
+        from acp.graph.nodes import NodeContext, auto_approve_node
         from acp.store import TaskStore
 
         cfg = MagicMock()
@@ -639,6 +722,8 @@ class TestAutoPromotion:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save(task)
         events = EventWriter(task.task_id, run_dir)
+        # Establish a valid event chain so the integrity gate passes.
+        events.write(EventType.TASK_CREATED, {"task_id": task.task_id})
 
         ctx = NodeContext(store=store, events=events)
         state = {
@@ -647,7 +732,7 @@ class TestAutoPromotion:
             "vault_note_path": None,  # No vault note path
         }
 
-        result = auto_approve_node(state, ctx)
+        result = await auto_approve_node(state, ctx)
 
         # Approval still stands, memory not promoted.
         assert result["auto_approved"] is True
@@ -663,7 +748,7 @@ class TestAutoPromotion:
 class TestFullGraphitiIntegration:
     """Full Graphiti integration tests (require memory extra + FalkorDB)."""
 
-    def test_ingest_rejects_unapproved(self, tmp_path):
+    async def test_ingest_rejects_unapproved(self, tmp_path):
         """ingest_task_to_graphiti rejects unapproved notes."""
         from acp.memory.graphiti_client import (
             HumanFirewallError,
@@ -676,9 +761,9 @@ class TestFullGraphitiIntegration:
         note_path.write_text("---\napproved: false\n---\nbody")
 
         with pytest.raises(HumanFirewallError):
-            ingest_task_to_graphiti(task, fm, note_path)
+            await ingest_task_to_graphiti(task, fm, note_path)
 
-    def test_ingest_rejects_already_ingested(self, tmp_path):
+    async def test_ingest_rejects_already_ingested(self, tmp_path):
         """ingest_task_to_graphiti rejects already-ingested notes."""
         from acp.memory.graphiti_client import (
             HumanFirewallError,
@@ -691,7 +776,7 @@ class TestFullGraphitiIntegration:
         note_path.write_text("content")
 
         with pytest.raises(HumanFirewallError):
-            ingest_task_to_graphiti(task, fm, note_path)
+            await ingest_task_to_graphiti(task, fm, note_path)
 
     def test_mark_as_ingested_updates_frontmatter(self, tmp_path):
         """_mark_as_ingested flips graphiti_ingested to true."""
@@ -714,3 +799,90 @@ class TestFullGraphitiIntegration:
         fm, body = parse_frontmatter(content)
         assert fm.graphiti_ingested is True
         assert "Report body" in body
+
+
+# --------------------------------------------------------------------------- #
+# 6. Mission rollup (v0.9.0 Step 7b)
+# --------------------------------------------------------------------------- #
+
+
+@memory_skip
+class TestMissionRollupIntegration:
+    """Mission rollup episode ingestion (requires the memory extra)."""
+
+    async def test_rollup_calls_add_episode_with_mission_framing(self, tmp_path):
+        """rollup_mission_to_graphiti ingests a consolidated episode via the Graphiti client."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from acp.memory.graphiti_client import rollup_mission_to_graphiti
+        from acp.models import Mission, MissionStep
+
+        mission = Mission(
+            mission_id="mission_20260627_0001",
+            goal="Migrate to React 19",
+            description="Incremental migration of the legacy views.",
+            repo_name="demo",
+            repo_path=tmp_path,
+            base_branch="main",
+            steps=[
+                MissionStep(description="Add rate limiting", task_id="t1", status="completed"),
+                MissionStep(description="Add auth checks", task_id="t2", status="completed"),
+            ],
+        )
+
+        fake_result = MagicMock()
+        fake_result.episode.uuid = "ep-rollup-123"
+        fake_result.nodes = [MagicMock(), MagicMock(), MagicMock()]
+        fake_result.edges = [MagicMock(), MagicMock()]
+
+        fake_client = MagicMock()
+        fake_client.add_episode = AsyncMock(return_value=fake_result)
+        fake_client.close = AsyncMock()
+
+        with patch("acp.memory.graphiti_client._get_graphiti_client", return_value=fake_client):
+            result = await rollup_mission_to_graphiti(mission, graphiti_group_id="g1")
+
+        assert result["mission_id"] == "mission_20260627_0001"
+        assert result["episode_id"] == "ep-rollup-123"
+        assert result["nodes_created"] == 3
+        assert result["edges_created"] == 2
+        assert result["step_count"] == 2
+
+        fake_client.add_episode.assert_awaited_once()
+        call = fake_client.add_episode.call_args
+        # First positional arg is the rollup episode text.
+        episode_text = call.args[0] if call.args else ""
+        assert "Mission Rollup:" in episode_text
+        assert "Mission Goal: Migrate to React 19" in episode_text
+        assert "Mission Description: Incremental migration of the legacy views." in episode_text
+        # group_id + reference_id thread through to the client.
+        assert call.kwargs.get("group_id") == "g1"
+        assert call.kwargs.get("reference_id") == "mission_20260627_0001"
+        # The client is always closed (finally block).
+        fake_client.close.assert_awaited_once()
+
+    async def test_rollup_closes_client_even_on_add_episode_error(self, tmp_path):
+        """The finally block closes the client even if add_episode raises."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from acp.memory.graphiti_client import rollup_mission_to_graphiti
+        from acp.models import Mission
+
+        mission = Mission(
+            mission_id="mission_20260627_0002",
+            goal="Harden the API",
+            repo_name="demo",
+            repo_path=tmp_path,
+            base_branch="main",
+            steps=[],
+        )
+
+        fake_client = MagicMock()
+        fake_client.add_episode = AsyncMock(side_effect=RuntimeError("FalkorDB down"))
+        fake_client.close = AsyncMock()
+
+        with patch("acp.memory.graphiti_client._get_graphiti_client", return_value=fake_client):
+            with pytest.raises(RuntimeError, match="FalkorDB down"):
+                await rollup_mission_to_graphiti(mission)
+
+        fake_client.close.assert_awaited_once()

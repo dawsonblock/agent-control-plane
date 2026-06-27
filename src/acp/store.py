@@ -3,15 +3,31 @@
 Owns the layout under ``data/runs/`` and the monotonic task-id generator.
 A task id is ``task_<YYYYMMDD>_<NNNN>`` where the sequence restarts each
 UTC day, so ids sort chronologically and are human-readable.
+
+v0.7.0 (Phase 1.1): When ``durable_store`` is provided and
+``primary="sqlite"``, the SQLite store becomes the primary source of
+truth for task state. task.json files are still written (as a projection
+for backwards compatibility and evidence hashing), but reads come from
+SQLite first, falling back to JSON if the task isn't in the database.
+This enables gradual migration — operators can flip the flag per-repo.
 """
 
 from __future__ import annotations
 
+import fcntl
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from acp.models import Task, TaskStatus
+
+if TYPE_CHECKING:
+    from acp.evidence.durable_task_store import DurableTaskStore
+
+# File-based locking for atomic task-id allocation. Prevents two concurrent
+# processes (e.g., the API server handling parallel requests) from generating
+# the same task id. Uses fcntl.flock on Unix (Mac-first project).
 
 # task_20260621_0001
 _TASK_ID_RE = re.compile(r"^task_(\d{8})_(\d{4})$")
@@ -45,7 +61,7 @@ def _highest_branch_seq(repo_path: Path, prefix: str) -> int:
     for head in repo.heads:
         name = head.name
         if name.startswith("agent/"):
-            tail = name[len("agent/"):]
+            tail = name[len("agent/") :]
             m = _TASK_ID_RE.match(tail)
             if m and tail.startswith(prefix) and int(m.group(2)) > seq:
                 seq = int(m.group(2))
@@ -58,11 +74,25 @@ class TaskStore:
     Args:
         runs_root: Directory holding one subdir per task. Defaults to
             ``data/runs`` relative to cwd.
+        durable_store: Optional :class:`DurableTaskStore` for SQLite
+            dual-writing (v0.7.0 Phase 1.1). When provided, ``save()``
+            writes to both JSON and SQLite.
+        primary: Which store is primary for reads — ``"json"`` (default)
+            or ``"sqlite"``. When ``"sqlite"``, ``load()`` reads from
+            SQLite first, falling back to JSON.
     """
 
-    def __init__(self, runs_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        runs_root: str | Path | None = None,
+        *,
+        durable_store: DurableTaskStore | None = None,
+        primary: str = "json",
+    ) -> None:
         self.root = Path(runs_root or "data/runs").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._durable = durable_store
+        self._primary = primary
 
     # ------------------------------------------------------------------ #
     # IDs
@@ -79,18 +109,28 @@ class TaskStore:
         Scans existing run dirs for today's sequence number. If ``repo_path``
         is given, also scans that repo's ``agent/task_*`` branches so two
         runs-roots pointed at the same repo can't collide on a branch name.
+
+        Uses a file lock (``flock``) on a lock file in the runs root to
+        prevent two concurrent processes from generating the same id.
         """
-        today = (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
+        today = (now or datetime.now(UTC)).strftime("%Y%m%d")
         prefix = f"task_{today}_"
-        seq = 0
-        for child in self.root.iterdir():
-            if child.is_dir() and child.name.startswith(prefix):
-                m = _TASK_ID_RE.match(child.name)
-                if m and int(m.group(2)) > seq:
-                    seq = int(m.group(2))
-        if repo_path is not None:
-            seq = max(seq, _highest_branch_seq(repo_path, prefix))
-        return f"{prefix}{seq + 1:04d}"
+        lock_path = self.root / ".next_id_lock"
+        # Atomically create + lock. The lock file persists (harmless).
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                seq = 0
+                for child in self.root.iterdir():
+                    if child.is_dir() and child.name.startswith(prefix):
+                        m = _TASK_ID_RE.match(child.name)
+                        if m and int(m.group(2)) > seq:
+                            seq = int(m.group(2))
+                if repo_path is not None:
+                    seq = max(seq, _highest_branch_seq(repo_path, prefix))
+                return f"{prefix}{seq + 1:04d}"
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     # ------------------------------------------------------------------ #
     # Layout
@@ -123,11 +163,20 @@ class TaskStore:
         repo_path: Path,
         base_branch: str,
         user_request: str,
+        recursion_depth: int = 0,
+        mission_id: str = "",
+        mission_goal: str = "",
+        mission_description: str = "",
+        mission_step_index: int = 0,
     ) -> Task:
         """Initialize a run directory and write the initial task.json."""
         run_dir = self.run_dir(task_id)
-        if run_dir.exists():
-            raise FileExistsError(f"run dir already exists: {run_dir}")
+        # v0.7.4: Atomic existence check via mkdir instead of TOCTOU-vulnerable
+        # exists() + mkdir() pattern.
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            raise FileExistsError(f"run dir already exists: {run_dir}") from None
         self.artifacts_dir(task_id).mkdir(parents=True, exist_ok=True)
 
         task = Task(
@@ -139,18 +188,36 @@ class TaskStore:
             worktree_path=self.worktree_path(task_id),
             user_request=user_request,
             status=TaskStatus.CREATED,
+            recursion_depth=recursion_depth,
+            # v0.9.0 (Step 7): Mission context persisted on the durable Task.
+            mission_id=mission_id,
+            mission_goal=mission_goal,
+            mission_description=mission_description,
+            mission_step_index=mission_step_index,
         )
         self.save(task)
         return task
 
     def save(self, task: Task) -> None:
-        """Persist (or re-persist) task.json. Use after any status change."""
+        """Persist (or re-persist) task.json. Use after any status change.
+
+        v0.7.0: When a durable store is configured, also writes to SQLite.
+        """
         task.touch()
-        self.task_json_path(task.task_id).write_text(
-            task.model_dump_json(indent=2)
-        )
+        self.task_json_path(task.task_id).write_text(task.model_dump_json(indent=2))
+        if self._durable is not None:
+            self._durable.save(task)
 
     def load(self, task_id: str) -> Task:
-        return Task.model_validate_json(
-            self.task_json_path(task_id).read_text()
-        )
+        """Load a task by id.
+
+        v0.7.0: When primary="sqlite" and a durable store is configured,
+        reads from SQLite first, falling back to JSON if not found.
+        When primary="json" (default), reads from JSON as before.
+        """
+        if self._primary == "sqlite" and self._durable is not None:
+            task = self._durable.load(task_id)
+            if task is not None:
+                return task
+            # Fall back to JSON if not in SQLite (e.g., pre-migration task).
+        return Task.model_validate_json(self.task_json_path(task_id).read_text())

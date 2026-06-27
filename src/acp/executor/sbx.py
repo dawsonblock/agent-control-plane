@@ -29,6 +29,7 @@ See: https://docs.docker.com/ai/sandboxes/get-started/
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import time
@@ -89,6 +90,10 @@ class SbxExecutor:
         self._sandbox_remote: str = ""
         self._sbx_version: str = ""
 
+    @property
+    def backend_name(self) -> str:
+        return "docker_sbx"
+
     # ------------------------------------------------------------------ #
     # Utility: sbx presence + version
     # ------------------------------------------------------------------ #
@@ -102,8 +107,9 @@ class SbxExecutor:
     def get_version() -> str:
         """Return the ``sbx`` version string, or empty if not installed."""
         try:
+            # sbx uses "sbx version" (not "--version").
             proc = subprocess.run(
-                ["sbx", "--version"],
+                ["sbx", "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -165,7 +171,7 @@ class SbxExecutor:
     # Start the sandbox + run the agent
     # ------------------------------------------------------------------ #
 
-    def start(
+    async def start(
         self,
         *,
         task_id: str,
@@ -196,10 +202,13 @@ class SbxExecutor:
         # v0.5.15: Pass the network policy to sbx so it's actually enforced
         # at the runtime layer, not just recorded in evidence.
         cmd = [
-            "sbx", "run",
+            "sbx",
+            "run",
             "--clone",
-            "--name", self._sandbox_name,
-            "--network", self.config.network_policy,
+            "--name",
+            self._sandbox_name,
+            "--network",
+            self.config.network_policy,
             self.config.agent,
         ]
 
@@ -212,33 +221,43 @@ class SbxExecutor:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(repo_path),
-                input=prompt_content,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            # v0.8.0: Use asyncio.to_thread to run the blocking subprocess
+            # in a thread pool, keeping the event loop free.
+            with (
+                open(stdout_path, "w") as stdout_f,
+                open(stderr_path, "w") as stderr_f,
+            ):
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    cwd=str(repo_path),
+                    input=prompt_content,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
             exit_code = proc.returncode
-            out, err = proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             exit_code = 124
-            out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = (exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
-            err = f"acp: sandbox agent timed out after {timeout_seconds}s\n{err}"
+            # Files already have partial output — append timeout notice.
+            stderr_path.write_text(
+                stderr_path.read_text(encoding="utf-8", errors="replace")
+                + f"\nacp: sandbox agent timed out after {timeout_seconds}s\n",
+                encoding="utf-8",
+            )
             # Best-effort: stop the sandbox on timeout.
             self.stop()
         except FileNotFoundError:
             exit_code = 127
-            out, err = "", "acp: 'sbx' not found on PATH"
+            stdout_path.write_text("")
+            stderr_path.write_text("acp: 'sbx' not found on PATH")
         except Exception as exc:  # noqa: BLE001
             exit_code = 127
-            out, err = "", f"acp: failed to start sandbox: {exc}"
+            stdout_path.write_text("")
+            stderr_path.write_text(f"acp: failed to start sandbox: {exc}")
 
         duration = time.monotonic() - start
-        stdout_path.write_text(out)
-        stderr_path.write_text(err)
 
         return AgentResult(
             agent_name=f"sbx:{self.config.agent}",

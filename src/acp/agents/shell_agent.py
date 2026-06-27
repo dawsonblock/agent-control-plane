@@ -16,6 +16,7 @@ chew on.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -28,7 +29,7 @@ class ShellAgent:
 
     name = "shell"
 
-    def run(
+    async def run(
         self,
         *,
         prompt_path: Path,
@@ -55,7 +56,12 @@ class ShellAgent:
 
         shell = os.environ.get("SHELL", "/bin/bash")
         try:
-            subprocess.run(
+            # v0.8.0: Run the interactive sub-shell in a thread to avoid
+            # blocking the event loop. The sub-shell is inherently blocking
+            # (waits for human input), so asyncio.to_thread is the correct
+            # bridge between async and interactive blocking I/O.
+            await asyncio.to_thread(
+                subprocess.run,
                 [shell],
                 cwd=str(worktree_path),
                 check=False,
@@ -102,9 +108,7 @@ class ShellAgent:
         )
         test_dir = worktree_path / "tests"
         test_dir.mkdir(parents=True, exist_ok=True)
-        (test_dir / "test_agent_edit.py").write_text(
-            "def test_agent_edit():\n    assert True\n"
-        )
+        (test_dir / "test_agent_edit.py").write_text("def test_agent_edit():\n    assert True\n")
         stdout_path.write_text(
             "ACP_TEST mode: ShellAgent created AGENT_NOTES.md + tests/test_agent_edit.py.\n"
         )

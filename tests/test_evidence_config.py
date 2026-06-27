@@ -17,15 +17,22 @@ import json
 import os
 import subprocess
 from pathlib import Path
+
 from typer.testing import CliRunner
 
 from acp.cli import app
-from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    EvidenceSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
 from acp.events import verify_event_signatures
 from acp.evidence.durable_store import DurableEventStore
 from acp.graph.workflow import run_workflow
 from acp.store import TaskStore
-
 
 runner = CliRunner()
 
@@ -34,8 +41,8 @@ def _config(repo_path: Path, **evidence_kwargs) -> RepoConfig:
     return RepoConfig(
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=0),
-        commands=CommandsSection(test='echo ok'),
-        review=ReviewSection(),
+        commands=CommandsSection(test="echo ok"),
+        review=ReviewSection(require_human_approval=False),
         evidence=EvidenceSection(**evidence_kwargs) if evidence_kwargs else EvidenceSection(),
     )
 
@@ -43,7 +50,9 @@ def _config(repo_path: Path, **evidence_kwargs) -> RepoConfig:
 def _main_head(repo_path: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -80,9 +89,12 @@ def test_repo_config_with_evidence_section(tmp_path: Path):
 # --------------------------------------------------------------------------- #
 
 
-def test_workflow_with_signing_key_produces_signed_events(disposable_repo, isolated_workspace, tmp_path):
+def test_workflow_with_signing_key_produces_signed_events(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """When a signing key is configured, events are Ed25519-signed."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     key_path = tmp_path / "signing_key.bin"
@@ -99,7 +111,10 @@ def test_workflow_with_signing_key_produces_signed_events(disposable_repo, isola
     store = TaskStore(runs_root=isolated_workspace["runs_root"])
     events_path = store.events_path(result["task_id"])
     from acp.models import Event
-    events = [Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()]
+
+    events = [
+        Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()
+    ]
     assert len(events) > 0
     # All events should have non-empty signatures.
     assert all(e.signature for e in events)
@@ -127,7 +142,10 @@ def test_workflow_with_durable_store_dual_writes(disposable_repo, isolated_works
     store = TaskStore(runs_root=isolated_workspace["runs_root"])
     events_path = store.events_path(result["task_id"])
     from acp.models import Event
-    jsonl_events = [Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()]
+
+    jsonl_events = [
+        Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()
+    ]
     assert len(jsonl_events) > 0
 
     # SQLite has the same events.
@@ -157,10 +175,16 @@ def test_cli_verify_valid_run(disposable_repo, isolated_workspace):
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 0, f"verify failed: {r.output}"
     assert "event chain valid" in r.output
     assert "evidence manifest valid" in r.output
@@ -186,10 +210,16 @@ def test_cli_verify_tampered_run(disposable_repo, isolated_workspace):
     events[0]["hash"] = "wrong"
     events_path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1, f"verify should have failed: {r.output}"
     assert "INVALID" in r.output
 
@@ -197,6 +227,7 @@ def test_cli_verify_tampered_run(disposable_repo, isolated_workspace):
 def test_cli_verify_with_signatures(disposable_repo, isolated_workspace, tmp_path):
     """`acp verify --public-key` checks Ed25519 signatures."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -215,11 +246,18 @@ def test_cli_verify_with_signatures(disposable_repo, isolated_workspace, tmp_pat
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--public-key", str(pub_path),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--public-key",
+            str(pub_path),
+        ],
+    )
     assert r.exit_code == 0, f"verify with signatures failed: {r.output}"
     assert "Ed25519 signatures valid" in r.output
 
@@ -241,10 +279,16 @@ def test_cli_events_lists_all_events(disposable_repo, isolated_workspace):
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "events", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 0, f"events failed: {r.output}"
     assert "task.created" in r.output
     assert "task.completed" in r.output
@@ -262,11 +306,18 @@ def test_cli_events_with_type_filter(disposable_repo, isolated_workspace):
     )
     task_id = result["task_id"]
 
-    r = runner.invoke(app, [
-        "events", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--type", "task.completed",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--type",
+            "task.completed",
+        ],
+    )
     assert r.exit_code == 0, f"events filter failed: {r.output}"
     assert "task.completed" in r.output
     assert "task.created" not in r.output
@@ -274,19 +325,31 @@ def test_cli_events_with_type_filter(disposable_repo, isolated_workspace):
 
 def test_cli_events_nonexistent_task(isolated_workspace):
     """`acp events` on a non-existent (but valid-shaped) task fails."""
-    r = runner.invoke(app, [
-        "events", "--task", "task_20260624_9999",
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            "task_20260624_9999",
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1
     assert "not found" in r.output
 
 
 def test_cli_events_invalid_task_id_rejected(isolated_workspace):
     """Invalid (path-shaped) task ids are rejected before any filesystem access."""
-    r = runner.invoke(app, [
-        "events", "--task", "../etc/passwd",
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "events",
+            "--task",
+            "../etc/passwd",
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 1
     assert "invalid task id" in r.output

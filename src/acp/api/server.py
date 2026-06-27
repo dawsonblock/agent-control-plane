@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +33,102 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 except ImportError:
-    raise ImportError(
-        "FastAPI is not installed. Install with: uv sync --extra api"
-    ) from None
+    raise ImportError("FastAPI is not installed. Install with: uv sync --extra api") from None
 
 import logging
 
 _logger = logging.getLogger("acp.api")
+
+# --------------------------------------------------------------------------- #
+# Bearer token auth middleware
+# --------------------------------------------------------------------------- #
+
+# Endpoints that don't require authentication (always public).
+_PUBLIC_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+
+# The expected bearer token. When None, auth is disabled (backwards-
+# compatible for local development). Set via ``ACP_API_TOKEN`` env var
+# or the ``--api-token`` CLI flag. Uses ``secrets.compare_digest`` to
+# prevent timing attacks on token comparison.
+_api_token: str | None = None
+
+
+def set_api_token(token: str | None) -> None:
+    """Set the expected bearer token for the API.
+
+    When set to a non-empty string, all non-public endpoints require an
+    ``Authorization: Bearer <token>`` header. When None or empty, auth
+    is disabled (for local development only).
+    """
+    global _api_token
+    _api_token = token if token else None
+
+
+def get_api_token() -> str | None:
+    """Return the configured API token, or None if auth is disabled."""
+    return _api_token
+
+
+def _init_token_from_env() -> None:
+    """Initialize the API token from the ``ACP_API_TOKEN`` env var if set."""
+    env_token = os.environ.get("ACP_API_TOKEN", "").strip()
+    if env_token:
+        set_api_token(env_token)
+
+
+# Initialize from env var on module import (so the server picks it up
+# even when started via uvicorn directly rather than the CLI).
+_init_token_from_env()
+
+
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    class BearerTokenMiddleware(BaseHTTPMiddleware):
+        """Validate ``Authorization: Bearer <token>`` on non-public routes.
+
+        When ``_api_token`` is set, every request to a non-public path
+        must include a valid bearer token. Returns 401 if the header is
+        missing or malformed, 403 if the token doesn't match.
+        """
+
+        async def dispatch(self, request: Request, call_next: Any) -> Any:
+            # Public paths are always accessible.
+            if request.url.path in _PUBLIC_PATHS:
+                return await call_next(request)
+
+            # If no token is configured, auth is disabled (local dev).
+            expected = get_api_token()
+            if expected is None:
+                return await call_next(request)
+
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Missing or invalid Authorization header. "
+                        "Expected: Bearer <token>"
+                    },
+                )
+
+            provided = auth_header[7:]  # strip "Bearer "
+            if not secrets.compare_digest(provided, expected):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Invalid API token."},
+                )
+
+            return await call_next(request)
+
+except ImportError:
+    # Starlette is a FastAPI dependency — if FastAPI isn't installed,
+    # the import at the top already raised. This guard is defensive.
+    BearerTokenMiddleware = None  # type: ignore[assignment, misc]
 
 
 def _recover_orphaned_tasks() -> None:
@@ -54,6 +144,7 @@ def _recover_orphaned_tasks() -> None:
     if durable_db_path.is_file():
         try:
             from acp.evidence.durable_task_store import DurableTaskStore
+
             with DurableTaskStore(durable_db_path) as db:
                 recovered = db.recover_orphaned_tasks(runs_root=runs_root)
                 for tid in recovered:
@@ -71,22 +162,30 @@ def _recover_orphaned_tasks() -> None:
                     continue
                 try:
                     task = store.load(task_dir.name)
-                    if task.status in (TaskStatus.CREATED, TaskStatus.EXECUTING, TaskStatus.REVIEWING):
+                    if task.status in (
+                        TaskStatus.CREATED,
+                        TaskStatus.EXECUTING,
+                        TaskStatus.REVIEWING,
+                    ):
                         task.status = TaskStatus.FAILED
                         task.touch()
                         store.save(task)
                         _logger.info("Recovered orphaned task from task.json: %s", task.task_id)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # v0.7.4: Log the error instead of silently passing.
+                    # A corrupt task.json could indicate evidence tampering
+                    # or a filesystem issue — the operator needs to know.
+                    _logger.error(
+                        "Failed to load task.json during orphan recovery (path=%s): %s",
+                        task_json,
+                        exc,
+                    )
     except Exception as exc:  # noqa: BLE001
         _logger.warning("task.json scan for orphans failed: %s", exc)
 
 
-from contextlib import asynccontextmanager
-
-
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> Any:
     """Startup: recover orphaned tasks. Shutdown: nothing to clean up."""
     _recover_orphaned_tasks()
     yield
@@ -99,6 +198,7 @@ async def lifespan(app: FastAPI):
 
 class RunRequest(BaseModel):
     """Request body for POST /tasks/run."""
+
     task: str
     config_path: str = ""
     vault_root: str = "vault"
@@ -107,6 +207,7 @@ class RunRequest(BaseModel):
 
 class RunResponse(BaseModel):
     """Response for POST /tasks/run."""
+
     task_id: str
     status: str
     report_path: str | None = None
@@ -116,17 +217,20 @@ class RunResponse(BaseModel):
 
 class ApproveRequest(BaseModel):
     """Request body for POST /tasks/{task_id}/approve."""
+
     approver: str = ""
 
 
 class RejectRequest(BaseModel):
     """Request body for POST /tasks/{task_id}/reject."""
+
     rejecter: str = ""
     reason: str = ""
 
 
 class TaskSummary(BaseModel):
     """Summary of a task for the list endpoint."""
+
     task_id: str
     repo_name: str
     status: str
@@ -137,6 +241,7 @@ class TaskSummary(BaseModel):
 
 class EventResponse(BaseModel):
     """A single event from the event log."""
+
     event_id: str
     task_id: str
     type: str
@@ -156,10 +261,7 @@ def _validate_task_id(task_id: str) -> None:
     if not is_valid_task_id(task_id):
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Invalid task id: {task_id!r} "
-                "(expected task_<YYYYMMDD>_<NNNN>)"
-            ),
+            detail=(f"Invalid task id: {task_id!r} (expected task_<YYYYMMDD>_<NNNN>)"),
         )
 
 
@@ -172,7 +274,8 @@ def _load_task_or_404(
     Raises HTTPException(400) for invalid IDs and 404 for missing tasks.
     """
     _validate_task_id(task_id)
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     try:
         task = store.load(task_id)
     except Exception as exc:  # noqa: BLE001
@@ -206,7 +309,8 @@ def _lifecycle_action(
     if not status_check(task.status):
         raise HTTPException(status_code=400, detail=status_error)
 
-    note_path = Path(vault_root) / "tasks" / f"{task_id}.md"
+    safe_vault_root = _validate_path_param(vault_root, "vault_root")
+    note_path = safe_vault_root / "tasks" / f"{task_id}.md"
     if not note_path.is_file():
         raise HTTPException(
             status_code=404,
@@ -254,7 +358,7 @@ def _lifecycle_action(
         run_dir=run_dir,
         task=task,
         store=store,
-        vault_root=Path(vault_root),
+        vault_root=safe_vault_root,
         on_warning=lambda msg: _logger.warning(msg),
     )
 
@@ -289,15 +393,13 @@ class ServerState:
         if self._config_cache is None:
             if not self.config_path:
                 raise HTTPException(
-                    status_code=500,
-                    detail="No config path set. Use --config or POST /config."
+                    status_code=500, detail="No config path set. Use --config or POST /config."
                 )
             try:
                 self._config_cache = load_repo_config(Path(self.config_path))
             except FileNotFoundError as exc:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Config file not found: {exc}"
+                    status_code=404, detail=f"Config file not found: {exc}"
                 ) from exc
         return self._config_cache
 
@@ -310,22 +412,258 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: allow the Vite dev server (5173) and localhost:3000 to call the API.
-# In production, the UI is served from the same origin via /ui/ so CORS
-# isn't needed — but during development (npm run dev on :5173, API on :8000)
-# the browser blocks cross-origin requests without this.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Default CORS origins for local development (Vite dev server on :5173,
+# and localhost:3000 for alternative dev setups). In production, operators
+# should set ``api.cors_origins`` in the repo config — the CLI ``serve``
+# command reads it and sets the ``ACP_CORS_ORIGINS`` env var before
+# starting uvicorn, so the server picks it up at import time. Set
+# ``ACP_CORS_ENABLED=false`` to disable CORS entirely (same-origin deploys).
+_DEV_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+
+def _resolve_cors_origins() -> list[str]:
+    """Resolve CORS origins from env var or dev defaults.
+
+    The ``ACP_CORS_ORIGINS`` env var (comma-separated) takes precedence.
+    The CLI ``serve`` command sets this from ``api.cors_origins`` in the
+    repo config before starting uvicorn.
+    """
+    env_origins = os.environ.get("ACP_CORS_ORIGINS", "").strip()
+    if env_origins:
+        return [o.strip() for o in env_origins.split(",") if o.strip()]
+    return _DEV_CORS_ORIGINS
+
+
+def _cors_enabled() -> bool:
+    """Whether CORS middleware should be added."""
+    return os.environ.get("ACP_CORS_ENABLED", "true").strip().lower() != "false"
+
+
+# CORS middleware — origins resolved from env var at import time.
+# v0.7.4: Restrict methods and headers to only what the API needs,
+# instead of the overly permissive ["*"].
+if _cors_enabled():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_resolve_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "Accept"],
+    )
+
+
+# Bearer token auth — added after CORS so CORS preflight (OPTIONS) is
+# handled before the auth check. When no token is configured, the
+# middleware is a pass-through.
+if BearerTokenMiddleware is not None:
+    app.add_middleware(BearerTokenMiddleware)
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting (v0.7.4)
+# --------------------------------------------------------------------------- #
+
+
+class RateLimitMiddleware:
+    """Rate limiter using a sliding window, backed by Redis when available.
+
+    v0.7.4: Lightweight rate limiting without external dependencies.
+    v0.7.5: When Redis (or FalkorDB, which is Redis-compatible) is available,
+    rate limit state is shared across all Uvicorn workers. This prevents
+    limit bypassing when running with ``--workers 4``. Falls back to
+    in-memory tracking when Redis is not configured.
+
+    Uses a Redis sorted set per client IP, with timestamps as scores.
+    Old entries are removed with ``ZREMRANGEBYSCORE`` before counting.
+    This is an O(log N) operation that scales well.
+
+    This is defense-in-depth on top of the bearer token auth — it
+    prevents authenticated clients from overwhelming the API with
+    expensive operations like /tasks/run.
+
+    Configurable via environment variables:
+      - ACP_RATE_LIMIT_ENABLED: "false" to disable (default: enabled)
+      - ACP_RATE_LIMIT_REQUESTS: max requests per window (default: 60)
+      - ACP_RATE_LIMIT_WINDOW: window size in seconds (default: 60)
+      - ACP_RATE_LIMIT_REDIS_URL: Redis URL for shared state (default: none)
+        When set, uses Redis for multi-worker rate limiting. Example:
+        ``redis://localhost:6379/1`` (FalkorDB also works here).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.enabled = os.environ.get("ACP_RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
+        self.max_requests = int(os.environ.get("ACP_RATE_LIMIT_REQUESTS", "60"))
+        self.window_seconds = int(os.environ.get("ACP_RATE_LIMIT_WINDOW", "60"))
+        # v0.7.5: Optional Redis backend for multi-worker shared state.
+        redis_url = os.environ.get("ACP_RATE_LIMIT_REDIS_URL", "")
+        self._redis: Any = None
+        if redis_url:
+            try:
+                import redis
+
+                self._redis = redis.from_url(redis_url, decode_responses=True)
+                self._redis.ping()  # Verify connection
+                _logger.info("rate limiter: using Redis at %s", redis_url)
+            except ImportError:
+                _logger.warning(
+                    "ACP_RATE_LIMIT_REDIS_URL set but 'redis' package not installed — "
+                    "falling back to in-memory rate limiting. "
+                    "Install with: pip install redis"
+                )
+                self._redis = None
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "rate limiter: Redis connection failed: %s — falling back to in-memory",
+                    exc,
+                )
+                self._redis = None
+        # In-memory fallback state.
+        self._requests: dict[str, list[float]] = {}
+        self._cleanup_counter = 0
+
+    def _check_redis(self, client_ip: str) -> bool:
+        """Check and record a request via Redis. Returns True if allowed."""
+        import time
+
+        now = time.time()
+        window_start = now - self.window_seconds
+        key = f"acp:rate_limit:{client_ip}"
+
+        pipe = self._redis.pipeline()
+        # Remove expired entries.
+        pipe.zremrangebyscore(key, 0, window_start)
+        # Count current entries.
+        pipe.zcard(key)
+        # Add this request.
+        pipe.zadd(key, {str(now): now})
+        # Set TTL on the key so it auto-expires after the window.
+        pipe.expire(key, self.window_seconds + 1)
+        results = pipe.execute()
+
+        count = int(results[1])
+        return count < self.max_requests
+
+    def _check_memory(self, client_ip: str) -> bool:
+        """Check and record a request in memory. Returns True if allowed."""
+        import time
+
+        now = time.monotonic()
+        window_start = now - self.window_seconds
+
+        if client_ip not in self._requests:
+            self._requests[client_ip] = []
+        timestamps = self._requests[client_ip]
+
+        # Remove expired timestamps.
+        while timestamps and timestamps[0] < window_start:
+            timestamps.pop(0)
+
+        if len(timestamps) >= self.max_requests:
+            return False
+
+        timestamps.append(now)
+
+        # Periodic cleanup of stale entries.
+        self._cleanup_counter += 1
+        if self._cleanup_counter > 1000:
+            self._cleanup_counter = 0
+            stale_ips = [
+                ip
+                for ip, ts_list in self._requests.items()
+                if not ts_list or ts_list[-1] < window_start
+            ]
+            for ip in stale_ips:
+                del self._requests[ip]
+
+        return True
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if not self.enabled or scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Extract client IP.
+        client_ip = scope.get("client", ["unknown", None])[0] if scope.get("client") else "unknown"
+        path = scope.get("path", "")
+
+        # Skip rate limiting for health checks and docs.
+        if path in _PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        # Check rate limit — Redis (shared) or in-memory (per-worker).
+        if self._redis is not None:
+            try:
+                allowed = self._check_redis(client_ip)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("rate limiter: Redis error: %s — using in-memory", exc)
+                allowed = self._check_memory(client_ip)
+        else:
+            allowed = self._check_memory(client_ip)
+
+        if not allowed:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"retry-after", str(self.window_seconds).encode()),
+                    ],
+                }
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": json.dumps(
+                        {"detail": "Rate limit exceeded. Try again in a few seconds."}
+                    ).encode(),
+                }
+            )
+            return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RateLimitMiddleware)
+
+
+# --------------------------------------------------------------------------- #
+# Path validation
+# --------------------------------------------------------------------------- #
+
+
+def _validate_path_param(path_str: str, param_name: str) -> Path:
+    """Validate a user-supplied path parameter for safety.
+
+    v0.7.4: Reject paths containing ``..`` (directory traversal) or
+    absolute paths that escape the expected data/vault directories.
+    This prevents an attacker from using the API to read arbitrary
+    filesystem locations via ``runs_root=/etc`` or similar.
+
+    Returns the resolved Path object if safe, raises HTTPException(400) otherwise.
+    """
+    from fastapi import HTTPException
+
+    if not path_str or not path_str.strip():
+        raise HTTPException(status_code=400, detail=f"{param_name} must not be empty")
+
+    # Reject paths with directory traversal components.
+    parts = Path(path_str).parts
+    if ".." in parts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{param_name} must not contain '..' (directory traversal denied)",
+        )
+
+    resolved = Path(path_str).resolve()
+    return resolved
 
 
 # --------------------------------------------------------------------------- #
@@ -360,15 +698,19 @@ async def run_task(request: RunRequest) -> RunResponse:
         state.set_config(request.config_path)
         cfg = state.get_config()
 
-    from acp.graph.workflow import run_workflow
+    safe_runs_root = _validate_path_param(request.runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(request.vault_root, "vault_root")
+
+    from acp.graph.workflow import run_workflow_async
 
     try:
-        result = await asyncio.to_thread(
-            run_workflow,
+        # v0.7.5: Use async-native workflow invocation. This eliminates the
+        # old thread-pool workaround for Graphiti async operations.
+        result = await run_workflow_async(
             config=cfg,
             user_request=request.task,
-            runs_root=Path(request.runs_root),
-            vault_root=Path(request.vault_root),
+            runs_root=safe_runs_root,
+            vault_root=safe_vault_root,
         )
     except ACPError as exc:
         raise HTTPException(status_code=exc.exit_code, detail=str(exc)) from exc
@@ -385,7 +727,9 @@ async def run_task(request: RunRequest) -> RunResponse:
         task_id=result.get("task_id", ""),
         status=status_str,
         report_path=str(result.get("report_path")) if result.get("report_path") else None,
-        vault_note_path=str(result.get("vault_note_path")) if result.get("vault_note_path") else None,
+        vault_note_path=str(result.get("vault_note_path"))
+        if result.get("vault_note_path")
+        else None,
         error=result.get("error"),
     )
 
@@ -402,21 +746,24 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
         state.set_config(request.config_path)
         cfg = state.get_config()
 
+    safe_runs_root = _validate_path_param(request.runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(request.vault_root, "vault_root")
+
     # Pre-generate the task_id so the client can poll immediately.
-    store = TaskStore(runs_root=Path(request.runs_root))
+    store = TaskStore(runs_root=safe_runs_root)
     task_id = store.next_task_id(repo_path=cfg.repo.path)
 
-    # Run in a background thread so the blocking workflow doesn't
-    # stall the event loop.
+    # v0.7.5: Use async-native workflow — no thread needed, the async
+    # graph runs in the event loop without blocking it.
     async def _run() -> None:
-        from acp.graph.workflow import run_workflow
+        from acp.graph.workflow import run_workflow_async
+
         try:
-            await asyncio.to_thread(
-                run_workflow,
+            await run_workflow_async(
                 config=cfg,
                 user_request=request.task,
-                runs_root=Path(request.runs_root),
-                vault_root=Path(request.vault_root),
+                runs_root=safe_runs_root,
+                vault_root=safe_vault_root,
                 task_id=task_id,
             )
         except Exception as exc:  # noqa: BLE001
@@ -438,7 +785,8 @@ async def list_tasks(
     by directory name, which sorts chronologically). Use ``limit=0`` for
     all tasks (backwards-compatible behavior).
     """
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     tasks: list[TaskSummary] = []
 
     if not store.root.is_dir():
@@ -446,28 +794,31 @@ async def list_tasks(
 
     # Collect valid task dir names sorted newest-first.
     task_dirs = sorted(
-        (d for d in store.root.iterdir()
-         if d.is_dir() and (d / "task.json").is_file()),
+        (d for d in store.root.iterdir() if d.is_dir() and (d / "task.json").is_file()),
         reverse=True,
     )
 
     if limit > 0:
-        task_dirs = task_dirs[offset:offset + limit]
+        task_dirs = task_dirs[offset : offset + limit]
     elif offset > 0:
         task_dirs = task_dirs[offset:]
 
     for task_dir in task_dirs:
         try:
             task = store.load(task_dir.name)
-            tasks.append(TaskSummary(
-                task_id=task.task_id,
-                repo_name=task.repo_name,
-                status=task.status.value,
-                user_request=task.user_request,
-                created_at=task.created_at,
-                updated_at=task.updated_at,
-            ))
-        except Exception:  # noqa: BLE001
+            tasks.append(
+                TaskSummary(
+                    task_id=task.task_id,
+                    repo_name=task.repo_name,
+                    status=task.status.value,
+                    user_request=task.user_request,
+                    created_at=task.created_at,
+                    updated_at=task.updated_at,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            # v0.7.4: Log the error instead of silently continuing.
+            _logger.error("Failed to load task from %s: %s", task_dir, exc)
             continue
 
     return tasks
@@ -517,8 +868,7 @@ async def approve_task(
         actor=request.approver or "unknown",
         status_check=can_approve,
         status_error=(
-            "Task status is not approvable — only 'passed' or"
-            " 'needs_review' can be approved."
+            "Task status is not approvable — only 'passed' or 'needs_review' can be approved."
         ),
     )
 
@@ -535,18 +885,20 @@ async def reject_task(
     Uses the shared lifecycle service (acp.evidence.lifecycle) to ensure
     full transactional integrity — same as ``acp reject``.
     """
-    _non_rejectable = frozenset({
-        TaskStatus.APPROVED,
-        TaskStatus.REJECTED,
-        TaskStatus.ARCHIVED,
-        TaskStatus.CREATED,
-        TaskStatus.EXECUTING,
-        TaskStatus.REVIEWING,
-        TaskStatus.REPAIRING,
-        TaskStatus.TESTING,
-        TaskStatus.WORKTREE_CREATED,
-        TaskStatus.CONTEXT_BUILT,
-    })
+    _non_rejectable = frozenset(
+        {
+            TaskStatus.APPROVED,
+            TaskStatus.REJECTED,
+            TaskStatus.ARCHIVED,
+            TaskStatus.CREATED,
+            TaskStatus.EXECUTING,
+            TaskStatus.REVIEWING,
+            TaskStatus.REPAIRING,
+            TaskStatus.TESTING,
+            TaskStatus.WORKTREE_CREATED,
+            TaskStatus.CONTEXT_BUILT,
+        }
+    )
 
     def _can_reject(status: TaskStatus) -> bool:
         return status not in _non_rejectable
@@ -576,7 +928,8 @@ async def get_events(
     _validate_task_id(task_id)
     from acp.events import EventWriter
 
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     run_dir = store.run_dir(task_id)
     if not run_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"Run directory not found: {run_dir}")
@@ -605,13 +958,57 @@ async def get_report(
 ) -> dict[str, str]:
     """Get the report content for a task."""
     _validate_task_id(task_id)
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
     run_dir = store.run_dir(task_id)
     report_path = run_dir / "artifacts" / "report.md"
     if not report_path.is_file():
         raise HTTPException(status_code=404, detail=f"Report not found: {report_path}")
 
     return {"task_id": task_id, "report": report_path.read_text(encoding="utf-8")}
+
+
+@app.get("/tasks/{task_id}/diff")
+async def get_diff(
+    task_id: str,
+    runs_root: str = "data/runs",
+) -> dict[str, str]:
+    """Get the unified diff patch for a task (v0.9.0 Step 6 — diff viewer).
+
+    Serves ``artifacts/diff.patch`` so the desktop review UI can render the
+    code diff inline without opening an IDE.
+    """
+    _validate_task_id(task_id)
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
+    run_dir = store.run_dir(task_id)
+    diff_path = run_dir / "artifacts" / "diff.patch"
+    if not diff_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Diff not found: {diff_path}")
+    return {"task_id": task_id, "diff": diff_path.read_text(encoding="utf-8")}
+
+
+@app.get("/tasks/{task_id}/review")
+async def get_review(
+    task_id: str,
+    runs_root: str = "data/runs",
+) -> dict[str, Any]:
+    """Get the machine-readable review for a task (v0.9.0 Step 6 — risk annotations).
+
+    Serves ``artifacts/review.json`` (the :class:`ReviewResult`: risk level,
+    recommendation, changed_files, concerns, hard_block) so the desktop UI
+    can overlay the Risk Engine's concerns as inline annotations on the diff.
+    """
+    _validate_task_id(task_id)
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
+    run_dir = store.run_dir(task_id)
+    review_path = run_dir / "artifacts" / "review.json"
+    if not review_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Review not found: {review_path}")
+    import json
+
+    return {"task_id": task_id, "review": json.loads(review_path.read_text(encoding="utf-8"))}
 
 
 @app.get("/memory/search")
@@ -625,20 +1022,358 @@ async def memory_search(
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"Memory extra not installed: {exc}. Install with: uv sync --extra memory"
+            detail=f"Memory extra not installed: {exc}. Install with: uv sync --extra memory",
         ) from exc
 
     cfg = state.get_config()
     try:
-        results = search_graphiti_facts(
+        results = await search_graphiti_facts(
             query,
             group_id=cfg.memory.graphiti_group_id,
             num_results=num_results,
+            memory_config=cfg.memory,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return results
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.1: Missions API (M14 — mission epics)
+# --------------------------------------------------------------------------- #
+
+
+class MissionSummary(BaseModel):
+    mission_id: str
+    goal: str
+    status: str
+    repo_name: str
+    steps_total: int
+    steps_completed: int
+    created_at: str
+
+
+class MissionDetailResponse(BaseModel):
+    mission_id: str
+    goal: str
+    description: str
+    repo_name: str
+    status: str
+    steps: list[dict[str, Any]]
+    created_at: str
+    updated_at: str
+    completed_at: str
+
+
+class CreateMissionRequest(BaseModel):
+    """Request body for POST /missions."""
+
+    goal: str
+    repo_name: str
+    repo_path: str
+    base_branch: str = "main"
+    description: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AddStepRequest(BaseModel):
+    """Request body for POST /missions/{id}/steps."""
+
+    description: str
+
+
+class RunStepResponse(BaseModel):
+    """Response for POST /missions/{id}/steps/{index}/run (M15)."""
+
+    mission_id: str
+    step_index: int
+    task_id: str
+    status: str
+    error: str | None = None
+
+
+class CreateMissionResponse(BaseModel):
+    mission_id: str
+    goal: str
+    status: str
+    repo_name: str
+    steps_total: int
+    created_at: str
+
+
+@app.get("/missions", response_model=list[MissionSummary])
+async def list_missions(
+    missions_root: str = "data/missions",
+) -> list[MissionSummary]:
+    """List all missions ordered by creation date."""
+    from acp.missions.store import MissionStore
+
+    store = MissionStore(missions_dir=Path(missions_root))
+    missions = store.list_missions()
+    return [
+        MissionSummary(
+            mission_id=m.mission_id,
+            goal=m.goal,
+            status=m.status.value,
+            repo_name=m.repo_name,
+            steps_total=len(m.steps),
+            steps_completed=sum(1 for s in m.steps if s.status == "completed"),
+            created_at=m.created_at,
+        )
+        for m in missions
+    ]
+
+
+@app.post("/missions", response_model=CreateMissionResponse, status_code=201)
+async def create_mission(
+    request: CreateMissionRequest,
+    missions_root: str = "data/missions",
+) -> CreateMissionResponse:
+    """Create a new mission epic with optional initial steps.
+
+    v0.7.5: Enables creating missions from the dashboard UI without
+    needing the CLI. The mission is created with status ``created``
+    and a ``mission.created`` event is written to the event log.
+    """
+    from acp.missions.store import MissionStore
+
+    safe_missions_root = _validate_path_param(missions_root, "missions_root")
+    store = MissionStore(missions_dir=safe_missions_root)
+    mission_id = store.next_mission_id()
+
+    try:
+        mission = store.create(
+            mission_id=mission_id,
+            goal=request.goal,
+            repo_name=request.repo_name,
+            repo_path=Path(request.repo_path),
+            base_branch=request.base_branch,
+            description=request.description,
+            steps=request.steps,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return CreateMissionResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        status=mission.status.value,
+        repo_name=mission.repo_name,
+        steps_total=len(mission.steps),
+        created_at=mission.created_at,
+    )
+
+
+@app.get("/missions/{mission_id}", response_model=MissionDetailResponse)
+async def get_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Get detailed information about a specific mission."""
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    mission = store.load(mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/steps", response_model=MissionDetailResponse)
+async def add_mission_step(
+    mission_id: str,
+    request: AddStepRequest,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Add a step to an existing mission.
+
+    v0.7.5: Enables step management from the dashboard UI. The step is
+    appended to the end of the steps list with status ``pending``.
+    """
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.add_step(mission_id, request.description)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/steps/{step_index}/run", response_model=RunStepResponse)
+def run_mission_step(
+    mission_id: str,
+    step_index: int,
+    config_path: str = ".repo.yaml",
+    missions_root: str = "data/missions",
+    runs_root: str = "data/runs",
+    vault_root: str = "data/vault",
+) -> RunStepResponse:
+    """Run a single mission step by index (M15 — per-step Play buttons).
+
+    This endpoint enables the dashboard UI to run individual steps on
+    demand without running the entire mission. The step must be in a
+    non-terminal state (``pending`` or ``failed``) and the mission must
+    not be in a terminal state (``completed`` or ``failed``).
+    """
+    from acp.missions.orchestrator import MissionOrchestrator
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    safe_missions_root = _validate_path_param(missions_root, "missions_root")
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    safe_vault_root = _validate_path_param(vault_root, "vault_root")
+
+    orchestrator = MissionOrchestrator(
+        config_path=Path(config_path),
+        missions_dir=safe_missions_root,
+        runs_root=safe_runs_root,
+        vault_root=safe_vault_root,
+    )
+    try:
+        result = orchestrator.run_single_step(mission_id, step_index)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return RunStepResponse(
+        mission_id=result["mission_id"],
+        step_index=result["step_index"],
+        task_id=result["task_id"],
+        status=result["status"],
+        error=result.get("error"),
+    )
+
+
+@app.post("/missions/{mission_id}/complete", response_model=MissionDetailResponse)
+async def complete_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Mark a mission as completed.
+
+    All steps must be in a terminal state (completed or failed) before
+    the mission can be completed.
+    """
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.complete(mission_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+@app.post("/missions/{mission_id}/abort", response_model=MissionDetailResponse)
+async def abort_mission(
+    mission_id: str,
+    missions_root: str = "data/missions",
+) -> MissionDetailResponse:
+    """Mark a mission as aborted."""
+    from acp.missions.store import MissionStore
+
+    if not mission_id.startswith("mission_"):
+        raise HTTPException(status_code=400, detail="Invalid mission ID format")
+    store = MissionStore(missions_dir=Path(missions_root))
+    try:
+        mission = store.abort(mission_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return MissionDetailResponse(
+        mission_id=mission.mission_id,
+        goal=mission.goal,
+        description=mission.description,
+        repo_name=mission.repo_name,
+        status=mission.status.value,
+        steps=[s.model_dump() for s in mission.steps],
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        completed_at=mission.completed_at,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.1: Skills API (M8 — skills governance)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/skills")
+async def list_skills(
+    skills_dir: str = "skills",
+) -> list[dict[str, Any]]:
+    """List all available skill playbooks from the skills directory."""
+    from acp.skills.loader import load_skills
+
+    skills_path = Path(skills_dir)
+    if not skills_path.is_dir():
+        return []
+    try:
+        skills = load_skills(skills_path)
+        return [
+            {
+                "name": s.get("name", ""),
+                "purpose": s.get("purpose", ""),
+                "rules": s.get("rules", []),
+                "has_hard_blocks": bool(s.get("review_gates", {}).get("hard_blocks")),
+                "has_risk_elevators": bool(s.get("review_gates", {}).get("risk_elevators")),
+            }
+            for s in skills.values()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to load skills: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -653,9 +1388,13 @@ async def stream_tasks(
 ) -> Any:
     """Server-Sent Events stream of task status changes.
 
-    Polls the runs directory every ``poll_interval`` seconds and streams
-    SSE events whenever a task is created or its status changes. The UI
-    consumes this via ``EventSource`` to get instant updates without polling.
+    v0.7.5: Uses OS-level file watching (watchfiles/inotify/kqueue) instead
+    of polling. This is event-driven and zero-cost when idle — no disk I/O
+    or CPU usage until a file actually changes. Falls back to polling if
+    watchfiles is not available.
+
+    Streams SSE events whenever a task is created or its status changes.
+    The UI consumes this via ``EventSource`` to get instant updates.
 
     Event format::
 
@@ -663,36 +1402,21 @@ async def stream_tasks(
 
     A ``heartbeat`` event is sent every 30 seconds to keep the connection alive.
     """
-    store = TaskStore(runs_root=Path(runs_root))
+    safe_runs_root = _validate_path_param(runs_root, "runs_root")
+    store = TaskStore(runs_root=safe_runs_root)
 
     async def event_stream() -> Any:
         last_statuses: dict[str, str] = {}
-        last_mtimes: dict[str, float] = {}
-        heartbeat_counter = 0
 
-        while True:
-            # Scan all tasks, but skip task.json files whose mtime
-            # hasn't changed since the last poll.
+        def _scan_all() -> dict[str, dict[str, Any]]:
+            """Scan all task.json files and return current state."""
             current: dict[str, dict[str, Any]] = {}
             if store.root.is_dir():
-                for task_dir in sorted(store.root.iterdir()):
+                for task_dir in store.root.iterdir():
                     task_json = task_dir / "task.json"
                     if not task_json.is_file():
                         continue
                     tid = task_dir.name
-                    try:
-                        mtime = task_json.stat().st_mtime
-                    except OSError:
-                        continue
-                    if tid in last_mtimes and mtime == last_mtimes[tid]:
-                        # File unchanged — reuse cached status.
-                        if tid in last_statuses:
-                            current[tid] = {
-                                "task_id": tid,
-                                "status": last_statuses[tid],
-                            }
-                        continue
-                    last_mtimes[tid] = mtime
                     try:
                         task = store.load(tid)
                         current[task.task_id] = {
@@ -701,29 +1425,70 @@ async def stream_tasks(
                             "repo_name": task.repo_name,
                             "user_request": task.user_request,
                         }
-                    except Exception:  # noqa: BLE001
-                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.error("SSE: Failed to load task %s: %s", tid, exc)
+            return current
 
-            # Emit events for new or changed tasks.
+        def _emit_changes(current: dict[str, dict[str, Any]]) -> list[str]:
+            """Compare current state with last known state, return SSE events."""
+            events: list[str] = []
             for tid, info in current.items():
                 prev_status = last_statuses.get(tid)
                 if prev_status != info["status"]:
-                    yield f"data: {json.dumps(info)}\n\n"
+                    events.append(f"data: {json.dumps(info)}\n\n")
                     last_statuses[tid] = info["status"]
-
             # Emit events for tasks that disappeared (cleanup).
             for tid in list(last_statuses.keys()):
                 if tid not in current:
-                    yield f"data: {json.dumps({'task_id': tid, 'status': 'removed'})}\n\n"
+                    events.append(f"data: {json.dumps({'task_id': tid, 'status': 'removed'})}\n\n")
                     del last_statuses[tid]
+            return events
 
-            # Heartbeat every ~30 seconds.
-            heartbeat_counter += 1
-            if heartbeat_counter >= int(30 / poll_interval):
+        # Initial scan — emit current state for all existing tasks.
+        current = _scan_all()
+        for tid, info in current.items():
+            last_statuses[tid] = info["status"]
+            yield f"data: {json.dumps(info)}\n\n"
+
+        # Try watchfiles for event-driven updates (zero-cost when idle).
+        try:
+            from watchfiles import awatch
+
+            # Use a heartbeat task alongside the file watcher.
+            async def _heartbeat() -> Any:
+                while True:
+                    await asyncio.sleep(30)
+                    yield ": heartbeat\n\n"
+
+            # Watch the runs directory for changes.
+            # debounce: milliseconds to wait after last change before yielding
+            # (batches rapid changes into one event). poll_interval is used
+            # as the debounce value to preserve the configured responsiveness.
+            async for changes in awatch(
+                str(safe_runs_root),
+                debounce=int(poll_interval * 1000),
+            ):
+                # changes is a set of (change_type, path) tuples.
+                # Only re-scan if a task.json file changed.
+                relevant = any("task.json" in p for _, p in changes)
+                if not relevant:
+                    continue
+                current = _scan_all()
+                for event in _emit_changes(current):
+                    yield event
+
+        except ImportError:
+            # Fallback: polling if watchfiles is not available.
+            _logger.warning(
+                "watchfiles not installed — falling back to polling for SSE. "
+                "Install uvicorn[standard] for event-driven updates."
+            )
+            while True:
+                current = _scan_all()
+                for event in _emit_changes(current):
+                    yield event
                 yield ": heartbeat\n\n"
-                heartbeat_counter = 0
-
-            await asyncio.sleep(poll_interval)
+                await asyncio.sleep(poll_interval)
 
     return StreamingResponse(
         event_stream(),
@@ -754,7 +1519,4 @@ if _UI_DIST.is_dir():
         index = _UI_DIST / "index.html"
         if index.is_file():
             return index.read_text(encoding="utf-8")
-        raise HTTPException(
-            status_code=404,
-            detail="UI not built. Run: cd ui && npm run build"
-        )
+        raise HTTPException(status_code=404, detail="UI not built. Run: cd ui && npm run build")

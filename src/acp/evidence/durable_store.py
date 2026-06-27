@@ -52,6 +52,7 @@ tasks without collision.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -74,12 +75,21 @@ class DurableEventStore:
     def init(self) -> None:
         """Initialize the database schema. Idempotent.
 
+        Uses the forward-rolling migration engine (``acp.evidence.migrations``)
+        to apply schema updates via a per-store ``schema_versions`` table.
+        This avoids the O(N) drop-and-rebuild-from-JSONL strategy as the
+        database grows.
+
         Handles migration from the old single-column primary key schema
         (event_id TEXT PRIMARY KEY) to the composite key schema
-        (PRIMARY KEY (task_id, event_id)). If the old schema is detected,
-        the table is dropped and recreated — the JSONL log is the canonical
-        source, so the SQLite store can be safely rebuilt.
+        (PRIMARY KEY (task_id, event_id)). If the old schema is detected
+        (events table exists with the old PK but no schema_versions entry),
+        the table is dropped once — the JSONL log is the canonical source,
+        so the SQLite store can be safely rebuilt. After that, normal
+        migrations proceed.
         """
+        from acp.evidence.migrations import EVENT_STORE_MIGRATIONS, run_migrations
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -90,38 +100,36 @@ class DurableEventStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
 
         # Check for old schema (event_id as sole PRIMARY KEY) and migrate.
+        # This handles databases created before the migration engine existed
+        # (table already present with old PK layout, no schema_versions entry).
         cols = self._conn.execute("PRAGMA table_info(events)").fetchall()
         if cols:
             pk_cols = [c[1] for c in cols if c[5]]  # c[5] is pk flag
             if pk_cols == ["event_id"]:
                 # Old schema — drop and recreate with composite key.
                 # The JSONL log is canonical; SQLite is a derived index.
-                self._conn.execute("DROP TABLE IF EXISTS events")
+                # Use a transaction so the drop is atomic. If the drop
+                # fails, we roll back and don't proceed to migrations.
+                self._conn.execute("BEGIN EXCLUSIVE")
+                try:
+                    self._conn.execute("DROP TABLE IF EXISTS events")
+                    self._conn.execute("COMMIT")
+                except Exception:
+                    self._conn.execute("ROLLBACK")
+                    raise
 
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                task_id    TEXT NOT NULL,
-                event_id   TEXT NOT NULL,
-                type       TEXT NOT NULL,
-                timestamp  TEXT NOT NULL,
-                payload    TEXT NOT NULL,
-                prev_hash  TEXT NOT NULL,
-                hash       TEXT NOT NULL,
-                signature  TEXT DEFAULT '',
-                PRIMARY KEY (task_id, event_id)
-            )
-        """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp)")
+        # Run forward-rolling migrations via the schema_versions table.
+        run_migrations(self._conn, EVENT_STORE_MIGRATIONS, store_name="event_store")
 
     def append(self, event: Event) -> None:
         """Insert one event. Raises if (task_id, event_id) already exists."""
         if self._conn is None:
             raise RuntimeError("DurableEventStore not initialized — call .init() first")
         self._conn.execute(
-            "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events "
+            "(task_id, event_id, type, timestamp, payload, "
+            "prev_hash, hash, signature, signature_algorithm) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.task_id,
                 event.event_id,
@@ -131,6 +139,7 @@ class DurableEventStore:
                 event.prev_hash,
                 event.hash,
                 event.signature,
+                event.signature_algorithm,
             ),
         )
 
@@ -142,8 +151,10 @@ class DurableEventStore:
         try:
             for event in events:
                 self._conn.execute(
-                    "INSERT INTO events (task_id, event_id, type, timestamp, payload, prev_hash, hash, signature) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events "
+                    "(task_id, event_id, type, timestamp, payload, "
+                    "prev_hash, hash, signature, signature_algorithm) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         event.task_id,
                         event.event_id,
@@ -153,6 +164,7 @@ class DurableEventStore:
                         event.prev_hash,
                         event.hash,
                         event.signature,
+                        event.signature_algorithm,
                     ),
                 )
             self._conn.execute("COMMIT")
@@ -193,6 +205,7 @@ class DurableEventStore:
         since: str | None = None,
         until: str | None = None,
         limit: int = 1000,
+        offset: int = 0,
     ) -> list[Event]:
         """Query events by task, type, and/or time range.
 
@@ -218,9 +231,12 @@ class DurableEventStore:
             params.append(until)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
+        params.append(offset)
         rows = self._conn.execute(
-            f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature "
-            f"FROM events{where} ORDER BY task_id ASC, event_id ASC LIMIT ?",
+            f"SELECT task_id, event_id, type, timestamp, payload, prev_hash, hash, signature, "
+            f"signature_algorithm "
+            f"FROM events{where} ORDER BY task_id ASC, event_id ASC "
+            f"LIMIT ? OFFSET ?",
             params,
         ).fetchall()
         return [_row_to_event(row) for row in rows]
@@ -258,6 +274,57 @@ class DurableEventStore:
         self.append_batch(events)
         return len(events)
 
+    def rebuild_jsonl_from_store(
+        self,
+        task_id: str,
+        jsonl_path: Path | str,
+    ) -> int:
+        """Rebuild events.jsonl for a task from the SQLite store (v0.9.0 Step 1).
+
+        This is the inverse of :meth:`rebuild_from_jsonl`: it reads all
+        events for ``task_id`` from SQLite and writes them to ``jsonl_path``
+        in log order. Used on startup when ``events.jsonl`` is missing or
+        corrupt but the SQLite durable store has the events.
+
+        The file is written atomically: events are collected, written to a
+        temp file, fsync'd, then renamed to the target path. Returns the
+        number of events written.
+        """
+        if self._conn is None:
+            raise RuntimeError("DurableEventStore not initialized — call .init() first")
+        jsonl_path = Path(jsonl_path)
+
+        # Paginate to avoid truncation on tasks with many events.
+        page_size = 50000
+        all_events: list[Event] = []
+        offset = 0
+        while True:
+            page = self.query(
+                task_id=task_id, limit=page_size, offset=offset
+            )
+            if not page:
+                break
+            all_events.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        if not all_events:
+            return 0
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [evt.model_dump_json() + "\n" for evt in all_events]
+        tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
+        with tmp_path.open("wb") as f:
+            f.write("".join(lines).encode())
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(jsonl_path)
+        return len(all_events)
+
+    def get_event_count(self, task_id: str) -> int:
+        """Return the number of events for a task in the SQLite store."""
+        return self.count(task_id=task_id)
+
     def close(self) -> None:
         """Close the database connection."""
         if self._conn is not None:
@@ -272,11 +339,11 @@ class DurableEventStore:
         self.close()
 
 
-def _row_to_event(row: tuple) -> Event:
+def _row_to_event(row: tuple[str, str, str, str, str, str, str, str, str]) -> Event:
     """Convert a SQLite row to an Event model.
 
     Column order matches the SELECT statements: task_id, event_id, type,
-    timestamp, payload, prev_hash, hash, signature.
+    timestamp, payload, prev_hash, hash, signature, signature_algorithm.
     """
     return Event(
         task_id=row[0],
@@ -287,4 +354,5 @@ def _row_to_event(row: tuple) -> Event:
         prev_hash=row[5],
         hash=row[6],
         signature=row[7] or "",
+        signature_algorithm=row[8] or "ed25519",
     )

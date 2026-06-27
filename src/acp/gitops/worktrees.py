@@ -7,17 +7,35 @@ must be identical before and after a run (verified by the caller / tests).
 **This is workflow isolation, not a security sandbox.** The worktree
 prevents the agent from touching the default branch, but it does NOT
 prevent a malicious agent or command from accessing the filesystem, network,
-SSH keys, environment variables, home directory, or other repos. True
-sandboxing (containers, seccomp, etc.) is a future concern.
+SSH keys, environment variables, home directory, or other repos.
+
+For true security sandboxing, use one of the executor backends instead of
+the default worktree mode:
+
+  - ``docker_sbx``: Full microVM isolation via Docker Sandboxes (separate
+    kernel, private filesystem, network policy enforcement).
+  - ``gvisor``: OS-level syscall sandboxing via gVisor's runsc runtime
+    (user-space kernel intercepts syscalls).
+  - ``openhands``: Docker-based runtime sandbox via OpenHands' own
+    container isolation.
+  - ``venv``: Hermetic Python dependency isolation via ``uv run --isolated``
+    (prevents supply-chain attacks via hijacked dependencies).
+
+Seccomp profile customization and Firecracker microVM support remain future
+enhancements. See ``src/acp/executor/`` for the available backends and
+``ExecutorSection`` in ``config.py`` for configuration.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from git import Repo
 
 from acp.gitops.branches import create_branch
+
+logger = logging.getLogger(__name__)
 
 
 def is_clean(repo_path: Path) -> bool:
@@ -40,12 +58,19 @@ def create_worktree(
     Returns ``(worktree_path, base_commit_sha)``.
     """
     if not is_clean(repo_path):
-        raise RuntimeError(
-            f"repo is dirty; refusing to create worktree: {repo_path}"
-        )
+        raise RuntimeError(f"repo is dirty; refusing to create worktree: {repo_path}")
     target_path = target_path.resolve()
-    if target_path.exists():
-        raise FileExistsError(f"worktree target already exists: {target_path}")
+    # v0.7.4: Use mkdir(exist_ok=False) for an atomic existence check
+    # instead of the TOCTOU-vulnerable exists() + git worktree add pattern.
+    # If the path already exists, mkdir raises FileExistsError immediately.
+    # If it doesn't exist, we create it atomically and remove it before
+    # git worktree add (which expects to create the directory itself).
+    try:
+        target_path.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        raise FileExistsError(f"worktree target already exists: {target_path}") from None
+    # Remove it so git worktree add can create it.
+    target_path.rmdir()
 
     base_sha = create_branch(repo_path, base_branch, branch_name)
     repo = Repo(str(repo_path))
@@ -73,9 +98,15 @@ def remove_worktree(repo_path: Path, worktree_path: Path, force: bool = False) -
             repo.git.worktree("remove", "-f", str(worktree_path))
         else:
             repo.git.worktree("remove", str(worktree_path))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         # The worktree dir may have been removed out-of-band — that's fine.
-        pass
+        # But log it so orphaned worktrees can be debugged if they accumulate.
+        logger.warning(
+            "worktree remove failed (path=%s, force=%s): %s — continuing with prune",
+            worktree_path,
+            force,
+            exc,
+        )
     # Always prune to clean up stale worktree metadata, even after successful
     # removal. Without this, git may still consider the branch "checked out"
     # in a now-removed worktree, blocking branch deletion.

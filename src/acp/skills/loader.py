@@ -47,7 +47,6 @@ import yaml
 
 from acp.errors import SkillLoadError
 
-
 # --------------------------------------------------------------------------- #
 # Skill schema (validated by Pydantic in the caller)
 # --------------------------------------------------------------------------- #
@@ -86,9 +85,7 @@ def load_skills(skills_dir: Path) -> dict[str, dict[str, Any]]:
         try:
             skill = _load_yaml_file(yaml_file)
         except Exception as exc:  # noqa: BLE001
-            raise SkillLoadError(
-                f"Failed to load skill from {yaml_file}: {exc}"
-            ) from exc
+            raise SkillLoadError(f"Failed to load skill from {yaml_file}: {exc}") from exc
         if skill and validate_skill(skill):
             skills[skill["name"]] = skill
 
@@ -97,9 +94,7 @@ def load_skills(skills_dir: Path) -> dict[str, dict[str, Any]]:
         try:
             skill = _load_skill_md(skill_md)
         except Exception as exc:  # noqa: BLE001
-            raise SkillLoadError(
-                f"Failed to load skill from {skill_md}: {exc}"
-            ) from exc
+            raise SkillLoadError(f"Failed to load skill from {skill_md}: {exc}") from exc
         if skill and validate_skill(skill):
             skills[skill["name"]] = skill
 
@@ -128,14 +123,11 @@ def load_skill(skill_path: Path) -> dict[str, Any]:
         else:
             skill = _load_yaml_file(skill_path)
     except Exception as exc:  # noqa: BLE001
-        raise SkillLoadError(
-            f"Failed to load skill from {skill_path}: {exc}"
-        ) from exc
+        raise SkillLoadError(f"Failed to load skill from {skill_path}: {exc}") from exc
 
     if not validate_skill(skill):
         raise SkillLoadError(
-            f"Skill validation failed for {skill_path}: "
-            f"missing required fields {REQUIRED_FIELDS}"
+            f"Skill validation failed for {skill_path}: missing required fields {REQUIRED_FIELDS}"
         )
 
     return skill

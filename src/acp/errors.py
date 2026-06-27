@@ -1,9 +1,8 @@
 """ACP exception types.
 
-Library code (EvidenceLoop, graph nodes, workers) raises these. The Typer
-command layer catches them and converts to ``typer.Exit(code=...)`` so the
-CLI returns a clean exit code while tests and graph nodes see ordinary
-exceptions.
+Library code (graph nodes, workers) raises these. The Typer command layer
+catches them and converts to ``typer.Exit(code=...)`` so the CLI returns a
+clean exit code while tests and graph nodes see ordinary exceptions.
 """
 
 from __future__ import annotations

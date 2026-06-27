@@ -24,22 +24,26 @@ non-skipped command failed (and attempts remain), ``run_tests`` routes to
 ``repair_plan → run_repair → run_tests`` (re-evaluated). The cap at
 ``config.agent.max_repair_attempts`` guarantees termination.
 
-Compiled with an in-memory ``MemorySaver`` checkpointer so runs are
-inspectable. (Durable checkpointing is a later concern; M3 only needs the
-graph to be drivable and its transitions observable.)
+Compiled with a checkpointer so runs are inspectable. v0.7.4 adds support
+for durable SQLite checkpointing (``checkpoint_store`` config) — when
+configured, workflow state persists across process restarts for crash
+recovery. Without it, an in-memory ``MemorySaver`` is used.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from acp.agents.base import AgentProtocol
 from acp.agents.registry import build_agent as _default_build_agent
+from acp.config import DurableMode
 from acp.events import EventWriter
 from acp.graph.nodes import (
     NodeContext,
@@ -61,23 +65,31 @@ from acp.graph.nodes import (
     write_report_node,
 )
 from acp.graph.state import ACPState
-from acp.models import EventType, TaskStatus
+from acp.models import Event, EventType, TaskStatus
 from acp.store import TaskStore
 from acp.testing.runner import validation_passed, validation_ran
 
+_logger = logging.getLogger(__name__)
 
-def node_error_handler(node_fn: Callable) -> Callable:
+
+def node_error_handler(
+    node_fn: Callable[..., Awaitable[dict[str, Any]]],
+) -> Callable[..., Awaitable[dict[str, Any]]]:
     """Wrap a graph node so unhandled exceptions produce a FAILED state.
 
     If the wrapped node raises, instead of crashing the graph we return a
     state patch with ``status=FAILED`` and an ``error`` message. The graph's
     conditional edges route this to the ``failed`` terminal node, which
     writes whatever evidence it can.
+
+    v0.8.0: Now wraps async node functions. The wrapper is itself async
+    and awaits the wrapped node.
     """
 
-    def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
+    async def wrapper(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         try:
-            return node_fn(state, ctx)
+            result: dict[str, Any] = await node_fn(state, ctx)
+            return result
         except Exception as exc:
             # Write a node failure event directly (best effort). If the event
             # write itself fails, surface that in the state so it's not silent.
@@ -85,9 +97,21 @@ def node_error_handler(node_fn: Callable) -> Callable:
             try:
                 ctx.events.write(
                     EventType.NODE_FAILED,
-                    {"node": node_fn.__name__, "exception_type": type(exc).__name__, "message": str(exc)},
+                    {
+                        "node": node_fn.__name__,
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as event_exc:  # noqa: BLE001
+                # v0.7.4: Log the event write failure so operators can
+                # diagnose evidence chain breaks instead of silently
+                # setting a flag that's only visible in the state.
+                _logger.error(
+                    "Failed to write node_failed event for %s: %s",
+                    node_fn.__name__,
+                    event_exc,
+                )
                 event_write_failed = True
             patch: dict[str, Any] = {
                 "status": TaskStatus.FAILED,
@@ -200,12 +224,33 @@ def _route_after_worktree(state: dict[str, Any]) -> str:
     return "failed" if _is_failed(state) else "build_context"
 
 
+def _route_after_agent(state: dict[str, Any]) -> str:
+    """Route after run_agent: failed (sentinel abort) OR run_tests (normal).
+
+    v0.7.3: When the StreamSentinel kills the agent mid-execution (secret
+    leak, strange loop, dangerous path), the node returns FAILED status.
+    Route to `failed` instead of running tests/review on a partial diff
+    from a killed agent.
+    """
+    return "failed" if _is_failed(state) else "run_tests"
+
+
+def _route_after_repair(state: dict[str, Any]) -> str:
+    """Route after run_repair: failed (sentinel abort) OR run_tests (normal).
+
+    v0.7.3: Same logic as _route_after_agent, but for the repair loop.
+    When the StreamSentinel kills the repair agent, route to `failed`
+    instead of re-running tests on a partial repair diff.
+    """
+    return "failed" if _is_failed(state) else "run_tests"
+
+
 def _route_after_tests(state: dict[str, Any]) -> str:
     """Route after run_tests: repair only on actual failures, else proceed.
 
     Repair triggers iff validation ran AND at least one non-skipped command
-    failed — never on the "no validation ran" case (``all_passed([])`` used
-    to mask that as a pass and skip repair accidentally). When
+    failed — never on the "no validation ran" case (the old empty-list-as-pass
+    behavior used to mask that and skip repair accidentally). When
     ``max_repair_attempts`` is 0, or attempts are exhausted, a failing test
     falls straight through to capture_diff → review → FAILED report.
 
@@ -244,6 +289,8 @@ def build_workflow(
     store: TaskStore,
     events: EventWriter,
     agent_factory: Callable[[Any], Any] | None = None,
+    checkpoint_db_path: Path | None = None,
+    durable_event_store: Any = None,
 ) -> Any:
     """Build + compile the ACP workflow graph.
 
@@ -256,19 +303,29 @@ def build_workflow(
     ``build_agent``; tests inject a controllable agent to exercise the
     repair loop deterministically.
 
-    Returns a compiled graph ready to ``.invoke(initial_state)``.
+    ``checkpoint_db_path`` is optional (v0.7.4). When provided, the graph
+    uses a SQLite-backed durable checkpointer instead of the default
+    in-memory ``MemorySaver``. This enables crash recovery — workflow
+    state persists across process restarts. Requires the ``checkpoint``
+    extra (``langgraph-checkpoint-sqlite``).
+
+    Returns a compiled graph ready to ``.ainvoke(initial_state)``.
     """
     ctx = NodeContext(
         store=store,
         events=events,
         agent_factory=agent_factory or _default_build_agent,
+        durable_event_store=durable_event_store,
     )
 
     g = StateGraph(ACPState)
 
     # Wrap every node with the error handler so unhandled exceptions produce
     # a FAILED state instead of crashing the graph.
-    def _wrap(n: Callable) -> Callable:
+    # v0.8.0: Nodes are now async — the wrapper and _wrap handle Awaitable.
+    def _wrap(
+        n: Callable[..., Awaitable[dict[str, Any]]],
+    ) -> Callable[..., Awaitable[dict[str, Any]]]:
         return partial(node_error_handler(n), ctx=ctx)
 
     # Bind ctx into each node so LangGraph sees a single-arg callable.
@@ -302,13 +359,21 @@ def build_workflow(
     g.add_conditional_edges("create_worktree", _route_after_worktree)
 
     g.add_edge("build_context", "run_agent")
-    g.add_edge("run_agent", "run_tests")
+    # v0.7.3: run_agent → failed (sentinel abort) OR run_tests (normal).
+    # When the StreamSentinel kills the agent mid-execution, the node
+    # returns FAILED status. Route to `failed` instead of running tests
+    # on a partial, potentially dangerous diff.
+    g.add_conditional_edges("run_agent", _route_after_agent)
 
     # run_tests → repair_plan (if failing + attempts remain) OR capture_diff.
     # The repair loop: repair_plan → run_repair → run_tests (re-evaluated).
     g.add_conditional_edges("run_tests", _route_after_tests)
     g.add_edge("repair_plan", "run_repair")
-    g.add_edge("run_repair", "run_tests")
+    # v0.7.3: run_repair → failed (sentinel abort) OR run_tests (normal).
+    # When the StreamSentinel kills the repair agent mid-execution, the
+    # node returns FAILED status. Route to `failed` instead of re-running
+    # tests on a partial repair diff from a killed agent.
+    g.add_conditional_edges("run_repair", _route_after_repair)
 
     g.add_edge("capture_diff", "review_diff")
     # v0.6.0: review_diff → repair_plan (if TESTS_MISSING + dynamic_test_generation)
@@ -332,12 +397,41 @@ def build_workflow(
     g.add_edge("failed", END)
     g.add_edge("needs_review", END)
 
-    return g.compile(checkpointer=MemorySaver())
+    # v0.7.4: Durable checkpointing via SQLite when configured.
+    # Falls back to in-memory MemorySaver when no checkpoint_db_path is provided.
+    checkpointer: Any = MemorySaver()
+    if checkpoint_db_path is not None:
+        try:
+            import sqlite3
+
+            from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore[import-not-found]
+
+            conn = sqlite3.connect(str(checkpoint_db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            checkpointer = SqliteSaver(conn)
+            checkpointer.setup()
+            _logger.info("durable checkpointing enabled: %s", checkpoint_db_path)
+        except ImportError:
+            _logger.warning(
+                "checkpoint_store configured but langgraph-checkpoint-sqlite "
+                "is not installed. Install with: uv sync --extra checkpoint. "
+                "Falling back to in-memory checkpointer."
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "failed to initialize SQLite checkpointer: %s — "
+                "falling back to in-memory checkpointer",
+                exc,
+            )
+
+    return g.compile(checkpointer=checkpointer)
 
 
 # --------------------------------------------------------------------------- #
-# Convenience runner — used by the CLI (and tests).
+# Convenience runners — used by the CLI, orchestrator, and tests.
 # --------------------------------------------------------------------------- #
+
 
 def run_workflow(
     *,
@@ -347,98 +441,200 @@ def run_workflow(
     vault_root: Path | str,
     agent_factory: Callable[[Any], AgentProtocol] | None = None,
     task_id: str | None = None,
+    mission_id: str = "",
+    mission_step_index: int = -1,
+    parent_task_id: str = "",
+    mission_goal: str = "",
+    mission_description: str = "",
+    recursion_depth: int = 0,
+) -> dict[str, Any]:
+    """Build + invoke the graph once and return the final state (sync).
+
+    This is a thin sync wrapper around :func:`run_workflow_async` for sync
+    callers (CLI, orchestrator, sync tests). It uses ``asyncio.run()`` to
+    drive the async workflow. When called from an async context (FastAPI,
+    async tests), use :func:`run_workflow_async` directly.
+    """
+    import asyncio
+
+    return asyncio.run(
+        run_workflow_async(
+            config=config,
+            user_request=user_request,
+            runs_root=runs_root,
+            vault_root=vault_root,
+            agent_factory=agent_factory,
+            task_id=task_id,
+            mission_id=mission_id,
+            mission_step_index=mission_step_index,
+            parent_task_id=parent_task_id,
+            mission_goal=mission_goal,
+            mission_description=mission_description,
+            recursion_depth=recursion_depth,
+        )
+    )
+
+
+async def run_workflow_async(
+    *,
+    config: Any,
+    user_request: str,
+    runs_root: Path | str,
+    vault_root: Path | str,
+    agent_factory: Callable[[Any], AgentProtocol] | None = None,
+    task_id: str | None = None,
+    mission_id: str = "",
+    mission_step_index: int = -1,
+    parent_task_id: str = "",
+    mission_goal: str = "",
+    mission_description: str = "",
+    recursion_depth: int = 0,
 ) -> dict[str, Any]:
     """Build + invoke the graph once and return the final state.
 
-    Handles the placeholder-writer setup: the EventWriter is constructed with
-    a sentinel id, and the ``create_task`` node relocates it to the real run
-    dir once the task id is minted. Returns the graph's final state dict.
+    This is the single entry point for running a workflow. All node functions
+    are async, and the graph is invoked via ``wf.ainvoke()`` exclusively.
 
-    When ``config.evidence.signing_key_path`` is set, events are Ed25519-signed.
-    When ``config.evidence.durable_store`` is set, events are dual-written to
-    a SQLite database in addition to the JSONL log.
+    Sync callers (CLI, orchestrator) should wrap this in ``asyncio.run()``::
+
+        result = asyncio.run(run_workflow_async(...))
+
+    Async callers (FastAPI, tests with ``asyncio_mode="auto"``) should await
+    it directly::
+
+        result = await run_workflow_async(...)
+
+    The setup logic (store init, signing key, durable store wiring) runs
+    before the graph is invoked. When the workflow graph contains async nodes
+    (``async def``), LangGraph will execute them concurrently where possible.
     """
-    store = TaskStore(runs_root=runs_root)
-    # Ensure vault_root exists — the workflow writes a vault note at the end
-    # and the vault directory must be present by then.
+    # v0.7.0 (Phase 1.1): Wire SQLite-as-primary if configured.
+    evidence_cfg = getattr(config, "evidence", None)
+    durable_task_store = None
+    if (
+        evidence_cfg
+        and evidence_cfg.durable_store
+        and evidence_cfg.durable_mode != DurableMode.DISABLED
+    ):
+        from acp.evidence.durable_task_store import DurableTaskStore
+
+        durable_task_store = DurableTaskStore(evidence_cfg.durable_store)
+        durable_task_store.init()
+    store = TaskStore(
+        runs_root=runs_root,
+        durable_store=durable_task_store,
+        primary=evidence_cfg.task_store_primary if evidence_cfg else "json",
+    )
     Path(vault_root).mkdir(parents=True, exist_ok=True)
-    # Placeholder writer — create_task will relocate it to the real run dir.
     events = EventWriter("__pending__", store.root / "__pending__")
 
-    # Wire Ed25519 signing if a signing key is configured. Signing is a trust
-    # mode: if it is configured, failure to sign must be FATAL. We never
-    # silently downgrade configured signed evidence to unsigned evidence —
-    # that is exactly the kind of integrity gap this control plane exists to
-    # prevent. A missing key file, a malformed key, or an unavailable
-    # `cryptography` package all raise EvidenceConfigError (fail closed).
-    evidence_cfg = getattr(config, "evidence", None)
+    # Wire signing key if configured.
     if evidence_cfg and evidence_cfg.signing_key_path:
         from acp.errors import EvidenceConfigError
+
         try:
             key_bytes = evidence_cfg.signing_key_path.read_bytes()
         except OSError as exc:
             raise EvidenceConfigError(
                 f"signing key file not readable: {evidence_cfg.signing_key_path} ({exc})"
             ) from exc
-        if len(key_bytes) != 32:
+        algorithm = evidence_cfg.signature_algorithm
+        expected_sizes = {"ed25519": 32, "mldsa44": 2560, "mldsa65": 4032, "mldsa87": 4896}
+        expected = expected_sizes.get(algorithm, 32)
+        if len(key_bytes) != expected:
             raise EvidenceConfigError(
-                f"signing key file must be exactly 32 bytes, got {len(key_bytes)}: "
-                f"{evidence_cfg.signing_key_path}"
+                f"signing key file for {algorithm} must be exactly {expected} bytes, "
+                f"got {len(key_bytes)}: {evidence_cfg.signing_key_path}"
             )
         try:
-            events.set_signing_key(key_bytes)
+            events.set_signing_key(key_bytes, algorithm=algorithm)
         except ImportError as exc:
-            raise EvidenceConfigError(
-                "signing is configured but the 'cryptography' package is not "
-                "installed — refusing to run unsigned. Install with: uv sync --extra crypto"
-            ) from exc
+            if algorithm == "ed25519":
+                raise EvidenceConfigError(
+                    "signing is configured but the 'cryptography' package is not "
+                    "installed — refusing to run unsigned. "
+                    "Install with: uv sync --extra crypto"
+                ) from exc
+            else:
+                raise EvidenceConfigError(
+                    f"{algorithm} signing requires cryptography>=49 with ML-DSA "
+                    "support — refusing to run unsigned. "
+                    "Install with: uv sync --extra mldsa"
+                ) from exc
 
-    # Wire SQLite durable store if configured. The store is additive: events
-    # go to both JSONL (canonical) and SQLite (queryable index). We wrap the
-    # EventWriter's write method to dual-write.
-    #
-    # Durable mode controls failure behavior:
-    #   - disabled: no SQLite writes (durable_store path is ignored)
-    #   - best_effort: failures are recorded as warnings, run continues
-    #   - required: failures are fatal — the run cannot succeed
+    # Wire durable store if configured (same as sync version).
     durable_store = None
     durable_store_failures: list[str] = []
     durable_mode = "best_effort"
     if evidence_cfg:
-        durable_mode = evidence_cfg.durable_mode.value if hasattr(evidence_cfg.durable_mode, "value") else str(evidence_cfg.durable_mode)
+        durable_mode = (
+            evidence_cfg.durable_mode.value
+            if hasattr(evidence_cfg.durable_mode, "value")
+            else str(evidence_cfg.durable_mode)
+        )
 
     if evidence_cfg and evidence_cfg.durable_store and durable_mode != "disabled":
         try:
             from acp.evidence.durable_store import DurableEventStore
+
             durable_store = DurableEventStore(evidence_cfg.durable_store)
             durable_store.init()
-            # Wrap the write method to dual-write. In best_effort mode, failures
-            # are recorded but don't crash the run. In required mode, failures
-            # raise — the run cannot succeed without durable evidence.
             original_write = events.write
-            def _dual_write(type, payload=None):
-                evt = original_write(type, payload)
-                try:
-                    durable_store.append(evt)
-                except Exception as exc:  # noqa: BLE001
-                    durable_store_failures.append(
-                        f"{evt.event_id} ({evt.type.value}): {exc}"
-                    )
-                    if durable_mode == "required":
-                        raise  # fail closed — durable evidence is required
+
+            def _dual_write(type: EventType, payload: dict[str, Any] | None = None) -> Event:
+                if durable_mode == "required":
+                    # v0.9.0 (Step 1): SQLite-first ordering for crash safety.
+                    # Build the event, write to SQLite (authoritative), then
+                    # append to JSONL (best-effort mirror). If the SQLite
+                    # write fails, the event is nowhere — raise so the run
+                    # fails cleanly. If the JSONL append fails after SQLite
+                    # succeeds, the event is durable in SQLite and the JSONL
+                    # can be rebuilt via rebuild_jsonl_from_store on startup.
+                    evt = events.build_event(type, payload)
+                    durable_store.append(evt)  # raises on failure
+                    try:
+                        events.append_event(evt)
+                    except Exception as exc:  # noqa: BLE001
+                        durable_store_failures.append(
+                            f"{evt.event_id} ({evt.type.value}): "
+                            f"JSONL append failed after SQLite commit — {exc}"
+                        )
+                        events._count += 1
+                        events._prev_hash = evt.hash
+                else:
+                    # Best-effort mode: JSONL first (backwards compatible),
+                    # then SQLite. Failures are warnings, not fatal.
+                    evt = original_write(type, payload)
+                    try:
+                        durable_store.append(evt)
+                    except Exception as exc:  # noqa: BLE001
+                        durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
                 return evt
+
             events.write = _dual_write  # type: ignore[method-assign]
         except Exception as exc:
             durable_store_failures.append(f"init: {exc}")
             if durable_mode == "required":
                 from acp.errors import EvidenceConfigError
+
                 raise EvidenceConfigError(
                     f"durable store initialization failed (required mode): {exc}"
                 ) from exc
 
-    wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
+    # v0.7.4: Durable checkpointing.
+    checkpoint_db_path = None
+    if evidence_cfg and evidence_cfg.checkpoint_store:
+        checkpoint_db_path = evidence_cfg.checkpoint_store
 
-    state = {
+    wf = build_workflow(
+        store=store,
+        events=events,
+        agent_factory=agent_factory,
+        checkpoint_db_path=checkpoint_db_path,
+        durable_event_store=durable_store,
+    )
+
+    state: dict[str, Any] = {
         "config": config,
         "user_request": user_request,
         "vault_root": Path(vault_root),
@@ -446,15 +642,30 @@ def run_workflow(
     }
     if task_id is not None:
         state["preallocated_task_id"] = task_id
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-run"}})
+    if mission_id:
+        state["mission_id"] = mission_id
+        state["mission_step_index"] = mission_step_index
+        state["parent_task_id"] = parent_task_id
+        # v0.9.0 (Step 7): Thread the mission goal/description so create_task
+        # can persist them on the durable Task and the Graphiti episode text
+        # can be mission-aware.
+        state["mission_goal"] = mission_goal
+        state["mission_description"] = mission_description
+    state["recursion_depth"] = recursion_depth
 
-    # Close the durable store if it was opened.
+    import uuid
+
+    thread_id = task_id if task_id else f"acp-run-{uuid.uuid4().hex[:8]}"
+    # v0.7.5: Use ainvoke for async-native execution.
+    result: dict[str, Any] = await wf.ainvoke(
+        state, config={"configurable": {"thread_id": thread_id}}
+    )
+
     if durable_store is not None:
         durable_store.close()
+    if durable_task_store is not None:
+        durable_task_store.close()
 
-    # Surface durable-store failures to the caller. The JSONL log is canonical,
-    # so the run can succeed, but the operator must know the durable index is
-    # incomplete — silent evidence loss is unacceptable in a trust system.
     if durable_store_failures:
         result["durable_store_warnings"] = durable_store_failures
 

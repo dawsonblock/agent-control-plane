@@ -10,20 +10,20 @@ a task may only be marked ``PASSED`` if all of the following hold:
 * review has no hard block
 * review recommendation is ``merge``
 
-The legacy ``compute_final_status()`` in ``models.py`` is now a thin wrapper
-around this module. All new code should call ``evaluate_final_gates`` directly.
+The deprecated ``compute_final_status()`` wrapper in ``models.py`` was
+removed in v0.7.6. All code should call ``evaluate_final_gates`` directly.
 """
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
 from acp.models import CommandResult, ReviewResult
 
 
-class GateOutcome(str, Enum):
+class GateOutcome(StrEnum):
     """Three possible gate outcomes."""
 
     PASSED = "passed"
@@ -105,7 +105,10 @@ def evaluate_final_gates(
     if (
         agent_exit_code != 0
         or failed_commands
-        or (review_result is not None and (review_result.hard_block or review_result.recommendation == "reject"))
+        or (
+            review_result is not None
+            and (review_result.hard_block or review_result.recommendation == "reject")
+        )
     ):
         outcome = GateOutcome.FAILED
     # Completed, but not safe to call passed

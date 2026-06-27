@@ -3,18 +3,30 @@ import { TaskList } from "./TaskList";
 import { TaskDetail } from "./TaskDetail";
 import { RunForm } from "./RunForm";
 import { MemorySearch } from "./MemorySearch";
+import { MissionList } from "./MissionList";
+import { MissionDetail } from "./MissionDetail";
+import { MissionForm } from "./MissionForm";
+import { Skills } from "./Skills";
 import "./App.css";
+
+type View = "tasks" | "memory" | "missions" | "skills";
 
 function App() {
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  const [selectedMission, setSelectedMission] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [view, setView] = useState<"tasks" | "memory">("tasks");
+  const [view, setView] = useState<View>("tasks");
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
   const handleSubmitted = (taskId: string) => {
     refresh();
     setSelectedTask(taskId);
+  };
+
+  const handleMissionCreated = (missionId: string) => {
+    refresh();
+    setSelectedMission(missionId);
   };
 
   return (
@@ -29,10 +41,22 @@ function App() {
             Tasks
           </button>
           <button
+            className={view === "missions" ? "active" : ""}
+            onClick={() => setView("missions")}
+          >
+            Missions
+          </button>
+          <button
             className={view === "memory" ? "active" : ""}
             onClick={() => setView("memory")}
           >
             Memory
+          </button>
+          <button
+            className={view === "skills" ? "active" : ""}
+            onClick={() => setView("skills")}
+          >
+            Skills
           </button>
         </nav>
       </header>
@@ -57,7 +81,27 @@ function App() {
             </div>
           </>
         )}
+        {view === "missions" && (
+          <>
+            <div className="sidebar">
+              <MissionForm onCreated={handleMissionCreated} />
+              <MissionList
+                onSelect={setSelectedMission}
+                selectedId={selectedMission}
+                refreshKey={refreshKey}
+              />
+            </div>
+            <div className="content">
+              {selectedMission ? (
+                <MissionDetail missionId={selectedMission} />
+              ) : (
+                <div className="empty">Select a mission to view details</div>
+              )}
+            </div>
+          </>
+        )}
         {view === "memory" && <MemorySearch />}
+        {view === "skills" && <Skills />}
       </main>
     </div>
   );

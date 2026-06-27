@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from git import GitCommandError, Repo
+from gitdb.exc import BadName
 
 
 def merge_to_base(
@@ -38,13 +39,9 @@ def merge_to_base(
     # Verify both branches exist.
     branch_names = [h.name for h in repo.heads]
     if base_branch not in branch_names:
-        raise RuntimeError(
-            f"base branch '{base_branch}' not found in repo"
-        )
+        raise RuntimeError(f"base branch '{base_branch}' not found in repo")
     if task_branch not in branch_names:
-        raise RuntimeError(
-            f"task branch '{task_branch}' not found in repo"
-        )
+        raise RuntimeError(f"task branch '{task_branch}' not found in repo")
 
     # Save the current branch so we can restore on failure.
     original_branch = repo.active_branch.name
@@ -72,9 +69,7 @@ def merge_to_base(
             repo.git.checkout(original_branch)
         except GitCommandError:
             pass
-        raise RuntimeError(
-            f"Auto-merge failed for task '{task_branch}': {exc}"
-        ) from exc
+        raise RuntimeError(f"Auto-merge failed for task '{task_branch}': {exc}") from exc
 
 
 def can_fast_forward(
@@ -92,8 +87,8 @@ def can_fast_forward(
     try:
         base_commit = repo.commit(base_branch)
         task_commit = repo.commit(task_branch)
-        return repo.git.merge_base(
-            "--is-ancestor", base_commit.hexsha, task_commit.hexsha
-        ) == ""
-    except (GitCommandError, ValueError):
+        return bool(
+            repo.git.merge_base("--is-ancestor", base_commit.hexsha, task_commit.hexsha) == ""
+        )
+    except (GitCommandError, ValueError, BadName):
         return False

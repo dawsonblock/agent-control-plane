@@ -1,17 +1,17 @@
-"""Unit tests for compute_final_status — the v0.5 gate-correct logic."""
+"""Unit tests for evaluate_final_gates — the v0.5 gate-correct logic.
+
+v0.7.6: Migrated from the deprecated ``compute_final_status`` wrapper to
+``evaluate_final_gates`` directly, per the tech-debt cleanup plan. The
+outcome-to-TaskStatus mapping that the wrapper performed is replicated
+here via a small local helper.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from acp.models import (
-    CommandResult,
-    Recommendation,
-    ReviewResult,
-    RiskLevel,
-    TaskStatus,
-    compute_final_status,
-)
+from acp.models import CommandResult, Recommendation, ReviewResult, RiskLevel, TaskStatus
+from acp.review.gates import GateOutcome, evaluate_final_gates
 
 
 def _cmd(exit_code: int = 0, skipped: bool = False) -> CommandResult:
@@ -39,11 +39,26 @@ def _review(
     )
 
 
+def _status(*, agent_passed: bool, command_results, diff_changed_files, review) -> TaskStatus:
+    """Replicate the compute_final_status wrapper: evaluate gates → TaskStatus."""
+    result = evaluate_final_gates(
+        agent_exit_code=0 if agent_passed else 1,
+        command_results=command_results,
+        review_result=review,
+        changed_files=diff_changed_files,
+    )
+    if result.outcome == GateOutcome.PASSED:
+        return TaskStatus.PASSED
+    if result.outcome == GateOutcome.NEEDS_REVIEW:
+        return TaskStatus.NEEDS_REVIEW
+    return TaskStatus.FAILED
+
+
 # --- All conditions met → PASSED ------------------------------------------- #
 
 
 def test_all_green_passed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -53,7 +68,7 @@ def test_all_green_passed() -> None:
 
 
 def test_multiple_commands_all_pass_passed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0), _cmd(0), _cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -66,7 +81,7 @@ def test_multiple_commands_all_pass_passed() -> None:
 
 
 def test_agent_nonzero_exit_failed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=False,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -79,7 +94,7 @@ def test_agent_nonzero_exit_failed() -> None:
 
 
 def test_no_commands_ran_needs_review() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0, skipped=True)],
         diff_changed_files=["src/main.py"],
@@ -89,7 +104,7 @@ def test_no_commands_ran_needs_review() -> None:
 
 
 def test_empty_command_list_needs_review() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[],
         diff_changed_files=["src/main.py"],
@@ -102,7 +117,7 @@ def test_empty_command_list_needs_review() -> None:
 
 
 def test_command_fails_failed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(1)],
         diff_changed_files=["src/main.py"],
@@ -112,7 +127,7 @@ def test_command_fails_failed() -> None:
 
 
 def test_mixed_results_failed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0), _cmd(1), _cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -125,7 +140,7 @@ def test_mixed_results_failed() -> None:
 
 
 def test_empty_diff_needs_review() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=[],
@@ -138,7 +153,7 @@ def test_empty_diff_needs_review() -> None:
 
 
 def test_review_hard_block_failed() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -148,7 +163,7 @@ def test_review_hard_block_failed() -> None:
 
 
 def test_review_revise_needs_review() -> None:
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -159,7 +174,7 @@ def test_review_revise_needs_review() -> None:
 
 def test_review_reject_failed() -> None:
     """REJECT (even without hard_block) means FAILED per AGENTS.md rule 10."""
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],
@@ -174,7 +189,7 @@ def test_none_review_with_good_commands_needs_review() -> None:
     A missing review is incomplete evidence. The system must not mark a task
     PASSED without a review confirming merge readiness.
     """
-    status = compute_final_status(
+    status = _status(
         agent_passed=True,
         command_results=[_cmd(0)],
         diff_changed_files=["src/main.py"],

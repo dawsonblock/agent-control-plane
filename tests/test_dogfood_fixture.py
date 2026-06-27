@@ -32,14 +32,16 @@ def _config(repo_path: Path) -> RepoConfig:
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=0),
         commands=CommandsSection(lint='echo "lint ok"', test='echo "tests passed"'),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
     )
 
 
 def _main_head(repo_path: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -58,7 +60,7 @@ _EXPECTED_EVENTS = [
 ]
 
 
-def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
+async def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
     """Full ACP run against a controlled repo — all invariants hold."""
     repo = disposable_repo
     runs = isolated_workspace["runs_root"]
@@ -69,10 +71,12 @@ def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
     wf = build_workflow(store=store, events=events)
     cfg = _config(repo.path)
     state = initial_state(
-        config=cfg, user_request="Add a hello-world test",
-        vault_root=vault, runs_root=runs,
+        config=cfg,
+        user_request="Add a hello-world test",
+        vault_root=vault,
+        runs_root=runs,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "dogfood"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "dogfood"}})
 
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)
@@ -101,17 +105,23 @@ def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
         idx = event_types.index(expected.value, idx)
 
     # 5. No duplicate terminal events.
-    terminal_types = {EventType.TASK_COMPLETED.value, EventType.TASK_FAILED.value, EventType.TASK_NEEDS_REVIEW.value}
+    terminal_types = {
+        EventType.TASK_COMPLETED.value,
+        EventType.TASK_FAILED.value,
+        EventType.TASK_NEEDS_REVIEW.value,
+    }
     terminal = [e for e in raw_events if e["type"] in terminal_types]
     assert len(terminal) == 1, (
-        f"expected exactly 1 terminal event, got {len(terminal)}: "
-        f"{[e['type'] for e in terminal]}"
+        f"expected exactly 1 terminal event, got {len(terminal)}: {[e['type'] for e in terminal]}"
     )
     assert terminal[0]["type"] == EventType.TASK_COMPLETED.value
 
     # 6. Event chain is valid (hash chain).
     from acp.models import Event
-    event_objs = [Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()]
+
+    event_objs = [
+        Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()
+    ]
     assert verify_event_chain(event_objs) is True, "event hash chain is broken"
 
     # 7. Evidence manifest exists and verifies.
@@ -129,7 +139,7 @@ def test_dogfood_fixture_happy_path(disposable_repo, isolated_workspace):
     assert result["status"] == TaskStatus.PASSED
 
 
-def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
+async def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
     """Failing test → FAILED, but all evidence invariants still hold."""
     repo = disposable_repo
     runs = isolated_workspace["runs_root"]
@@ -146,10 +156,12 @@ def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
     state = initial_state(
-        config=cfg, user_request="failing task",
-        vault_root=vault, runs_root=runs,
+        config=cfg,
+        user_request="failing task",
+        vault_root=vault,
+        runs_root=runs,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "dogfood-fail"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "dogfood-fail"}})
 
     task_id = result["task_id"]
     run_dir = store.run_dir(task_id)
@@ -163,15 +175,25 @@ def test_dogfood_fixture_failing_test(disposable_repo, isolated_workspace):
     # Exactly one terminal event.
     events_path = store.events_path(task_id)
     raw_events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
-    terminal = [e for e in raw_events if e["type"] in {
-        EventType.TASK_COMPLETED.value, EventType.TASK_FAILED.value, EventType.TASK_NEEDS_REVIEW.value
-    }]
+    terminal = [
+        e
+        for e in raw_events
+        if e["type"]
+        in {
+            EventType.TASK_COMPLETED.value,
+            EventType.TASK_FAILED.value,
+            EventType.TASK_NEEDS_REVIEW.value,
+        }
+    ]
     assert len(terminal) == 1
     assert terminal[0]["type"] == EventType.TASK_FAILED.value
 
     # Event chain valid.
     from acp.models import Event
-    event_objs = [Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()]
+
+    event_objs = [
+        Event.model_validate_json(l) for l in events_path.read_text().splitlines() if l.strip()
+    ]
     assert verify_event_chain(event_objs) is True
 
     # Manifest exists and verifies.

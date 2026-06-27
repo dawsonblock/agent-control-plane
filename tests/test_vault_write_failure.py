@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
 from acp.events import EventWriter
 from acp.graph.state import initial_state
@@ -27,11 +26,11 @@ def _config(repo_path: Path) -> RepoConfig:
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=0),
         commands=CommandsSection(lint='echo "lint ok"', test='echo "tests passed"'),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
     )
 
 
-def _run_graph(repo_path, runs_root, vault_root, *, agent_factory=None):
+async def _run_graph(repo_path, runs_root, vault_root, *, agent_factory=None):
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events, agent_factory=agent_factory)
@@ -42,7 +41,7 @@ def _run_graph(repo_path, runs_root, vault_root, *, agent_factory=None):
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    return wf.invoke(state, config={"configurable": {"thread_id": "vault-fail"}}), store
+    return await wf.ainvoke(state, config={"configurable": {"thread_id": "vault-fail"}}), store
 
 
 def _events(store, task_id):
@@ -50,7 +49,7 @@ def _events(store, task_id):
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_vault_write_failure_downgrades_passed_to_needs_review_and_rerenders_report(
+async def test_vault_write_failure_downgrades_passed_to_needs_review_and_rerenders_report(
     disposable_repo, isolated_workspace, monkeypatch
 ):
     """Vault write fails on a would-be PASSED task → report + status agree as NEEDS_REVIEW."""
@@ -62,7 +61,7 @@ def test_vault_write_failure_downgrades_passed_to_needs_review_and_rerenders_rep
 
     monkeypatch.setattr(nodes, "write_vault_note", _boom)
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],

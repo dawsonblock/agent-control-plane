@@ -12,11 +12,14 @@ through ``build_agent`` (see agents/registry.py, added in M2).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from acp.config import RepoConfig
 from acp.models import AgentResult
+
+logger = logging.getLogger(__name__)
 
 
 def write_prompt(
@@ -42,17 +45,17 @@ def write_prompt(
 
     context_section = ""
     if context_bundle_path is not None:
-        context_section = (
-            f"\n\nRelevant context (read this first):\n"
-            f"  {context_bundle_path}\n"
-        )
+        context_section = f"\n\nRelevant context (read this first):\n  {context_bundle_path}\n"
 
     # v0.6.3 (M8): Inject skill prompt instructions when a skill is active.
     skill_section = ""
-    skill_name = getattr(repo_config.skills, "active_skill", "") if hasattr(repo_config, "skills") else ""
+    skill_name = (
+        getattr(repo_config.skills, "active_skill", "") if hasattr(repo_config, "skills") else ""
+    )
     if skill_name:
         try:
             from acp.skills.enforcement import get_skill_prompt_instructions
+
             instructions = get_skill_prompt_instructions(
                 skill_name,
                 getattr(repo_config.skills, "skills_dir", None),
@@ -64,8 +67,27 @@ def write_prompt(
                     f"Follow them in addition to the general constraints below.\n\n"
                     f"{instructions}\n"
                 )
-        except Exception:  # noqa: BLE001
-            pass  # Skills not available — don't block the run
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skills not available — don't block the run: %s", exc)
+
+    # v0.6.9: Inject federated MCP tool capabilities when configured.
+    federation_section = ""
+    federation_servers = (
+        getattr(repo_config.federation, "servers", []) if hasattr(repo_config, "federation") else []
+    )
+    if federation_servers:
+        try:
+            from acp.federation.client import FederationManager
+
+            fm = FederationManager(
+                servers=[s.model_dump() for s in federation_servers],
+            )
+            fm.start_all()
+            tools_by_server = fm.discover_tools()
+            federation_section = fm.build_prompt_section(tools_by_server)
+            fm.stop_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("federation not available — don't block the run: %s", exc)
 
     body = f"""You are operating inside an isolated git worktree. A control plane
 is watching you. Everything you print is captured. The diff you produce is
@@ -78,7 +100,7 @@ Repo:
   {repo.name} (default branch: {repo.default_branch})
 
 Task:
-  {user_request}{context_section}{skill_section}
+  {user_request}{context_section}{skill_section}{federation_section}
 
 Constraints (non-negotiable):
   - Edit only files inside this worktree.
@@ -118,7 +140,7 @@ class AgentProtocol(Protocol):
 
     name: str
 
-    def run(
+    async def run(
         self,
         *,
         prompt_path: Path,
@@ -201,9 +223,9 @@ Instructions:
   - If the failure cannot be fixed without a larger change, stop and report.
 
 Runtime commands (re-run after your edits by the control plane):
-  test       : {cmds.test or '(none)'}
-  lint       : {cmds.lint or '(none)'}
-  typecheck  : {cmds.typecheck or '(none)'}
+  test       : {cmds.test or "(none)"}
+  lint       : {cmds.lint or "(none)"}
+  typecheck  : {cmds.typecheck or "(none)"}
 """
     prompt_path.write_text(body)
     return prompt_path
@@ -272,9 +294,9 @@ Instructions:
   - If the behavior cannot be tested without a larger change, stop and report.
 
 Runtime commands (re-run after your edits by the control plane):
-  test       : {cmds.test or '(none)'}
-  lint       : {cmds.lint or '(none)'}
-  typecheck  : {cmds.typecheck or '(none)'}
+  test       : {cmds.test or "(none)"}
+  lint       : {cmds.lint or "(none)"}
+  typecheck  : {cmds.typecheck or "(none)"}
 """
     prompt_path.write_text(body)
     return prompt_path

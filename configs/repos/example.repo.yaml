@@ -59,6 +59,13 @@ review:
   # and block_secret_leaks: true.
   # autonomous_mode: false     # true = auto-approve on PASSED (no human click)
   # auto_merge: false          # true = merge task branch into default branch
+  # v0.6.8: Human firewall for auto-merge. Auto-merge is only allowed when
+  # the review risk is at or below this level. Tasks above it (e.g. HIGH-
+  # risk database/secret/auth changes) are downgraded to NEEDS_REVIEW so
+  # a human must approve before the change reaches the default branch.
+  # Default "medium". Set to "low" to require a human for any non-trivial
+  # change; "high" disables the gate (not recommended).
+  # auto_merge_max_risk: medium
 
 context:
   include:
@@ -78,6 +85,17 @@ context:
 memory:
   graphiti_group_id: my-app
   promote_reports_by_default: false
+  # v0.7.4: Custom LLM configuration for Graphiti.
+  # By default, Graphiti uses OpenAI for LLM + embeddings (requires OPENAI_API_KEY).
+  # Uncomment and configure to use alternative providers:
+  # llm_provider: openai          # openai | anthropic | gemini | groq | azure_openai | custom
+  # llm_model: gpt-4o             # model name (leave empty for provider default)
+  # llm_base_url: ""              # custom API base URL (for self-hosted endpoints)
+  # llm_api_key_env: ""           # env var name containing API key (defaults to provider standard)
+  # embedder_provider: openai     # same provider options as llm_provider
+  # embedder_model: text-embedding-3-small
+  # embedder_base_url: ""
+  # embedder_api_key_env: ""
 
 # v0.6.3 (M8): Skills governance — YAML playbooks that govern review,
 # repair, and prompt behavior. When active_skill is set, the skill's
@@ -122,4 +140,57 @@ executor:
   # clone_mode: true           # MUST be true (ACP refuses non-clone mode)
   # network_policy: locked_down  # locked_down | balanced (strict enum, never open)
   # remove_after_run: false    # true = remove sandbox after run; false = keep
+
+# v0.6.9: Agent federation via MCP (Model Context Protocol).
+# When configured, ACP discovers tools from each MCP server before the
+# agent runs and injects them into the agent prompt. The agent can
+# request federated tool calls; ACP proxies them — the agent never
+# touches the network directly. This implements the rUv federation
+# concept inside the ACP vault: agents are microservices that expose
+# capabilities to one another, but all calls go through the zero-trust
+# control plane.
+#
+# Each server is a subprocess that speaks JSON-RPC 2.0 over stdio (the
+# standard MCP transport). Example:
+#   federation:
+#     servers:
+#       - name: codebase-search
+#         command: ["python", "-m", "my_search_mcp_server"]
+#         env:
+#           API_KEY: "secret"
+#         timeout_seconds: 30
+federation:
+  servers: []
+
+# v0.7.3: Mid-stream sentinel — real-time safety gating during agent execution.
+# When enabled, the CLIAgent switches from blocking subprocess.run to an async
+# streaming path. Each line of agent stdout is fed to a StreamSentinel that
+# runs safety checks BEFORE the agent finishes:
+#
+#   1. Kill-switch: known credential patterns (AWS, GitHub, private keys, etc.)
+#      in the output stream → kill the agent immediately, write stream.aborted
+#      event. This closes the risk window between agent start and post-run review.
+#   2. Strange-loop detection: near-duplicate output cycles (token n-gram
+#      Jaccard similarity) → kill the agent, write stream.aborted event.
+#   3. Dangerous-path detection: configurable regex patterns → kill the agent.
+#
+# When the sentinel kills the agent, the graph short-circuits to `failed` —
+# tests and review are skipped (the partial diff from a killed agent is not
+# worth reviewing). All event writes are serialized via asyncio.Lock to
+# preserve the hash-chain invariant.
+#
+# Default: disabled (streaming.enabled: false). Enable per-repo when using
+# the `custom` agent (CLIAgent). Has no effect on `shell` or `docker_sbx`.
+streaming:
+  enabled: false
+  # secret_detection: true     # scan each chunk for known credential patterns
+  # strange_loop_detection: true  # detect near-duplicate output cycles
+  # strange_loop_threshold: 8.0   # repetition score at which the loop detector fires
+  # strange_loop_window: 10       # number of recent chunks in the rolling window
+  # strange_loop_similarity: 0.65  # Jaccard threshold (0.0–1.0) for near-duplicate
+  # dangerous_path_patterns: []   # regex patterns that trigger an immediate kill
+  # Example dangerous_path_patterns:
+  #   - r"rm\s+-rf\s+/"
+  #   - r"policy\.json"
+  #   - r"\.env\b"
 

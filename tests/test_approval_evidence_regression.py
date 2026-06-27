@@ -24,14 +24,20 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from acp.cli import app
-from acp.config import AgentSection, CommandsSection, EvidenceSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    EvidenceSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
+from acp.events import verify_event_chain, verify_event_signatures
 from acp.evidence.durable_store import DurableEventStore
 from acp.evidence.manifest import verify_evidence_manifest
-from acp.events import verify_event_chain, verify_event_signatures
 from acp.graph.workflow import run_workflow
 from acp.models import Event, EventType, TaskStatus
 from acp.store import TaskStore
-
 
 runner = CliRunner()
 
@@ -70,26 +76,46 @@ def test_approve_then_verify_passes(disposable_repo, isolated_workspace):
     assert result["status"] in (TaskStatus.PASSED, TaskStatus.NEEDS_REVIEW)
 
     # Verify passes before approval.
-    r0 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r0 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r0.exit_code == 0, f"verify before approve failed: {r0.output}"
 
     # Approve.
-    r1 = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "alice@example.com",
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "alice@example.com",
+        ],
+    )
     assert r1.exit_code == 0, f"approve failed: {r1.output}"
 
     # Verify still passes after approval — the bug that was fixed.
-    r2 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r2.exit_code == 0, f"verify after approve FAILED (regression): {r2.output}"
     assert "evidence manifest valid" in r2.output
 
@@ -106,9 +132,12 @@ def test_approve_then_verify_passes(disposable_repo, isolated_workspace):
     assert events[-1].hash != ""
 
 
-def test_signed_run_approve_then_verify_with_public_key(disposable_repo, isolated_workspace, tmp_path):
+def test_signed_run_approve_then_verify_with_public_key(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """signed run -> approve -> acp verify --public-key passes (lifecycle signed)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -129,12 +158,20 @@ def test_signed_run_approve_then_verify_with_public_key(disposable_repo, isolate
     assert result["status"] in (TaskStatus.PASSED, TaskStatus.NEEDS_REVIEW)
 
     # Approve — the lifecycle event must be signed with the run's key.
-    r1 = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "alice@example.com",
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "alice@example.com",
+        ],
+    )
     assert r1.exit_code == 0, f"approve failed: {r1.output}"
 
     # Every event (including human.approved) must be signed + verify.
@@ -148,11 +185,18 @@ def test_signed_run_approve_then_verify_with_public_key(disposable_repo, isolate
     assert verify_event_signatures(events, public_key.public_bytes_raw()) is True
 
     # acp verify --public-key passes end to end.
-    r2 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--public-key", str(pub_path),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--public-key",
+            str(pub_path),
+        ],
+    )
     assert r2.exit_code == 0, f"signed verify after approve FAILED: {r2.output}"
     assert "Ed25519 signatures valid" in r2.output
 
@@ -170,19 +214,34 @@ def test_reject_then_verify_passes(disposable_repo, isolated_workspace):
     task_id = result["task_id"]
     assert result["status"] in (TaskStatus.PASSED, TaskStatus.NEEDS_REVIEW)
 
-    r1 = runner.invoke(app, [
-        "reject", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--rejecter", "bob@example.com",
-        "--reason", "too risky",
-    ])
+    r1 = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--rejecter",
+            "bob@example.com",
+            "--reason",
+            "too risky",
+        ],
+    )
     assert r1.exit_code == 0, f"reject failed: {r1.output}"
 
-    r2 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r2.exit_code == 0, f"verify after reject FAILED (regression): {r2.output}"
     assert "evidence manifest valid" in r2.output
 
@@ -214,12 +273,20 @@ def test_durable_store_receives_lifecycle_events(disposable_repo, isolated_works
     task_id = result["task_id"]
     assert result["status"] in (TaskStatus.PASSED, TaskStatus.NEEDS_REVIEW)
 
-    runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "alice@example.com",
-    ])
+    runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "alice@example.com",
+        ],
+    )
 
     with DurableEventStore(db_path) as db:
         db_events = db.query(task_id=task_id, type=EventType.HUMAN_APPROVED.value)
@@ -244,11 +311,18 @@ def test_durable_store_receives_reject_event(disposable_repo, isolated_workspace
     )
     task_id = result["task_id"]
 
-    runner.invoke(app, [
-        "reject", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
 
     with DurableEventStore(db_path) as db:
         db_events = db.query(task_id=task_id, type=EventType.HUMAN_REJECTED.value)
@@ -263,6 +337,7 @@ def test_durable_store_receives_reject_event(disposable_repo, isolated_workspace
 def test_signing_fail_closed_on_missing_key(disposable_repo, isolated_workspace, tmp_path):
     """A configured signing key that doesn't exist is fatal, not a silent skip."""
     from acp.errors import EvidenceConfigError
+
     os.environ["ACP_TEST"] = "1"
     bogus_key = tmp_path / "does_not_exist.bin"
     cfg = _config(disposable_repo.path, signing_key_path=bogus_key)
@@ -282,6 +357,7 @@ def test_signing_fail_closed_on_missing_key(disposable_repo, isolated_workspace,
 def test_signing_fail_closed_on_bad_key_length(disposable_repo, isolated_workspace, tmp_path):
     """A malformed signing key (wrong byte length) is fatal, not a silent skip."""
     from acp.errors import EvidenceConfigError
+
     os.environ["ACP_TEST"] = "1"
     bad_key = tmp_path / "bad_key.bin"
     bad_key.write_bytes(b"only-ten-")  # 9 bytes, not 32
@@ -304,9 +380,12 @@ def test_signing_fail_closed_on_bad_key_length(disposable_repo, isolated_workspa
 # --------------------------------------------------------------------------- #
 
 
-def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposable_repo, isolated_workspace):
+async def test_early_failure_report_includes_terminal_event_and_manifest_hash(
+    disposable_repo, isolated_workspace
+):
     """Worktree-failure report timeline includes task.failed + manifest hash."""
     import json
+
     from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
     from acp.events import EventWriter
     from acp.graph.state import initial_state
@@ -323,8 +402,13 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposab
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
-    result = wf.invoke(
-        initial_state(config=cfg, user_request="test", vault_root=isolated_workspace["vault_root"], runs_root=runs_root),
+    result = await wf.ainvoke(
+        initial_state(
+            config=cfg,
+            user_request="test",
+            vault_root=isolated_workspace["vault_root"],
+            runs_root=runs_root,
+        ),
         config={"configurable": {"thread_id": "test"}},
     )
     assert result["status"] == TaskStatus.FAILED
@@ -335,12 +419,15 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposab
     # The event log includes task.failed, and evidence.report_bound is the last
     # event (it's written after evidence.finalized + the report re-render to
     # bind the human-facing report to the signed event log).
-    log_events = [json.loads(l) for l in store.events_path(task_id).read_text().splitlines() if l.strip()]
+    log_events = [
+        json.loads(l) for l in store.events_path(task_id).read_text().splitlines() if l.strip()
+    ]
     event_types = [e["type"] for e in log_events]
     assert EventType.TASK_FAILED.value in event_types, "missing task.failed event"
     assert EventType.EVIDENCE_FINALIZED.value in event_types, "missing evidence.finalized event"
-    assert log_events[-1]["type"] == EventType.EVIDENCE_REPORT_BOUND.value, \
+    assert log_events[-1]["type"] == EventType.EVIDENCE_REPORT_BOUND.value, (
         "evidence.report_bound should be the last event"
+    )
 
     # The report must show the FULL timeline (including task.failed), not the
     # stale pre-terminal snapshot, and must include the manifest hash.
@@ -362,10 +449,16 @@ def test_early_failure_report_includes_terminal_event_and_manifest_hash(disposab
 
 def test_invalid_task_id_rejected_by_verify(tmp_path):
     for bad in ("../etc/passwd", "task_bad", "task_2026_0001", "task_20260624_1", ""):
-        r = runner.invoke(app, [
-            "verify", "--task", bad,
-            "--runs-root", str(tmp_path / "runs"),
-        ])
+        r = runner.invoke(
+            app,
+            [
+                "verify",
+                "--task",
+                bad,
+                "--runs-root",
+                str(tmp_path / "runs"),
+            ],
+        )
         assert r.exit_code == 1, f"verify accepted invalid id {bad!r}"
         assert "invalid task id" in r.output
 
@@ -373,22 +466,37 @@ def test_invalid_task_id_rejected_by_verify(tmp_path):
 def test_invalid_task_id_rejected_by_cleanup(tmp_path):
     # cleanup also needs a config, but task_id validation runs first.
     cfg_path = tmp_path / "demo.repo.yaml"
-    cfg_path.write_text("repo:\n  name: demo\n  path: %s\n  default_branch: main\n" % str(tmp_path / "repo"))
-    r = runner.invoke(app, [
-        "cleanup", "--config", str(cfg_path),
-        "--task", "../etc/passwd",
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    cfg_path.write_text(
+        "repo:\n  name: demo\n  path: {}\n  default_branch: main\n".format(str(tmp_path / "repo"))
+    )
+    r = runner.invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(cfg_path),
+            "--task",
+            "../etc/passwd",
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert r.exit_code == 1
     assert "invalid task id" in r.output
 
 
 def test_valid_shaped_nonexistent_task_id_reaches_not_found(tmp_path):
     """A valid-shaped but absent id is NOT rejected as invalid — it reaches the not-found path."""
-    r = runner.invoke(app, [
-        "verify", "--task", "task_20260624_9999",
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            "task_20260624_9999",
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert r.exit_code == 1
     assert "not found" in r.output
     assert "invalid task id" not in r.output
@@ -399,7 +507,9 @@ def test_valid_shaped_nonexistent_task_id_reaches_not_found(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_approve_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolated_workspace, tmp_path):
+def test_approve_reverts_vault_note_on_lifecycle_failure(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """If the lifecycle event write fails after the vault note is modified,
     the vault note is reverted to its pre-approval state.
 
@@ -407,7 +517,9 @@ def test_approve_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolat
     corresponding event is an inconsistent state that must not persist.
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     from acp.vault.frontmatter import parse_frontmatter
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -434,12 +546,20 @@ def test_approve_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolat
     # EvidenceConfigError (run was signed but key is now unreadable).
     key_path.unlink()
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-        "--approver", "alice@example.com",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+            "--approver",
+            "alice@example.com",
+        ],
+    )
     assert r.exit_code != 0, "approve should have failed when signing key is missing"
 
     # The vault note must be reverted to its pre-approval state.
@@ -459,10 +579,14 @@ def test_approve_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolat
     assert task.status != TaskStatus.APPROVED
 
 
-def test_reject_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolated_workspace, tmp_path):
+def test_reject_reverts_vault_note_on_lifecycle_failure(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """Same reversion guarantee for reject."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     from acp.vault.frontmatter import parse_frontmatter
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -485,15 +609,24 @@ def test_reject_reverts_vault_note_on_lifecycle_failure(disposable_repo, isolate
 
     key_path.unlink()
 
-    r = runner.invoke(app, [
-        "reject", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "reject",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code != 0
 
     reverted_fm, _ = parse_frontmatter(note_path.read_text())
-    assert reverted_fm.memory_status != "archived", "vault note was not reverted after reject failure"
+    assert reverted_fm.memory_status != "archived", (
+        "vault note was not reverted after reject failure"
+    )
 
     store = TaskStore(runs_root=isolated_workspace["runs_root"])
     events = _events(store, task_id)
@@ -505,6 +638,7 @@ def test_approve_pre_v059_signed_run_fails_closed(disposable_repo, isolated_work
     """A signed run with no evidence_config sidecar (pre-v0.5.9) must fail
     closed when approve is attempted, not silently write an unsigned event."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -530,11 +664,18 @@ def test_approve_pre_v059_signed_run_fails_closed(disposable_repo, isolated_work
     events = _events(store, task_id)
     assert all(e.signature for e in events), "pre-v0.5.9 run events should be signed"
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code != 0, "approve should fail-closed for signed run with no sidecar"
     assert "signed" in r.output.lower() or "sidecar" in r.output.lower()
 
@@ -547,11 +688,18 @@ def test_cleanup_validates_task_id_before_config(tmp_path):
     """cleanup rejects an invalid task_id before even loading the config."""
     # Use a non-existent config path — if task_id validation runs first,
     # we'll see "invalid task id" not "config not found".
-    r = runner.invoke(app, [
-        "cleanup", "--config", str(tmp_path / "nonexistent.yaml"),
-        "--task", "../etc/passwd",
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(tmp_path / "nonexistent.yaml"),
+            "--task",
+            "../etc/passwd",
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert r.exit_code == 1
     assert "invalid task id" in r.output
     # The config error should NOT appear — task_id was rejected first.
@@ -591,11 +739,18 @@ def test_cleanup_removes_worktree_and_branch(disposable_repo, isolated_workspace
     worktree_path = isolated_workspace["runs_root"] / task_id / "worktree"
     assert worktree_path.exists(), "worktree should exist before cleanup"
 
-    r = runner.invoke(app, [
-        "cleanup", "--config", str(cfg_path),
-        "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(cfg_path),
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r.exit_code == 0, f"cleanup failed: {r.output}"
     assert "worktree" in r.output
     assert "branch" in r.output
@@ -603,24 +758,37 @@ def test_cleanup_removes_worktree_and_branch(disposable_repo, isolated_workspace
     # Both worktree dir and branch should be gone.
     assert not worktree_path.exists(), "worktree dir should be removed"
     from git import Repo
+
     repo = Repo(str(disposable_repo.path))
     branch_name = f"agent/{task_id}"
     assert branch_name not in [h.name for h in repo.heads], "branch should be deleted"
 
     # Evidence must be preserved.
-    r2 = runner.invoke(app, [
-        "verify", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-    ])
+    r2 = runner.invoke(
+        app,
+        [
+            "verify",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+        ],
+    )
     assert r2.exit_code == 0, f"verify after cleanup failed: {r2.output}"
 
 
 def test_run_with_missing_config_file_gives_clean_error(tmp_path):
     """`acp run --config <nonexistent>` exits cleanly, not with a traceback."""
-    r = runner.invoke(app, [
-        "run", "--config", str(tmp_path / "nonexistent.yaml"),
-        "--task", "test",
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(tmp_path / "nonexistent.yaml"),
+            "--task",
+            "test",
+        ],
+    )
     assert r.exit_code == 1
     assert "config file not found" in r.output
     assert "Traceback" not in r.output
@@ -628,20 +796,30 @@ def test_run_with_missing_config_file_gives_clean_error(tmp_path):
 
 def test_cleanup_with_missing_config_file_gives_clean_error(tmp_path):
     """`acp cleanup --config <nonexistent>` exits cleanly, not with a traceback."""
-    r = runner.invoke(app, [
-        "cleanup", "--config", str(tmp_path / "nonexistent.yaml"),
-        "--task", "task_20260624_0001",
-        "--runs-root", str(tmp_path / "runs"),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(tmp_path / "nonexistent.yaml"),
+            "--task",
+            "task_20260624_0001",
+            "--runs-root",
+            str(tmp_path / "runs"),
+        ],
+    )
     assert r.exit_code == 1
     assert "config file not found" in r.output
     assert "Traceback" not in r.output
 
 
-def test_approve_corrupt_evidence_config_fails_closed(disposable_repo, isolated_workspace, tmp_path):
+def test_approve_corrupt_evidence_config_fails_closed(
+    disposable_repo, isolated_workspace, tmp_path
+):
     """A corrupt evidence_config.json sidecar causes approve to fail closed,
     not silently treat the run as unsigned (which would break verification)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     os.environ["ACP_TEST"] = "1"
 
     private_key = Ed25519PrivateKey.generate()
@@ -662,11 +840,18 @@ def test_approve_corrupt_evidence_config_fails_closed(disposable_repo, isolated_
     sidecar = store.run_dir(task_id) / "evidence_config.json"
     sidecar.write_text("{ this is not valid json")
 
-    r = runner.invoke(app, [
-        "approve", "--task", task_id,
-        "--runs-root", str(isolated_workspace["runs_root"]),
-        "--vault-root", str(isolated_workspace["vault_root"]),
-    ])
+    r = runner.invoke(
+        app,
+        [
+            "approve",
+            "--task",
+            task_id,
+            "--runs-root",
+            str(isolated_workspace["runs_root"]),
+            "--vault-root",
+            str(isolated_workspace["vault_root"]),
+        ],
+    )
     assert r.exit_code != 0, "approve should fail on corrupt sidecar"
     assert "Traceback" not in r.output, "should be a clean error, not a traceback"
 
@@ -676,7 +861,7 @@ def test_approve_corrupt_evidence_config_fails_closed(disposable_repo, isolated_
     assert len(approved) == 0, "no event should be written on corrupt sidecar"
 
 
-def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_workspace):
+async def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_workspace):
     """_finalize_evidence re-renders the failure report even when only one of
     diff/review is present (partial failure), not just when both are absent.
 
@@ -711,8 +896,13 @@ def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_wor
     store = TaskStore(runs_root=runs_root)
     events = EventWriter("__pending__", store.root / "__pending__")
     wf = build_workflow(store=store, events=events)
-    result = wf.invoke(
-        initial_state(config=cfg, user_request="test", vault_root=isolated_workspace["vault_root"], runs_root=runs_root),
+    result = await wf.ainvoke(
+        initial_state(
+            config=cfg,
+            user_request="test",
+            vault_root=isolated_workspace["vault_root"],
+            runs_root=runs_root,
+        ),
         config={"configurable": {"thread_id": "test"}},
     )
     # The run should fail (command exits 1).
@@ -725,7 +915,8 @@ def test_finalize_evidence_handles_partial_failure(disposable_repo, isolated_wor
 
     body = report_path.read_text()
     # The report should include the manifest hash (re-rendered after terminal event).
-    assert "Evidence manifest hash" in body or "manifest" in body.lower(), \
+    assert "Evidence manifest hash" in body or "manifest" in body.lower(), (
         "failure report should include manifest hash after re-render"
+    )
     # Verify passes.
     assert verify_evidence_manifest(run_dir) is True

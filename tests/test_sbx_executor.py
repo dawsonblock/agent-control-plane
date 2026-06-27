@@ -24,7 +24,6 @@ from acp.executor.sbx import SbxExecutor, SbxNotInstalledError
 from acp.gitops.diff import capture_diff_from_remote
 from acp.models import EventType
 
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -48,11 +47,13 @@ def _mock_sbx_installed():
 
 
 def _mock_sbx_version(version: str = "sbx 1.0.0"):
-    """Patch subprocess.run to return a version string for --version."""
+    """Patch subprocess.run to return a version string for `sbx version`."""
+
     def _run_mock(cmd, **kwargs):
-        if cmd == ["sbx", "--version"]:
+        if cmd == ["sbx", "version"]:
             return MagicMock(stdout=version, stderr="", returncode=0)
         return MagicMock(stdout="", stderr="", returncode=0)
+
     return patch("acp.executor.sbx.subprocess.run", side_effect=_run_mock)
 
 
@@ -132,9 +133,8 @@ class TestCloneModeEnforced:
         """_validate() raises when network_policy is 'open'."""
         cfg = _executor_config(network_policy="open")
         executor = SbxExecutor(cfg)
-        with _mock_sbx_installed():
-            with pytest.raises(Exception, match="network_policy='open'"):
-                executor._validate()
+        with _mock_sbx_installed(), pytest.raises(Exception, match="network_policy='open'"):
+            executor._validate()
 
     def test_validate_raises_when_agent_empty(self):
         """_validate() raises when no agent is specified."""

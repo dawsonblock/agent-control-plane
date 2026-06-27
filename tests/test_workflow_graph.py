@@ -18,7 +18,14 @@ import json
 import subprocess
 from pathlib import Path
 
-from acp.config import AgentSection, CommandsSection, RepoConfig, RepoSection, ReviewSection
+from acp.config import (
+    AgentSection,
+    CommandsSection,
+    ExecutorSection,
+    RepoConfig,
+    RepoSection,
+    ReviewSection,
+)
 from acp.events import EventWriter
 from acp.graph.state import initial_state
 from acp.graph.workflow import build_workflow
@@ -36,16 +43,20 @@ def _config(
         repo=RepoSection(name="demo", path=repo_path, default_branch="main"),
         agent=AgentSection(max_repair_attempts=max_repair_attempts),
         commands=CommandsSection(lint='echo "lint ok"', test=test_cmd),
-        review=ReviewSection(),
+        review=ReviewSection(require_human_approval=False),
+        executor=ExecutorSection(
+            backend="worktree",
+            danger_allow_host_shell=True,
+        ),
     )
 
 
-def _run_graph(
+async def _run_graph(
     repo_path: Path,
     runs_root: Path,
     vault_root: Path,
     *,
-    test_cmd: str = 'echo ok',
+    test_cmd: str = "echo ok",
     max_repair_attempts: int = 1,
     agent_factory=None,
 ):
@@ -62,7 +73,7 @@ def _run_graph(
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-test"}})
     return result, store
 
 
@@ -76,15 +87,17 @@ def _event_types(store, task_id: str) -> list[str]:
 def _main_head(repo_path: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
 # --------------------------------------------------------------------------- #
 
 
-def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
-    result, store = _run_graph(
+async def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -126,13 +139,15 @@ def test_graph_happy_path_reaches_done(disposable_repo, isolated_workspace):
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, isolated_workspace):
+async def test_graph_failing_test_reaches_failed_but_writes_report(
+    disposable_repo, isolated_workspace
+):
     """The M3 gate: a failed task still writes a report (with repair disabled).
 
     Pinned to max_repair_attempts=0 so this exercises the no-repair path —
     M4's repair behavior has its own dedicated tests.
     """
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -155,18 +170,18 @@ def test_graph_failing_test_reaches_failed_but_writes_report(disposable_repo, is
     events = _event_types(store, task_id)
     assert EventType.TASK_FAILED.value in events
     assert EventType.REVIEW_COMPLETED.value in events  # review still ran
-    assert EventType.REPORT_WRITTEN.value in events    # report still written
+    assert EventType.REPORT_WRITTEN.value in events  # report still written
 
     # Core invariant holds even on failure.
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_workspace):
+async def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_workspace):
     """Dirty repo → failed node, no worktree created, main untouched."""
     # Dirty the repo.
     (disposable_repo.path / "README.md").write_text("# dirty\n")
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         isolated_workspace["runs_root"],
         isolated_workspace["vault_root"],
@@ -188,33 +203,82 @@ def test_graph_dirty_repo_fails_before_worktree(disposable_repo, isolated_worksp
     assert _main_head(disposable_repo.path) == disposable_repo.main_head
 
 
-def test_graph_and_legacy_produce_equivalent_evidence(disposable_repo, isolated_workspace):
-    """The graph refactor didn't change what the run produces — same artifact set."""
-    from acp.legacy_loop import EvidenceLoop
+async def test_graph_terminal_event_uses_validation_fields_not_tests_pass(
+    disposable_repo, isolated_workspace
+):
+    """The terminal event must use validation_commands_ran/failed/status,
+    not the misleading ``tests_pass`` field.
 
+    Migrated from the legacy ``test_e2e_manual_loop`` when the linear
+    ``EvidenceLoop`` was eradicated (v0.7.6). The graph's ``needs_review``
+    terminal node emits the same validation fields.
+    """
     repo = disposable_repo
-    runs = isolated_workspace["runs_root"]
-    vault = isolated_workspace["vault_root"]
-
-    # Graph run.
-    g_result, g_store = _run_graph(repo.path, runs / "graph", vault / "graph")
-    # Legacy run (separate repo branch sequence so they don't collide).
-    legacy = EvidenceLoop(
-        config=_config(repo.path),
-        user_request="legacy task",
-        store=TaskStore(runs_root=runs / "legacy"),
-        vault_root=vault / "legacy",
+    cfg = RepoConfig(
+        repo=RepoSection(name="demo", path=repo.path, default_branch="main"),
+        agent=AgentSection(),
+        commands=CommandsSection(lint="", typecheck="", test="", build=""),
+        review=ReviewSection(),
     )
-    l_result = legacy.run()
-
-    # Both produced the same artifact set.
-    g_arts = {p.name for p in g_store.artifacts_dir(g_result["task_id"]).iterdir() if p.is_file()}
-    l_arts = {p.name for p in (l_result.run_dir / "artifacts").iterdir() if p.is_file()}
-    # v0.6.1 (M6): When the rag extra is installed, the graph path produces
-    # an extra context_bundle.md artifact (the legacy loop predates M6).
-    # This is expected — remove it from the comparison when present.
-    g_arts.discard("context_bundle.md")
-    assert g_arts == l_arts, (
-        f"graph and legacy artifact sets differ:\n"
-        f"  graph only: {g_arts - l_arts}\n  legacy only: {l_arts - g_arts}"
+    store = TaskStore(runs_root=isolated_workspace["runs_root"])
+    events = EventWriter("__pending__", store.root / "__pending__")
+    wf = build_workflow(store=store, events=events)
+    state = initial_state(
+        config=cfg,
+        user_request="task with all commands skipped",
+        vault_root=isolated_workspace["vault_root"],
+        runs_root=isolated_workspace["runs_root"],
     )
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-test"}})
+
+    assert result["status"] == TaskStatus.NEEDS_REVIEW
+    task_id = result["task_id"]
+
+    events_path = store.events_path(task_id)
+    events_list = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+    # The evidence.finalized event is written AFTER the terminal event by
+    # _finalize_evidence, so events_list[-1] is not the terminal event.
+    # Find the terminal TASK_NEEDS_REVIEW event by type.
+    terminal = next(e for e in events_list if e["type"] == EventType.TASK_NEEDS_REVIEW.value)
+    p = terminal["payload"]
+    assert "validation_commands_ran" in p, f"payload missing validation_commands_ran: {p}"
+    assert "validation_commands_failed" in p, f"payload missing validation_commands_failed: {p}"
+    assert "validation_status" in p, f"payload missing validation_status: {p}"
+    assert "tests_pass" not in p, f"payload should not contain tests_pass: {p}"
+    assert p["validation_commands_ran"] == 0
+    # validation_status is the explicit three-state validation outcome
+    # (skipped|passed|failed), distinct from the task status (needs_review).
+    # No validation ran → "skipped", never a flavor of "passed".
+    assert p["validation_status"] == "skipped"
+
+
+async def test_graph_terminal_event_on_pass_has_validation_fields(
+    disposable_repo, isolated_workspace
+):
+    """A successful run's terminal event should show actual validation counts.
+
+    Migrated from the legacy ``test_e2e_manual_loop`` when the linear
+    ``EvidenceLoop`` was eradicated (v0.7.6). The graph's ``done`` terminal
+    node emits the same validation fields.
+    """
+    result, store = await _run_graph(
+        disposable_repo.path,
+        isolated_workspace["runs_root"],
+        isolated_workspace["vault_root"],
+        test_cmd='echo "tests passed"',
+    )
+
+    assert result["status"] == TaskStatus.PASSED
+    task_id = result["task_id"]
+
+    events_path = store.events_path(task_id)
+    events_list = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+    # The evidence.finalized event is written AFTER the terminal event by
+    # _finalize_evidence, so events_list[-1] is not the terminal event.
+    # Find the terminal TASK_COMPLETED event by type.
+    terminal = next(e for e in events_list if e["type"] == EventType.TASK_COMPLETED.value)
+    p = terminal["payload"]
+    assert "validation_commands_ran" in p
+    assert p["validation_commands_ran"] >= 2
+    assert p["validation_commands_failed"] == 0
+    assert p["validation_status"] == "passed"

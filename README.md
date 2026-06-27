@@ -1,4 +1,4 @@
-# agent-control-plane (ACP)
+# agent-control-plane (ACP) v0.8.0
 
 A Mac-first **local control plane for coding agents**. Its job:
 
@@ -26,7 +26,7 @@ LangGraph is control.
 Agents are workers, not decision-makers.
 ```
 
-## Current scope: v0.6.0 alpha — Autonomous mode
+## Current scope: v0.7.1 alpha — Engineering execution plan
 
 ACP provides a local evidence loop with hash-chained events, optional Ed25519
 signing, artifact manifests, and human approval workflow. The trust layer
@@ -79,8 +79,11 @@ This repository currently implements:
 | **v0.6.4** | M9 Agent File registry: `AgentFile` model (name, version, role, command_template, capabilities, sha256, binary_path); `agent_file.py` with `load_agent_file`, `validate_agent_file_data`, `compute_file_hash`, `verify_agent_hash` (SHA-256 of binary, refuses mismatch); `AgentRegistry` (loads `.agent.yaml` from dir, indexes by name, verifies hash); `build_agent` integration: when `agent.agents_dir` is set, looks up agent in registry and verifies hash before execution — hash mismatch raises `AgentConfigError`; example agent files: `claude-code.agent.yaml`, `codex.agent.yaml` | Stable |
 | **v0.6.5** | M10 FastAPI control layer: `api` optional dependency group (`fastapi`, `uvicorn[standard]`); `acp/api/server.py` with endpoints: `POST /tasks/run`, `POST /tasks/run/async`, `GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/approve`, `POST /tasks/{id}/reject`, `GET /tasks/{id}/events`, `GET /tasks/{id}/report`, `GET /memory/search`, `GET /health`, `POST /config`; `acp serve` CLI command (binds 127.0.0.1, auto-docs at `/docs`); Pydantic request/response models; TestClient-based tests | Stable |
 | **v0.6.6** | M11 React UI: Vite + React + TypeScript dashboard in `ui/`; `TaskList` (status badges, click to select), `TaskDetail` (report, event timeline, approve/reject buttons), `RunForm` (submit new tasks), `MemorySearch` (search Graphiti temporal memory); dark theme CSS; `api.ts` typed API client; FastAPI serves built UI at `/dashboard` and `/ui/` (static mount from `ui/dist/`); build with `cd ui && npm run build` | Stable |
-| **v0.6.7** | Polish: shared lifecycle service (`acp/evidence/lifecycle.py`) — API approve/reject now uses the same transactional integrity as CLI (signed events, SQLite dual-writes, manifest recompute, rollback); `shell=True` safety in `CLIAgent` — `shlex.split()` by default, shell metacharacters refused in worktree mode unless `agent.allow_shell: true`; SSE streaming (`GET /tasks/stream`) for real-time task updates; UI uses SSE with polling fallback; `DurableTaskStore` orphan recovery on server startup (marks interrupted tasks as FAILED, cleans up worktrees); CORS middleware for dev server; config validation (agent.default, timeout ranges, executor.backend, network_policy); async endpoint returns task_id | Current |
-| **Experimental** | `DurableTaskStore` — orphan recovery integrated; full workflow integration (replacing task.json as primary) is still experimental | Experimental |
+| **v0.6.7** | Polish: shared lifecycle service (`acp/evidence/lifecycle.py`) — API approve/reject now uses the same transactional integrity as CLI (signed events, SQLite dual-writes, manifest recompute, rollback); `shell=True` safety in `CLIAgent` — `shlex.split()` by default, shell metacharacters refused in worktree mode unless `agent.allow_shell: true`; SSE streaming (`GET /tasks/stream`) for real-time task updates; UI uses SSE with polling fallback; `DurableTaskStore` orphan recovery on server startup (marks interrupted tasks as FAILED, cleans up worktrees); CORS middleware for dev server; config validation (agent.default, timeout ranges, executor.backend, network_policy); async endpoint returns task_id | Stable |
+| **v0.6.8** | Human firewall for autonomous auto-merge: `review.auto_merge_max_risk` config (default `medium`) — `auto_merge_node` refuses to merge when review risk exceeds the ceiling (HIGH-risk database/secret/auth changes always require a human click); event-chain integrity gate — `auto_merge_node` runs `verify_event_chain()` before merging and refuses on a tampered/broken audit trail; new `auto.merge.refused` event (reason: `risk_exceeds_max` or `event_chain_broken`) written to the signed log; `_risk_exceeds` helper (LOW < MEDIUM < HIGH, strictly-above comparison) | Stable |
+| **v0.6.9** | Agent federation via MCP + cognitive memory tiers: `federation/` module — `MCPClient` (JSON-RPC 2.0 over stdio, no `mcp` PyPI dependency), `FederationManager` (multi-server discovery, prompt injection, tool-call proxying — agent never touches network); `FederationSection` config (`servers: [{name, command, env, timeout_seconds}]`); federated tools injected into agent prompt via `write_prompt`; `federation.discovered` + `federation.tool_called` events; `memory/tiers.py` — `CognitiveMemoryRetriever` unifying three SAFLA-inspired tiers: Working (Haystack RAG context bundle), Episodic (`EpisodicMemoryStore` cross-run event-log recall), Semantic (Graphiti temporal knowledge graph); `MemoryBundle`/`MemoryItem` data structures with `to_prompt_section()`; graceful degradation when optional extras not installed | Stable |
+| **v0.7.0** | M14 Mission layer: `missions/` module — `MissionStore` (directory layout, monotonic `mission_<YYYYMMDD>_<NNNN>` IDs, YAML persistence); `Mission`/`MissionStep`/`MissionStatus` models; `MissionSection` config (`missions_dir`); `acp mission` CLI sub-app (`create`, `list`, `show`, `split`, `complete`); `mission.created` + `mission.completed` events in hash-chained mission event log (`data/missions/<id>/events.jsonl`); mission ID validation (rejects path-shaped IDs); step lifecycle (pending → running → completed/failed); completion gate (all steps must be terminal) | Stable |
+| **v0.7.1** | Engineering execution plan: Phase 1 — tech debt (context docstring, `all_passed()` deprecation, silent exception logging, `RiskEngine.recommend()` respects `require_human_approval`); Phase 2 — `DurableTaskStore.check_integrity()` for task.json/SQLite status mismatch detection with `store.integrity_breach` event + fail-closed; `auto.repair_loop_aborted` event for circuit breaker telemetry; `AUTO_MERGE_REFUSED` event includes `risk_factors` list; Phase 3 — `GvisorExecutor` (gVisor/runsc OS-level sandboxing); `custom_secret_regexes` in `ReviewSection` for company-specific token formats (HARD_BLOCK); Phase 4 — React UI: `MissionList`/`MissionDetail`/`Skills` components + `GET /missions` + `GET /skills` API endpoints; Tauri desktop wrapper (`acp serve` sidecar, WebView to `localhost:8000/ui/`); `DurableTaskStore` promoted from Experimental to Stable (61 tests covering save/load/query/rebuild/orphan-recovery/integrity-breach/concurrency) | Current |
 
 All core milestones (M0-M11) are complete.
 
@@ -90,10 +93,11 @@ The non-negotiable rule: **no new layer until the previous layer produces eviden
 
 ```bash
 cd agent-control-plane
-uv venv
 uv sync                    # deps: typer, pydantic, pyyaml, rich, gitpython, langgraph
 uv sync --extra dev        # add pytest for local testing
-bash scripts/validate.sh   # compileall + pytest gate (uses uv run internally)
+# install all optional extras for full test coverage:
+uv sync --extra rag --extra memory --extra dev --extra crypto --extra api
+bash scripts/validate.sh   # compileall + ruff + mypy + pytest gate
 
 # run one task against a configured repo
 uv run acp run \

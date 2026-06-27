@@ -29,7 +29,7 @@ def _config(repo_path: Path) -> RepoConfig:
     )
 
 
-def _run_graph(
+async def _run_graph(
     repo_path: Path,
     runs_root: Path,
     vault_root: Path,
@@ -45,7 +45,7 @@ def _run_graph(
         vault_root=vault_root,
         runs_root=runs_root,
     )
-    result = wf.invoke(state, config={"configurable": {"thread_id": "acp-test"}})
+    result = await wf.ainvoke(state, config={"configurable": {"thread_id": "acp-test"}})
     return result, store
 
 
@@ -60,9 +60,9 @@ def _events(store: TaskStore, task_id: str) -> list[dict]:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
+async def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
     """Task.base_commit_sha must be non-empty after worktree creation."""
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha",
         isolated_workspace["vault_root"],
@@ -73,9 +73,9 @@ def test_base_commit_sha_recorded(disposable_repo, isolated_workspace):
     assert len(task.base_commit_sha) == 40, f"expected 40-char SHA, got {len(task.base_commit_sha)}"
 
 
-def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolated_workspace):
+async def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolated_workspace):
     """The worktree.created event must carry base_commit_sha."""
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha_event",
         isolated_workspace["vault_root"],
@@ -88,10 +88,12 @@ def test_worktree_created_event_includes_base_commit_sha(disposable_repo, isolat
     assert len(worktree_evts) == 1, "expected exactly one worktree.created event"
     payload = worktree_evts[0]["payload"]
     assert "base_commit_sha" in payload, f"missing base_commit_sha in event payload: {payload}"
-    assert len(payload["base_commit_sha"]) == 40, f"expected 40-char SHA, got {payload['base_commit_sha']!r}"
+    assert len(payload["base_commit_sha"]) == 40, (
+        f"expected 40-char SHA, got {payload['base_commit_sha']!r}"
+    )
 
 
-def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_workspace):
+async def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_workspace):
     """Diff must compare against the recorded base SHA, not a moving branch tip.
 
     Scenario:
@@ -103,10 +105,12 @@ def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_work
     # Record the original main HEAD (commit A).
     original_head = subprocess.run(
         ["git", "-C", str(disposable_repo.path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
-    result, store = _run_graph(
+    result, store = await _run_graph(
         disposable_repo.path,
         Path(isolated_workspace["runs_root"]) / "sha_diff",
         isolated_workspace["vault_root"],
@@ -122,12 +126,24 @@ def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_work
 
     # Advance main with a new commit (commit B).
     subprocess.run(
-        ["git", "-C", str(disposable_repo.path), "commit", "--allow-empty", "-m", "advance main past worktree base"],
-        capture_output=True, text=True, check=True,
+        [
+            "git",
+            "-C",
+            str(disposable_repo.path),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "advance main past worktree base",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     new_head = subprocess.run(
         ["git", "-C", str(disposable_repo.path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert new_head != recorded_sha, "main must have advanced past the recorded SHA"
 
@@ -145,7 +161,9 @@ def test_diff_uses_recorded_sha_not_moving_branch(disposable_repo, isolated_work
     )
 
 
-def test_diff_against_recorded_sha_not_moved_branch_with_conflict(disposable_repo, isolated_workspace):
+def test_diff_against_recorded_sha_not_moved_branch_with_conflict(
+    disposable_repo, isolated_workspace
+):
     """Diff must be computed against the recorded base SHA, not the moved branch tip.
 
     This test proves the invariant by advancing ``main`` with a conflicting change
@@ -158,7 +176,9 @@ def test_diff_against_recorded_sha_not_moved_branch_with_conflict(disposable_rep
     # 1. Record original main HEAD (commit A).
     original_head = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     # 2. Create a worktree at commit A via the gitops module.
@@ -184,15 +204,21 @@ def test_diff_against_recorded_sha_not_moved_branch_with_conflict(disposable_rep
     main_readme.write_text(b_content)
     subprocess.run(
         ["git", "-C", str(repo_path), "add", "README.md"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     subprocess.run(
         ["git", "-C", str(repo_path), "commit", "-m", "conflicting change on main"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     new_head = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert new_head != base_sha, "main must have advanced past the recorded SHA"
 
@@ -215,18 +241,14 @@ def test_diff_against_recorded_sha_not_moved_branch_with_conflict(disposable_rep
     #    conflicting change from commit B. If capture_diff used the branch
     #    name (now pointing at commit B), the diff would include both changes
     #    and show "(no previous index)" or two separate additions.
-    assert "Agent change in worktree" in diff.patch, (
-        "diff must include the worktree change"
-    )
+    assert "Agent change in worktree" in diff.patch, "diff must include the worktree change"
     assert "# B change on main" not in diff.patch, (
         "diff must NOT include commit B's change — proves baseline is "
         f"the recorded SHA {base_sha}, not the moved branch 'main' ({new_head})"
     )
 
     # 7. Diff is non-empty and contains exactly the worktree change.
-    assert "README.md" in diff.stat, (
-        "stat output must reference the changed file (README.md)"
-    )
+    assert "README.md" in diff.stat, "stat output must reference the changed file (README.md)"
     assert diff.changed_files == ["README.md"], (
         f"expected only README.md changed, got {diff.changed_files}"
     )

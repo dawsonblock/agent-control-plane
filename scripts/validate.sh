@@ -8,12 +8,24 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "=== [1/2] compileall ==="
+echo "=== [1/5] compileall ==="
 uv run python -m compileall -q src tests
 echo "PASS"
 
-echo "=== [2/2] pytest ==="
-uv run python -m pytest -q
+echo "=== [2/5] ruff (lint) ==="
+uv run ruff check src/acp tests/
+echo "PASS"
+
+echo "=== [3/5] ruff format (check) ==="
+uv run ruff format --check src/acp tests/
+echo "PASS"
+
+echo "=== [4/5] mypy (type check — strict) ==="
+uv run mypy src/acp
+echo "PASS"
+
+echo "=== [5/5] pytest (with coverage) ==="
+uv run python -m pytest -q --cov=acp --cov-report=term-missing
 echo "PASS"
 
 echo "=== all validations passed ==="

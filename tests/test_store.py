@@ -48,6 +48,7 @@ def test_create_raises_on_duplicate(tmp_path: Path) -> None:
         user_request="first",
     )
     import pytest
+
     with pytest.raises(FileExistsError):
         store.create(
             task_id="task_20260622_0001",
