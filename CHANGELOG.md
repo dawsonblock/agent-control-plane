@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Added — v0.7.2 Architecture Improvements
+
+#### Phase 2: Iterative SQLite Migrations
+- `acp/evidence/migrations.py` — lightweight forward-rolling migration engine
+  using `PRAGMA user_version` (no SQLAlchemy/Alembic dependency)
+- `EVENT_STORE_MIGRATIONS` — immutable migration list for the event store
+  (v0→v1: initial schema, v1→v2: signature_algorithm column)
+- `TASK_STORE_MIGRATIONS` — immutable migration list for the task store
+  (v0→v1: initial schema, v1→v2: orphan_reason column)
+- `run_migrations()` — applies pending migrations in `BEGIN EXCLUSIVE`
+  transactions with automatic rollback on failure
+- `needs_rebuild()` — detects catastrophic corruption (only condition for
+  rebuild_from_jsonl fallback)
+- DurableEventStore and DurableTaskStore now use the migration engine
+  instead of drop-and-rebuild for schema updates
+
+#### Phase 1: Hermetic Agent Isolation
+- `EnvironmentSpec` dataclass in agent_file.py — pins agent dependency tree
+  via lockfile hash (manager, lockfile, dependencies_hash, python_version)
+- `environment` block in agent.yaml schema — optional hermetic isolation spec
+- `verify_environment_hash()` — verifies lockfile hash before execution
+  (fail-closed on mismatch — prevents supply-chain attacks via hijacked deps)
+- `AgentRegistry.verify_environment()` — registry-level environment verification
+- `VenvExecutor` — runs Python agents via `uv run --isolated` in ephemeral venvs
+  (lighter than docker_sbx, stronger than bare worktree mode)
+- `executor.backend="venv"` added to valid backends
+- `agent.started` event now records environment context (backend, uv_version,
+  python_version, isolated flag) for cryptographic evidence trail
+
+#### Phase 3: Persistent & Incremental RAG
+- `HaystackIndexer` persistent mode — JSON-backed document store survives
+  across runs, stored per-repo under `data/context_index/`
+- Incremental indexing via `DigestCache` — unchanged files (same size + mtime)
+  skip re-embedding, making subsequent `acp run` near-instantaneous
+- `repo_index_path()` — deterministic per-repo index directory (SHA-256 of path)
+- `index_stats` property — telemetry: new_files, cached_files, deleted_files,
+  total_files
+- `context.built` event now includes `rag_stats` with cache hit metrics
+- `ContextBuilder` accepts `persist_path` for persistent RAG index
+
+### Added — Build & CI Improvements
 - Ruff linter + formatter configuration (replaces flake8 --select=F)
 - Mypy type checker configuration (lenient baseline, non-blocking in gate)
 - Coverage measurement via pytest-cov (fail_under=75)
@@ -33,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - evidence/durable_task_store.py: `remove_worktree()` missing required `repo_path` argument
 - Import ordering: `from contextlib import asynccontextmanager` moved to top of api/server.py
 - printf-style string formatting replaced with .format() in test
+- gitops/merge.py: `can_fast_forward` now catches `gitdb.exc.BadName` for missing branches
 
 ### Changed
 - Version synced to 0.7.1 across pyproject.toml, __init__.py, README, roadmap, ui/package.json

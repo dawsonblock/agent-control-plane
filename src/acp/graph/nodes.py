@@ -411,15 +411,22 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     context_bundle_path = None
     haystack_active = False
     retrieved_count = 0
+    rag_stats: dict[str, int] | None = None
 
     try:
         from acp.context.context_builder import ContextBuilder
+        from acp.context.haystack_indexer import repo_index_path
+
+        # v0.7.2: Use persistent RAG index for incremental indexing.
+        # The index is stored per-repo under data/context_index/.
+        persist_path = repo_index_path(state["repo_path"])
 
         # 1. Instantiate the RAG engine
         builder = ContextBuilder(
             repo_path=state["repo_path"],
             vault_root=state["vault_root"],
             context_config=cfg.context,
+            persist_path=persist_path,
         )
 
         # 2. Build the markdown context bundle
@@ -434,6 +441,8 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
         haystack_active = True
         # Count the retrieved chunks for the event payload
         retrieved_count = bundle_content.count("## [")
+        # v0.7.2: Record incremental indexing stats for evidence.
+        rag_stats = builder.index_stats
 
     except ImportError:
         # The `rag` extra isn't installed. Gracefully fall back to no-context.
@@ -449,15 +458,16 @@ def build_context_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any
     )
 
     # 5. Record the transition in the cryptographic event log
-    ctx.events.write(
-        EventType.CONTEXT_BUILT,
-        {
-            "prompt_path": str(prompt_path),
-            "haystack": haystack_active,
-            "retrieved_documents": retrieved_count,
-            "context_bundle_path": (str(context_bundle_path) if context_bundle_path else None),
-        },
-    )
+    context_built_payload: dict[str, Any] = {
+        "prompt_path": str(prompt_path),
+        "haystack": haystack_active,
+        "retrieved_documents": retrieved_count,
+        "context_bundle_path": (str(context_bundle_path) if context_bundle_path else None),
+    }
+    # v0.7.2: Include RAG cache stats when available.
+    if haystack_active and rag_stats:
+        context_built_payload["rag_stats"] = rag_stats
+    ctx.events.write(EventType.CONTEXT_BUILT, context_built_payload)
 
     return {
         "prompt_path": prompt_path,
@@ -710,14 +720,64 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
             "worktree_path": state["worktree_path"],
         }
 
+    # --- venv backend: hermetic Python isolation via uv run --isolated ---- #
+    if cfg.executor.backend == "venv":
+        from acp.executor.venv_executor import VenvExecutor
+
+        executor = VenvExecutor(cfg.executor)
+        task.status = TaskStatus.EXECUTING
+        ctx.store.save(task)
+        ctx.events.write(
+            EventType.AGENT_STARTED,
+            {
+                "agent": f"venv:{cfg.executor.agent}",
+                "timeout_seconds": cfg.agent.timeout_seconds,
+                "environment": executor.get_environment_info(),
+            },
+        )
+        agent_result = executor.start(
+            task_id=state["task_id"],
+            prompt_path=state["prompt_path"],
+            repo_path=state["repo_path"],
+            artifact_dir=state["artifacts_dir"],
+            timeout_seconds=cfg.agent.timeout_seconds,
+        )
+        ctx.events.write(
+            EventType.AGENT_FINISHED,
+            {
+                "agent": agent_result.agent_name,
+                "exit_code": agent_result.exit_code,
+                "summary": agent_result.summary,
+            },
+        )
+        _parse_and_emit_subtasks(state, ctx, agent_result)
+        executor.cleanup()
+        return {
+            "agent_result": agent_result,
+            "worktree_path": state["worktree_path"],
+        }
+
     # --- worktree backend (default): current behavior --------------------- #
     agent = ctx.agent_factory(cfg)
     task.status = TaskStatus.EXECUTING
     ctx.store.save(task)
-    ctx.events.write(
-        EventType.AGENT_STARTED,
-        {"agent": agent.name, "timeout_seconds": cfg.agent.timeout_seconds},
-    )
+
+    # v0.7.2: Record environment context in agent.started event for
+    # hermetic isolation evidence. When the agent has an EnvironmentSpec
+    # (from the AgentFile registry), include the locked environment state
+    # in the event payload so the evidence trail proves the agent executed
+    # in the exact, untampered dependency tree.
+    agent_started_payload: dict[str, Any] = {
+        "agent": agent.name,
+        "timeout_seconds": cfg.agent.timeout_seconds,
+    }
+    # If the agent factory produced a CLIAgent with an AgentFile that has
+    # an environment spec, record it in the event.
+    agent_file_env = getattr(agent, "_environment_info", None)
+    if agent_file_env:
+        agent_started_payload["environment"] = agent_file_env
+
+    ctx.events.write(EventType.AGENT_STARTED, agent_started_payload)
     agent_result = agent.run(
         prompt_path=state["prompt_path"],
         worktree_path=state["worktree_path"],

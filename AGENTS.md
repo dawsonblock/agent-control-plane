@@ -55,3 +55,26 @@ bash scripts/validate.sh   # compileall + ruff + ruff format + mypy + pytest --c
 - `acp mission` — manage mission epics
 - `acp serve` — start FastAPI HTTP API server
 - `acp cleanup` — clean up run artifacts
+
+## Architecture (v0.7.2)
+
+### SQLite Migrations
+The durable stores (events + tasks) use a forward-rolling migration engine
+(`acp/evidence/migrations.py`) via `PRAGMA user_version`. Migrations are
+immutable lists of SQL strings — never modify a published migration, only
+append new ones. The JSONL log remains the canonical source of truth;
+`rebuild_from_jsonl` is a fallback for catastrophic corruption only.
+
+### Hermetic Agent Isolation
+Agent files (`*.agent.yaml`) support an optional `environment` block that
+pins the dependency tree via a lockfile hash. When `executor.backend="venv"`,
+agents run via `uv run --isolated` in an ephemeral venv, preventing
+supply-chain attacks via hijacked Python dependencies. The `agent.started`
+event records the locked environment state for cryptographic evidence.
+
+### Persistent RAG
+The Haystack indexer supports persistent, incremental indexing. The vector
+store is saved per-repo under `data/context_index/` and reused across runs.
+Unchanged files (detected via DigestCache) skip re-embedding, making
+subsequent `acp run` commands near-instantaneous for unchanged repos. The
+`context.built` event includes `rag_stats` with cache hit metrics.

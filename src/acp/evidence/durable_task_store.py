@@ -66,7 +66,14 @@ class DurableTaskStore:
         self._conn: sqlite3.Connection | None = None
 
     def init(self) -> None:
-        """Initialize the database schema. Idempotent."""
+        """Initialize the database schema. Idempotent.
+
+        Uses the forward-rolling migration engine (``acp.evidence.migrations``)
+        to apply schema updates via ``PRAGMA user_version``. This avoids the
+        O(N) drop-and-rebuild strategy as the database grows.
+        """
+        from acp.evidence.migrations import TASK_STORE_MIGRATIONS, run_migrations
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -74,23 +81,9 @@ class DurableTaskStore:
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id         TEXT PRIMARY KEY,
-                repo_name       TEXT NOT NULL,
-                repo_path       TEXT NOT NULL,
-                base_branch     TEXT NOT NULL,
-                base_commit_sha TEXT DEFAULT '',
-                task_branch     TEXT NOT NULL,
-                worktree_path   TEXT NOT NULL,
-                user_request    TEXT NOT NULL,
-                status          TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            )
-        """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_repo ON tasks(repo_name)")
+
+        # Run forward-rolling migrations via PRAGMA user_version.
+        run_migrations(self._conn, TASK_STORE_MIGRATIONS, store_name="task_store")
 
     def save(self, task: Task) -> None:
         """Insert or update a task. Idempotent (upsert)."""

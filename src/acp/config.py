@@ -291,7 +291,7 @@ class ExecutorSection(BaseModel):
     @field_validator("backend")
     @classmethod
     def _validate_backend(cls, v: str) -> str:
-        allowed = ("worktree", "docker_sbx", "gvisor", "openhands")
+        allowed = ("worktree", "docker_sbx", "gvisor", "openhands", "venv")
         if v not in allowed:
             raise ValueError(
                 f"executor.backend='{v}' is not valid. Must be one of: {', '.join(allowed)}."

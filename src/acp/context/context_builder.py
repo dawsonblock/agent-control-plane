@@ -47,6 +47,9 @@ class ContextBuilder:
         reranking_config: Optional re-ranking config (v0.7.0). When
             provided and ``enabled`` is True, a cross-encoder re-ranker
             is inserted after the initial vector search.
+        persist_path: Optional path for persistent RAG index (v0.7.2).
+            When set, the index survives across runs and is incrementally
+            updated — unchanged files skip re-embedding.
     """
 
     def __init__(
@@ -55,13 +58,25 @@ class ContextBuilder:
         vault_root: Path,
         context_config: ContextSection,
         reranking_config: RerankingSection | None = None,
+        *,
+        persist_path: Path | None = None,
     ) -> None:
         self.indexer = HaystackIndexer(
             repo_path,
             vault_root,
             context_config,
+            persist_path=persist_path,
         )
         self.reranking_config = reranking_config
+
+    @property
+    def index_stats(self) -> dict[str, int]:
+        """Statistics from the last index build (v0.7.2).
+
+        Includes ``new_files``, ``cached_files``, ``deleted_files``,
+        and ``total_files`` for incremental indexing telemetry.
+        """
+        return self.indexer.index_stats
 
     def get_relevant_docs(
         self,

@@ -74,12 +74,20 @@ class DurableEventStore:
     def init(self) -> None:
         """Initialize the database schema. Idempotent.
 
+        Uses the forward-rolling migration engine (``acp.evidence.migrations``)
+        to apply schema updates via ``PRAGMA user_version``. This avoids the
+        O(N) drop-and-rebuild-from-JSONL strategy as the database grows.
+
         Handles migration from the old single-column primary key schema
         (event_id TEXT PRIMARY KEY) to the composite key schema
-        (PRIMARY KEY (task_id, event_id)). If the old schema is detected,
-        the table is dropped and recreated — the JSONL log is the canonical
-        source, so the SQLite store can be safely rebuilt.
+        (PRIMARY KEY (task_id, event_id)). If the old schema is detected
+        (user_version == 0 but the events table exists with the old PK),
+        the table is dropped once — the JSONL log is the canonical source,
+        so the SQLite store can be safely rebuilt. After that, normal
+        migrations proceed.
         """
+        from acp.evidence.migrations import EVENT_STORE_MIGRATIONS, run_migrations
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -90,6 +98,8 @@ class DurableEventStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
 
         # Check for old schema (event_id as sole PRIMARY KEY) and migrate.
+        # This handles databases created before the migration engine existed
+        # (user_version == 0 but table already present with old PK layout).
         cols = self._conn.execute("PRAGMA table_info(events)").fetchall()
         if cols:
             pk_cols = [c[1] for c in cols if c[5]]  # c[5] is pk flag
@@ -98,22 +108,8 @@ class DurableEventStore:
                 # The JSONL log is canonical; SQLite is a derived index.
                 self._conn.execute("DROP TABLE IF EXISTS events")
 
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                task_id    TEXT NOT NULL,
-                event_id   TEXT NOT NULL,
-                type       TEXT NOT NULL,
-                timestamp  TEXT NOT NULL,
-                payload    TEXT NOT NULL,
-                prev_hash  TEXT NOT NULL,
-                hash       TEXT NOT NULL,
-                signature  TEXT DEFAULT '',
-                PRIMARY KEY (task_id, event_id)
-            )
-        """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp)")
+        # Run forward-rolling migrations via PRAGMA user_version.
+        run_migrations(self._conn, EVENT_STORE_MIGRATIONS, store_name="event_store")
 
     def append(self, event: Event) -> None:
         """Insert one event. Raises if (task_id, event_id) already exists."""
