@@ -213,6 +213,16 @@ def scan_with_trufflehog(
     worktree's git history + working tree. Only verified findings are
     returned.
 
+    **Limitation (v0.7.5):** TruffleHog only verifies its built-in detector
+    patterns. Custom company regexes (e.g., ``IAK-...``) configured via
+    ``review.custom_secret_regexes`` are NOT verified by TruffleHog — they
+    are only checked by the raw regex scanner (:func:`scan_patch`). This
+    means custom regex matches cannot be cryptographically verified as
+    "live" keys. Custom matches are still hard-blocked by the regex scanner,
+    but they may produce false positives that TruffleHog would not. This is
+    a known limitation of the TruffleHog CLI — it does not accept custom
+    detector definitions via command-line flags.
+
     Returns an empty list if TruffleHog finds nothing or is not installed.
     Raises RuntimeError on TruffleHog execution failure (not timeout).
     """

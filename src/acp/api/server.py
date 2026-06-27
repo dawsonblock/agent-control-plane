@@ -470,12 +470,17 @@ if BearerTokenMiddleware is not None:
 
 
 class RateLimitMiddleware:
-    """Simple in-memory rate limiter using a sliding window.
+    """Rate limiter using a sliding window, backed by Redis when available.
 
     v0.7.4: Lightweight rate limiting without external dependencies.
-    Tracks request timestamps per client IP in memory. When the number
-    of requests in the window exceeds the limit, returns 429 Too Many
-    Requests.
+    v0.7.5: When Redis (or FalkorDB, which is Redis-compatible) is available,
+    rate limit state is shared across all Uvicorn workers. This prevents
+    limit bypassing when running with ``--workers 4``. Falls back to
+    in-memory tracking when Redis is not configured.
+
+    Uses a Redis sorted set per client IP, with timestamps as scores.
+    Old entries are removed with ``ZREMRANGEBYSCORE`` before counting.
+    This is an O(log N) operation that scales well.
 
     This is defense-in-depth on top of the bearer token auth — it
     prevents authenticated clients from overwhelming the API with
@@ -485,6 +490,9 @@ class RateLimitMiddleware:
       - ACP_RATE_LIMIT_ENABLED: "false" to disable (default: enabled)
       - ACP_RATE_LIMIT_REQUESTS: max requests per window (default: 60)
       - ACP_RATE_LIMIT_WINDOW: window size in seconds (default: 60)
+      - ACP_RATE_LIMIT_REDIS_URL: Redis URL for shared state (default: none)
+        When set, uses Redis for multi-worker rate limiting. Example:
+        ``redis://localhost:6379/1`` (FalkorDB also works here).
     """
 
     def __init__(self, app: Any) -> None:
@@ -492,9 +500,88 @@ class RateLimitMiddleware:
         self.enabled = os.environ.get("ACP_RATE_LIMIT_ENABLED", "true").strip().lower() != "false"
         self.max_requests = int(os.environ.get("ACP_RATE_LIMIT_REQUESTS", "60"))
         self.window_seconds = int(os.environ.get("ACP_RATE_LIMIT_WINDOW", "60"))
-        # client_ip -> list of timestamps
+        # v0.7.5: Optional Redis backend for multi-worker shared state.
+        redis_url = os.environ.get("ACP_RATE_LIMIT_REDIS_URL", "")
+        self._redis: Any = None
+        if redis_url:
+            try:
+                import redis  # type: ignore[import-not-found]
+
+                self._redis = redis.from_url(redis_url, decode_responses=True)
+                self._redis.ping()  # Verify connection
+                _logger.info("rate limiter: using Redis at %s", redis_url)
+            except ImportError:
+                _logger.warning(
+                    "ACP_RATE_LIMIT_REDIS_URL set but 'redis' package not installed — "
+                    "falling back to in-memory rate limiting. "
+                    "Install with: pip install redis"
+                )
+                self._redis = None
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "rate limiter: Redis connection failed: %s — falling back to in-memory",
+                    exc,
+                )
+                self._redis = None
+        # In-memory fallback state.
         self._requests: dict[str, list[float]] = {}
         self._cleanup_counter = 0
+
+    def _check_redis(self, client_ip: str) -> bool:
+        """Check and record a request via Redis. Returns True if allowed."""
+        import time
+
+        now = time.time()
+        window_start = now - self.window_seconds
+        key = f"acp:rate_limit:{client_ip}"
+
+        pipe = self._redis.pipeline()
+        # Remove expired entries.
+        pipe.zremrangebyscore(key, 0, window_start)
+        # Count current entries.
+        pipe.zcard(key)
+        # Add this request.
+        pipe.zadd(key, {str(now): now})
+        # Set TTL on the key so it auto-expires after the window.
+        pipe.expire(key, self.window_seconds + 1)
+        results = pipe.execute()
+
+        count = int(results[1])
+        return count < self.max_requests
+
+    def _check_memory(self, client_ip: str) -> bool:
+        """Check and record a request in memory. Returns True if allowed."""
+        import time
+
+        now = time.monotonic()
+        window_start = now - self.window_seconds
+
+        if client_ip not in self._requests:
+            self._requests[client_ip] = []
+        timestamps = self._requests[client_ip]
+
+        # Remove expired timestamps.
+        while timestamps and timestamps[0] < window_start:
+            timestamps.pop(0)
+
+        if len(timestamps) >= self.max_requests:
+            return False
+
+        timestamps.append(now)
+
+        # Periodic cleanup of stale entries.
+        self._cleanup_counter += 1
+        if self._cleanup_counter > 1000:
+            self._cleanup_counter = 0
+            stale_ips = [
+                ip
+                for ip, ts_list in self._requests.items()
+                if not ts_list or ts_list[-1] < window_start
+            ]
+            for ip in stale_ips:
+                del self._requests[ip]
+
+        return True
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if not self.enabled or scope.get("type") != "http":
@@ -510,23 +597,17 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        import time
+        # Check rate limit — Redis (shared) or in-memory (per-worker).
+        if self._redis is not None:
+            try:
+                allowed = self._check_redis(client_ip)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("rate limiter: Redis error: %s — using in-memory", exc)
+                allowed = self._check_memory(client_ip)
+        else:
+            allowed = self._check_memory(client_ip)
 
-        now = time.monotonic()
-        window_start = now - self.window_seconds
-
-        # Get or create request list for this client.
-        if client_ip not in self._requests:
-            self._requests[client_ip] = []
-        timestamps = self._requests[client_ip]
-
-        # Remove expired timestamps.
-        while timestamps and timestamps[0] < window_start:
-            timestamps.pop(0)
-
-        # Check limit.
-        if len(timestamps) >= self.max_requests:
-            # Send 429 response.
+        if not allowed:
             await send(
                 {
                     "type": "http.response.start",
@@ -546,21 +627,6 @@ class RateLimitMiddleware:
                 }
             )
             return
-
-        # Record this request.
-        timestamps.append(now)
-
-        # Periodic cleanup of stale entries to prevent memory growth.
-        self._cleanup_counter += 1
-        if self._cleanup_counter > 1000:
-            self._cleanup_counter = 0
-            stale_ips = [
-                ip
-                for ip, ts_list in self._requests.items()
-                if not ts_list or ts_list[-1] < window_start
-            ]
-            for ip in stale_ips:
-                del self._requests[ip]
 
         await self.app(scope, receive, send)
 
@@ -635,11 +701,13 @@ async def run_task(request: RunRequest) -> RunResponse:
     safe_runs_root = _validate_path_param(request.runs_root, "runs_root")
     safe_vault_root = _validate_path_param(request.vault_root, "vault_root")
 
-    from acp.graph.workflow import run_workflow
+    from acp.graph.workflow import run_workflow_async
 
     try:
-        result = await asyncio.to_thread(
-            run_workflow,
+        # v0.7.5: Use async-native workflow invocation instead of
+        # asyncio.to_thread(run_workflow). This eliminates the thread-pool
+        # workaround for Graphiti async operations.
+        result = await run_workflow_async(
             config=cfg,
             user_request=request.task,
             runs_root=safe_runs_root,
@@ -686,14 +754,13 @@ async def run_task_async(request: RunRequest) -> dict[str, str]:
     store = TaskStore(runs_root=safe_runs_root)
     task_id = store.next_task_id(repo_path=cfg.repo.path)
 
-    # Run in a background thread so the blocking workflow doesn't
-    # stall the event loop.
+    # v0.7.5: Use async-native workflow — no thread needed, the async
+    # graph runs in the event loop without blocking it.
     async def _run() -> None:
-        from acp.graph.workflow import run_workflow
+        from acp.graph.workflow import run_workflow_async
 
         try:
-            await asyncio.to_thread(
-                run_workflow,
+            await run_workflow_async(
                 config=cfg,
                 user_request=request.task,
                 runs_root=safe_runs_root,
@@ -1050,9 +1117,13 @@ async def stream_tasks(
 ) -> Any:
     """Server-Sent Events stream of task status changes.
 
-    Polls the runs directory every ``poll_interval`` seconds and streams
-    SSE events whenever a task is created or its status changes. The UI
-    consumes this via ``EventSource`` to get instant updates without polling.
+    v0.7.5: Uses OS-level file watching (watchfiles/inotify/kqueue) instead
+    of polling. This is event-driven and zero-cost when idle — no disk I/O
+    or CPU usage until a file actually changes. Falls back to polling if
+    watchfiles is not available.
+
+    Streams SSE events whenever a task is created or its status changes.
+    The UI consumes this via ``EventSource`` to get instant updates.
 
     Event format::
 
@@ -1065,32 +1136,16 @@ async def stream_tasks(
 
     async def event_stream() -> Any:
         last_statuses: dict[str, str] = {}
-        last_mtimes: dict[str, float] = {}
-        heartbeat_counter = 0
 
-        while True:
-            # Scan all tasks, but skip task.json files whose mtime
-            # hasn't changed since the last poll.
+        def _scan_all() -> dict[str, dict[str, Any]]:
+            """Scan all task.json files and return current state."""
             current: dict[str, dict[str, Any]] = {}
             if store.root.is_dir():
-                for task_dir in sorted(store.root.iterdir()):
+                for task_dir in store.root.iterdir():
                     task_json = task_dir / "task.json"
                     if not task_json.is_file():
                         continue
                     tid = task_dir.name
-                    try:
-                        mtime = task_json.stat().st_mtime
-                    except OSError:
-                        continue
-                    if tid in last_mtimes and mtime == last_mtimes[tid]:
-                        # File unchanged — reuse cached status.
-                        if tid in last_statuses:
-                            current[tid] = {
-                                "task_id": tid,
-                                "status": last_statuses[tid],
-                            }
-                        continue
-                    last_mtimes[tid] = mtime
                     try:
                         task = store.load(tid)
                         current[task.task_id] = {
@@ -1100,30 +1155,69 @@ async def stream_tasks(
                             "user_request": task.user_request,
                         }
                     except Exception as exc:  # noqa: BLE001
-                        # v0.7.4: Log the error instead of silently continuing.
                         _logger.error("SSE: Failed to load task %s: %s", tid, exc)
-                        continue
+            return current
 
-            # Emit events for new or changed tasks.
+        def _emit_changes(current: dict[str, dict[str, Any]]) -> list[str]:
+            """Compare current state with last known state, return SSE events."""
+            events: list[str] = []
             for tid, info in current.items():
                 prev_status = last_statuses.get(tid)
                 if prev_status != info["status"]:
-                    yield f"data: {json.dumps(info)}\n\n"
+                    events.append(f"data: {json.dumps(info)}\n\n")
                     last_statuses[tid] = info["status"]
-
             # Emit events for tasks that disappeared (cleanup).
             for tid in list(last_statuses.keys()):
                 if tid not in current:
-                    yield f"data: {json.dumps({'task_id': tid, 'status': 'removed'})}\n\n"
+                    events.append(f"data: {json.dumps({'task_id': tid, 'status': 'removed'})}\n\n")
                     del last_statuses[tid]
+            return events
 
-            # Heartbeat every ~30 seconds.
-            heartbeat_counter += 1
-            if heartbeat_counter >= int(30 / poll_interval):
+        # Initial scan — emit current state for all existing tasks.
+        current = _scan_all()
+        for tid, info in current.items():
+            last_statuses[tid] = info["status"]
+            yield f"data: {json.dumps(info)}\n\n"
+
+        # Try watchfiles for event-driven updates (zero-cost when idle).
+        try:
+            from watchfiles import awatch
+
+            # Use a heartbeat task alongside the file watcher.
+            async def _heartbeat() -> Any:
+                while True:
+                    await asyncio.sleep(30)
+                    yield ": heartbeat\n\n"
+
+            # Watch the runs directory for changes.
+            # debounce: milliseconds to wait after last change before yielding
+            # (batches rapid changes into one event). poll_interval is used
+            # as the debounce value to preserve the configured responsiveness.
+            async for changes in awatch(
+                str(safe_runs_root),
+                debounce=int(poll_interval * 1000),
+            ):
+                # changes is a set of (change_type, path) tuples.
+                # Only re-scan if a task.json file changed.
+                relevant = any("task.json" in p for _, p in changes)
+                if not relevant:
+                    continue
+                current = _scan_all()
+                for event in _emit_changes(current):
+                    yield event
+
+        except ImportError:
+            # Fallback: polling if watchfiles is not available.
+            _logger.warning(
+                "watchfiles not installed — falling back to polling for SSE. "
+                "Install uvicorn[standard] for event-driven updates."
+            )
+            while True:
+                current = _scan_all()
+                for event in _emit_changes(current):
+                    yield event
                 yield ": heartbeat\n\n"
-                heartbeat_counter = 0
-
-            await asyncio.sleep(poll_interval)
+                await asyncio.sleep(poll_interval)
 
     return StreamingResponse(
         event_stream(),

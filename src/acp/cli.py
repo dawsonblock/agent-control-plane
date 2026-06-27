@@ -1023,6 +1023,160 @@ def cleanup(
         console.print(f"\n[dim]Nothing to clean for task {task_id}.[/]")
 
 
+@app.command()
+def archive(
+    runs_root: Path = typer.Option(
+        Path("data/runs"),
+        "--runs-root",
+        help="Root directory of run data (default: data/runs).",
+    ),
+    older_than_days: int = typer.Option(
+        30,
+        "--older-than",
+        "-n",
+        help="Archive runs older than N days (default: 30).",
+    ),
+    archive_dir: Path = typer.Option(
+        Path("data/archive"),
+        "--archive-dir",
+        help="Directory to store archived runs (default: data/archive).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be archived without actually moving or compressing.",
+    ),
+    compress: bool = typer.Option(
+        True,
+        "--compress/--no-compress",
+        help="Compress archived runs as .tar.gz (default: on).",
+    ),
+    keep: bool = typer.Option(
+        False,
+        "--keep",
+        help="Keep the original run directory after archiving (default: remove).",
+    ),
+) -> None:
+    """Archive old run data to free up disk space.
+
+    v0.7.5: Moves run directories older than ``--older-than`` days from
+    ``data/runs/`` to ``data/archive/`` (or compresses them as .tar.gz).
+    This prevents ``data/runs/`` from growing indefinitely as tasks accumulate.
+
+    The evidence trail is preserved — archived runs can be restored by
+    simply moving them back. When ``--compress`` is on (default), each
+    run is stored as ``<archive_dir>/<task_id>.tar.gz``.
+
+    Use ``--dry-run`` to preview which runs would be archived.
+
+    Skips runs that are not in a terminal status (completed, failed,
+    rejected, merged). In-progress runs are never archived.
+    """
+    import shutil
+    import tarfile
+    from datetime import datetime, timedelta
+
+    if not runs_root.is_dir():
+        console.print(f"[red]✗[/] runs root not found: {runs_root}")
+        raise typer.Exit(code=1)
+
+    cutoff = datetime.now() - timedelta(days=older_than_days)
+    cutoff_ts = cutoff.timestamp()
+
+    # Terminal statuses — only these can be archived.
+    terminal_statuses = {"completed", "failed", "rejected", "merged", "needs_review"}
+
+    candidates: list[tuple[str, Path, float]] = []
+    for task_dir in sorted(runs_root.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        task_json = task_dir / "task.json"
+        if not task_json.is_file():
+            continue
+        try:
+            import json as _json
+
+            task_data = _json.loads(task_json.read_text())
+            status = task_data.get("status", "")
+            if status not in terminal_statuses:
+                continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("archive: skipping %s (cannot read status): %s", task_dir.name, exc)
+            continue
+        try:
+            mtime = task_json.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff_ts:
+            candidates.append((task_dir.name, task_dir, mtime))
+
+    if not candidates:
+        console.print(f"[dim]No runs older than {older_than_days} days to archive.[/]")
+        return
+
+    mode_label = "DRY-RUN" if dry_run else ("COMPRESS" if compress else "MOVE")
+    console.print(
+        f"[bold]ACP archive[/] · mode={mode_label} · older_than={older_than_days}d "
+        f"· archive_dir={archive_dir}"
+    )
+    console.print(f"[dim]Found {len(candidates)} runs to archive:[/]\n")
+
+    archived = 0
+    failed = 0
+    total_freed = 0
+
+    for tid, task_dir, mtime in candidates:
+        age_days = int((datetime.now().timestamp() - mtime) / 86400)
+        size = sum(f.stat().st_size for f in task_dir.rglob("*") if f.is_file())
+        size_label = f"{size / 1024:.0f}KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f}MB"
+
+        if dry_run:
+            console.print(f"  [dim]{tid:<24}  {age_days}d old  {size_label:>8}  (dry-run)[/]")
+            total_freed += size
+            continue
+
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            if compress:
+                archive_path = archive_dir / f"{tid}.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as tar:
+                    tar.add(task_dir, arcname=tid)
+                if not keep:
+                    shutil.rmtree(task_dir)
+                console.print(
+                    f"  [green]✓[/] {tid:<24}  {age_days}d old  {size_label:>8}"
+                    f"  → {archive_path.name}"
+                )
+            else:
+                target = archive_dir / tid
+                shutil.move(str(task_dir), str(target))
+                console.print(
+                    f"  [green]✓[/] {tid:<24}  {age_days}d old  {size_label:>8}  → {target}"
+                )
+
+            total_freed += size
+            archived += 1
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]✗[/] {tid:<24}  failed: {exc}")
+            failed += 1
+
+    if dry_run:
+        console.print(
+            f"\n[dim]Dry-run complete. {len(candidates)} runs ({total_freed / 1024:.0f}KB) "
+            f"would be archived.[/]"
+        )
+    else:
+        freed_label = (
+            f"{total_freed / 1024:.0f}KB"
+            if total_freed < 1024 * 1024
+            else f"{total_freed / 1024 / 1024:.1f}MB"
+        )
+        console.print(
+            f"\n[green]Archived {archived} runs[/] ({freed_label} freed). {failed} failed."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # v0.6.2 (M7): acp memory — Graphiti temporal memory promotion.
 # --------------------------------------------------------------------------- #

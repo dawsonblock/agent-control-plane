@@ -517,6 +517,24 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
     cfg = state["config"]
     task = state["task"]
 
+    # v0.7.5: Security warning when running in worktree mode with shell enabled.
+    # Worktree mode provides no OS-level isolation — a malicious agent with
+    # allow_shell=True can execute arbitrary commands on the host. Warn loudly
+    # so operators know the risk. Consider using docker_sbx, gvisor, or venv.
+    if cfg.executor.backend == "worktree":
+        if getattr(cfg.agent, "allow_shell", False):
+            logger.warning(
+                "SECURITY RISK: executor.backend='worktree' with agent.allow_shell=True "
+                "— agent can execute arbitrary host commands (RCE). "
+                "Consider using docker_sbx, gvisor, or venv for OS-level isolation."
+            )
+        else:
+            logger.info(
+                "executor.backend='worktree' — no OS-level sandboxing. "
+                "Agent has filesystem and network access to the host. "
+                "Use docker_sbx, gvisor, or venv for production workloads."
+            )
+
     # --- docker_sbx backend: run agent inside sandbox, then fetch remote -- #
     if cfg.executor.backend == "docker_sbx":
         executor: Any = SbxExecutor(cfg.executor)

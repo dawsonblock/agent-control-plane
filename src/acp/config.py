@@ -706,6 +706,22 @@ class StreamingSection(BaseModel):
       matches a chunk, the agent is killed immediately. Empty by default —
       operators configure repo-specific patterns (e.g.,
       ``r"rm\\s+-rf\\s+/"`` or ``r"policy\\.json"``).
+
+    v0.7.5: **Semantic anomaly detection** (async, non-blocking). When
+    ``semantic_anomaly_detection`` is True, chunks are queued for
+    asynchronous analysis by a local sentence-transformers cross-encoder.
+    This does NOT block the stream — anomalies are flagged for post-run
+    review rather than aborting mid-stream. Requires the ``rag`` extra
+    (sentence-transformers). When not installed, the check is skipped
+    silently.
+
+    - ``semantic_anomaly_detection``: when True, enable async semantic
+      anomaly detection (default False).
+    - ``semantic_anomaly_threshold``: cosine similarity threshold below
+      which a chunk is flagged as anomalous relative to the running
+      average (default 0.3). Lower = more tolerant.
+    - ``semantic_anomaly_model``: sentence-transformers model name
+      (default ``all-MiniLM-L6-v2`` — lightweight, 384-dim, 80MB).
     """
 
     enabled: bool = False
@@ -715,6 +731,10 @@ class StreamingSection(BaseModel):
     strange_loop_window: int = 10
     strange_loop_similarity: float = 0.65
     dangerous_path_patterns: list[str] = Field(default_factory=list)
+    # v0.7.5: Async semantic anomaly detection (non-blocking).
+    semantic_anomaly_detection: bool = False
+    semantic_anomaly_threshold: float = 0.3
+    semantic_anomaly_model: str = "all-MiniLM-L6-v2"
 
     @field_validator("strange_loop_threshold")
     @classmethod

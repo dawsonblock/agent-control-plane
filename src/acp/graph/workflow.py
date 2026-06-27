@@ -614,3 +614,168 @@ def run_workflow(
         result["durable_store_warnings"] = durable_store_failures
 
     return result
+
+
+async def run_workflow_async(
+    *,
+    config: Any,
+    user_request: str,
+    runs_root: Path | str,
+    vault_root: Path | str,
+    agent_factory: Callable[[Any], AgentProtocol] | None = None,
+    task_id: str | None = None,
+    mission_id: str = "",
+    mission_step_index: int = -1,
+    parent_task_id: str = "",
+    recursion_depth: int = 0,
+) -> dict[str, Any]:
+    """Async version of :func:`run_workflow` for use in async contexts.
+
+    v0.7.5: This is the preferred entry point when calling from an async
+    framework (FastAPI, uvicorn). It uses ``wf.ainvoke()`` instead of
+    ``wf.invoke()``, which allows LangGraph to run async nodes natively
+    without the thread-pool workaround in :func:`_run_async`.
+
+    The setup logic (store init, signing key, durable store wiring) is
+    identical to :func:`run_workflow`. Only the graph invocation differs.
+
+    When the workflow graph contains async nodes (``async def``), LangGraph
+    will execute them concurrently where possible. When all nodes are sync,
+    ``ainvoke`` simply runs them in the event loop without blocking it.
+    """
+    # v0.7.0 (Phase 1.1): Wire SQLite-as-primary if configured.
+    evidence_cfg = getattr(config, "evidence", None)
+    durable_task_store = None
+    if (
+        evidence_cfg
+        and evidence_cfg.durable_store
+        and evidence_cfg.durable_mode != DurableMode.DISABLED
+    ):
+        from acp.evidence.durable_task_store import DurableTaskStore
+
+        durable_task_store = DurableTaskStore(evidence_cfg.durable_store)
+        durable_task_store.init()
+    store = TaskStore(
+        runs_root=runs_root,
+        durable_store=durable_task_store,
+        primary=evidence_cfg.task_store_primary if evidence_cfg else "json",
+    )
+    Path(vault_root).mkdir(parents=True, exist_ok=True)
+    events = EventWriter("__pending__", store.root / "__pending__")
+
+    # Wire signing key if configured.
+    if evidence_cfg and evidence_cfg.signing_key_path:
+        from acp.errors import EvidenceConfigError
+
+        try:
+            key_bytes = evidence_cfg.signing_key_path.read_bytes()
+        except OSError as exc:
+            raise EvidenceConfigError(
+                f"signing key file not readable: {evidence_cfg.signing_key_path} ({exc})"
+            ) from exc
+        algorithm = evidence_cfg.signature_algorithm
+        expected_sizes = {"ed25519": 32, "mldsa44": 2560, "mldsa65": 4032, "mldsa87": 4896}
+        expected = expected_sizes.get(algorithm, 32)
+        if len(key_bytes) != expected:
+            raise EvidenceConfigError(
+                f"signing key file for {algorithm} must be exactly {expected} bytes, "
+                f"got {len(key_bytes)}: {evidence_cfg.signing_key_path}"
+            )
+        try:
+            events.set_signing_key(key_bytes, algorithm=algorithm)
+        except ImportError as exc:
+            if algorithm == "ed25519":
+                raise EvidenceConfigError(
+                    "signing is configured but the 'cryptography' package is not "
+                    "installed — refusing to run unsigned. "
+                    "Install with: uv sync --extra crypto"
+                ) from exc
+            else:
+                raise EvidenceConfigError(
+                    f"{algorithm} signing requires cryptography>=49 with ML-DSA "
+                    "support — refusing to run unsigned. "
+                    "Install with: uv sync --extra mldsa"
+                ) from exc
+
+    # Wire durable store if configured (same as sync version).
+    durable_store = None
+    durable_store_failures: list[str] = []
+    durable_mode = "best_effort"
+    if evidence_cfg:
+        durable_mode = (
+            evidence_cfg.durable_mode.value
+            if hasattr(evidence_cfg.durable_mode, "value")
+            else str(evidence_cfg.durable_mode)
+        )
+
+    if evidence_cfg and evidence_cfg.durable_store and durable_mode != "disabled":
+        try:
+            from acp.evidence.durable_store import DurableEventStore
+
+            durable_store = DurableEventStore(evidence_cfg.durable_store)
+            durable_store.init()
+            original_write = events.write
+
+            def _dual_write(type: EventType, payload: dict[str, Any] | None = None) -> Event:
+                evt = original_write(type, payload)
+                try:
+                    durable_store.append(evt)
+                except Exception as exc:  # noqa: BLE001
+                    durable_store_failures.append(f"{evt.event_id} ({evt.type.value}): {exc}")
+                    if durable_mode == "required":
+                        raise
+                return evt
+
+            events.write = _dual_write  # type: ignore[method-assign]
+        except Exception as exc:
+            durable_store_failures.append(f"init: {exc}")
+            if durable_mode == "required":
+                from acp.errors import EvidenceConfigError
+
+                raise EvidenceConfigError(
+                    f"durable store initialization failed (required mode): {exc}"
+                ) from exc
+
+    # v0.7.4: Durable checkpointing.
+    checkpoint_db_path = None
+    if evidence_cfg and evidence_cfg.checkpoint_store:
+        checkpoint_db_path = evidence_cfg.checkpoint_store
+
+    wf = build_workflow(
+        store=store,
+        events=events,
+        agent_factory=agent_factory,
+        checkpoint_db_path=checkpoint_db_path,
+    )
+
+    state: dict[str, Any] = {
+        "config": config,
+        "user_request": user_request,
+        "vault_root": Path(vault_root),
+        "runs_root": Path(runs_root),
+    }
+    if task_id is not None:
+        state["preallocated_task_id"] = task_id
+    if mission_id:
+        state["mission_id"] = mission_id
+        state["mission_step_index"] = mission_step_index
+        state["parent_task_id"] = parent_task_id
+    state["recursion_depth"] = recursion_depth
+
+    import uuid
+
+    thread_id = task_id if task_id else f"acp-run-{uuid.uuid4().hex[:8]}"
+    # v0.7.5: Use ainvoke for async-native execution.
+    result: dict[str, Any] = await wf.ainvoke(
+        state, config={"configurable": {"thread_id": thread_id}}
+    )
+
+    if durable_store is not None:
+        durable_store.close()
+    if durable_task_store is not None:
+        durable_task_store.close()
+
+    if durable_store_failures:
+        result["durable_store_warnings"] = durable_store_failures
+
+    return result

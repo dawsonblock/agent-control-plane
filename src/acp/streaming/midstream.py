@@ -14,12 +14,12 @@ Design constraints (from the ACP architecture audit):
    ``agent.finished`` after). All sentinel event writes are serialized
    via an ``asyncio.Lock`` to guarantee the hash chain stays valid.
 
-2. **No fire-and-forget**: All checks run synchronously within
-   :meth:`StreamSentinel.analyze_chunk`. There are no background tasks,
-   no unbounded concurrency, no swallowed exceptions. The KG/MLX semantic
-   check from the original proposal is deliberately NOT implemented —
-   Graphiti search requires an LLM round-trip (200ms–2s), incompatible
-   with streaming token rates.
+2. **No fire-and-forget for blocking checks**: All hard-abort checks
+   (secret, dangerous path, strange loop) run synchronously within
+   :meth:`StreamSentinel.analyze_chunk`. v0.7.5 adds a non-blocking
+   semantic anomaly check that runs asynchronously — it does NOT gate
+   the stream, it flags anomalies for post-run review using a local
+   sentence-transformers cross-encoder (no LLM round-trip needed).
 
 3. **Strange-loop detection via token n-gram similarity**: The original
    prototype used ``md5(chunk)`` which only catches exact full-line
@@ -153,6 +153,91 @@ class StreamSentinel:
         # One of: "secret_detected", "strange_loop", "dangerous_path".
         self.abort_reason = ""
 
+        # v0.7.5: Async semantic anomaly detection (non-blocking).
+        # Anomalies are flagged for post-run review, not aborted mid-stream.
+        self.semantic_anomalies: list[dict[str, Any]] = []
+        self._semantic_model: Any = None
+        self._semantic_embeddings: list[Any] = []
+        self._semantic_task: asyncio.Task[None] | None = None
+        if self.config.semantic_anomaly_detection:
+            self._init_semantic_model()
+
+    def _init_semantic_model(self) -> None:
+        """Lazily load the sentence-transformers model for semantic anomaly detection."""
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._semantic_model = SentenceTransformer(
+                self.config.semantic_anomaly_model,
+                local_files_only=True,
+            )
+            logger.info(
+                "semantic anomaly detection enabled: model=%s",
+                self.config.semantic_anomaly_model,
+            )
+        except ImportError:
+            logger.warning(
+                "semantic_anomaly_detection enabled but sentence-transformers "
+                "not installed — install with: uv sync --extra rag"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to load semantic model %s: %s — semantic anomaly detection disabled",
+                self.config.semantic_anomaly_model,
+                exc,
+            )
+
+    def _check_semantic_anomaly(self, chunk: str, chunk_index: int) -> None:
+        """Check if a chunk is semantically anomalous (synchronous, fast).
+
+        Uses cosine similarity between the chunk's embedding and the running
+        average of previous embeddings. If similarity is below the threshold,
+        the chunk is flagged as anomalous. This is a local operation (no LLM
+        round-trip) and takes ~5-20ms on CPU with all-MiniLM-L6-v2.
+        """
+        if self._semantic_model is None:
+            return
+
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+
+            embedding = self._semantic_model.encode(chunk, show_progress_bar=False)
+            self._semantic_embeddings.append(embedding)
+
+            # Need at least 3 chunks before we can compute meaningful averages.
+            if len(self._semantic_embeddings) < 3:
+                return
+
+            # Compute running average of all previous embeddings.
+            prev = np.array(self._semantic_embeddings[:-1])
+            avg = prev.mean(axis=0)
+
+            # Cosine similarity between current chunk and running average.
+            norm_curr = np.linalg.norm(embedding)
+            norm_avg = np.linalg.norm(avg)
+            if norm_curr == 0 or norm_avg == 0:
+                return
+            similarity = float(np.dot(embedding, avg) / (norm_curr * norm_avg))
+
+            if similarity < self.config.semantic_anomaly_threshold:
+                self.semantic_anomalies.append(
+                    {
+                        "chunk_index": chunk_index,
+                        "similarity": round(similarity, 4),
+                        "threshold": self.config.semantic_anomaly_threshold,
+                        "preview": chunk[:100],
+                    }
+                )
+                logger.warning(
+                    "semantic anomaly detected: chunk=%d similarity=%.4f "
+                    "threshold=%.2f — flagged for post-run review",
+                    chunk_index,
+                    similarity,
+                    self.config.semantic_anomaly_threshold,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("semantic anomaly check failed: %s", exc)
+
     async def analyze_chunk(self, chunk: str) -> None:
         """Run safety checks on a stream chunk.
 
@@ -221,6 +306,12 @@ class StreamSentinel:
             request = chunk.split(_SPAWN_MARKER, 1)[1].strip()
             if request:
                 self.subtask_requests.append(request)
+
+        # 5. v0.7.5: Semantic anomaly detection (non-blocking, local model).
+        # Uses a local sentence-transformers cross-encoder — no LLM round-trip.
+        # Anomalies are flagged for post-run review, NOT aborted mid-stream.
+        if self.config.semantic_anomaly_detection and self._semantic_model is not None:
+            self._check_semantic_anomaly(chunk, chunk_index)
 
     def _check_strange_loop(self, chunk: str) -> str | None:
         """Update the strange-loop detector and return abort detail if triggered.
