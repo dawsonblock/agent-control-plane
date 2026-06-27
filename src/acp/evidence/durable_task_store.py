@@ -236,8 +236,8 @@ class DurableTaskStore:
             raise RuntimeError("DurableTaskStore not initialized — call .init() first")
 
         self._conn.execute(
-            "UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?",
-            (TaskStatus.FAILED.value, _now_iso(), task_id),
+            "UPDATE tasks SET status = ?, updated_at = ?, orphan_reason = ? WHERE task_id = ?",
+            (TaskStatus.FAILED.value, _now_iso(), reason, task_id),
         )
 
     def recover_orphaned_tasks(
@@ -269,8 +269,8 @@ class DurableTaskStore:
                 task.touch()
                 store.save(task)
 
-                # Update SQLite.
-                self.save(task)
+                # Update SQLite with orphan_reason.
+                self.mark_orphaned(task.task_id, reason="orphaned by server restart")
 
                 # Clean up worktree if it exists.
                 wt_path = task.worktree_path
@@ -383,6 +383,34 @@ class DurableTaskStore:
                 )
                 if on_breach is not None:
                     on_breach(task_id, json_status, sqlite_status)
+
+        # Reverse check: task.json files with no corresponding SQLite entry.
+        sqlite_ids = {row[0] for row in rows}
+        if runs_root.is_dir():
+            for task_json in sorted(runs_root.rglob("task.json")):
+                task_id = task_json.parent.name
+                if task_id in sqlite_ids:
+                    continue
+                try:
+                    task = Task.model_validate_json(task_json.read_text())
+                    json_status = task.status.value
+                except Exception as exc:  # noqa: BLE001
+                    json_status = f"(parse error: {exc})"
+                breaches.append(
+                    {
+                        "task_id": task_id,
+                        "json_status": json_status,
+                        "sqlite_status": "(missing)",
+                    }
+                )
+                logger.warning(
+                    "integrity breach: task %s — in task.json but "
+                    "missing from SQLite, json status=%s",
+                    task_id,
+                    json_status,
+                )
+                if on_breach is not None:
+                    on_breach(task_id, json_status, "(missing)")
 
         return breaches
 

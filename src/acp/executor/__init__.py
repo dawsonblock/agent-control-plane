@@ -24,5 +24,12 @@ from acp.executor.gvisor import GvisorExecutor
 from acp.executor.openhands import OpenHandsExecutor
 from acp.executor.protocol import Executor
 from acp.executor.sbx import SbxExecutor
+from acp.executor.venv_executor import VenvExecutor
 
-__all__ = ["Executor", "SbxExecutor", "OpenHandsExecutor", "GvisorExecutor"]
+__all__ = [
+    "Executor",
+    "SbxExecutor",
+    "OpenHandsExecutor",
+    "GvisorExecutor",
+    "VenvExecutor",
+]

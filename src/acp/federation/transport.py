@@ -137,6 +137,7 @@ class StdioTransport:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self._proc.kill()
+            self._proc.wait(timeout=5)
         except Exception:  # noqa: BLE001
             pass
         finally:

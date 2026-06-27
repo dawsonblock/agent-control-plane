@@ -726,6 +726,36 @@ def run_agent_node(state: dict[str, Any], ctx: NodeContext) -> dict[str, Any]:
         from acp.executor.venv_executor import VenvExecutor
 
         executor = VenvExecutor(cfg.executor)
+
+        # v0.7.2: Verify environment hash before hermetic execution.
+        # This is the security gate that prevents supply-chain attacks
+        # via hijacked dependency lockfiles.
+        try:
+            from acp.agents.agent_file import (
+                AgentConfigError,
+                verify_environment_hash,
+            )
+            from acp.agents.registry import get_agent_file
+
+            agent_file = get_agent_file(cfg)
+            if agent_file:
+                verify_environment_hash(agent_file, state["repo_path"])
+        except (FileNotFoundError, AgentConfigError) as exc:
+            ctx.events.write(
+                EventType.NODE_FAILED,
+                {
+                    "node": "run_agent",
+                    "reason": "environment hash verification failed",
+                    "detail": str(exc),
+                },
+            )
+            task.status = TaskStatus.FAILED
+            ctx.store.save(task)
+            return {
+                "status": TaskStatus.FAILED,
+                "error": "environment hash verification failed",
+            }
+
         task.status = TaskStatus.EXECUTING
         ctx.store.save(task)
         ctx.events.write(

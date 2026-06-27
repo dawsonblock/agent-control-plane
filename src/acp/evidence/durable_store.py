@@ -107,7 +107,15 @@ class DurableEventStore:
             if pk_cols == ["event_id"]:
                 # Old schema — drop and recreate with composite key.
                 # The JSONL log is canonical; SQLite is a derived index.
-                self._conn.execute("DROP TABLE IF EXISTS events")
+                # Use a transaction so the drop is atomic. If the drop
+                # fails, we roll back and don't proceed to migrations.
+                self._conn.execute("BEGIN EXCLUSIVE")
+                try:
+                    self._conn.execute("DROP TABLE IF EXISTS events")
+                    self._conn.execute("COMMIT")
+                except Exception:
+                    self._conn.execute("ROLLBACK")
+                    raise
 
         # Run forward-rolling migrations via the schema_versions table.
         run_migrations(self._conn, EVENT_STORE_MIGRATIONS, store_name="event_store")
